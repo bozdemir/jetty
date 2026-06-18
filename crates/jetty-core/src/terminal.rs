@@ -71,15 +71,75 @@ impl Terminal {
     }
 }
 
-/// Map an alacritty cell color to RGB. Named/indexed colors get sane fallbacks;
-/// true-color (Spec) is used directly. Full palette mapping arrives with theming.
+/// The 16 standard ANSI colors (xterm defaults), palette indices 0..=15.
+const ANSI_16: [[u8; 3]; 16] = [
+    [0, 0, 0],       // 0  black
+    [205, 0, 0],     // 1  red
+    [0, 205, 0],     // 2  green
+    [205, 205, 0],   // 3  yellow
+    [0, 0, 238],     // 4  blue
+    [205, 0, 205],   // 5  magenta
+    [0, 205, 205],   // 6  cyan
+    [229, 229, 229], // 7  white
+    [127, 127, 127], // 8  bright black
+    [255, 0, 0],     // 9  bright red
+    [0, 255, 0],     // 10 bright green
+    [255, 255, 0],   // 11 bright yellow
+    [92, 92, 255],   // 12 bright blue
+    [255, 0, 255],   // 13 bright magenta
+    [0, 255, 255],   // 14 bright cyan
+    [255, 255, 255], // 15 bright white
+];
+
+/// Convert a 256-color palette index to RGB (standard xterm scheme):
+/// 0..=15 standard, 16..=231 the 6x6x6 cube, 232..=255 the grayscale ramp.
+fn index_to_rgb(i: u8) -> [u8; 3] {
+    match i {
+        0..=15 => ANSI_16[i as usize],
+        16..=231 => {
+            let c = i - 16;
+            let levels = [0u8, 95, 135, 175, 215, 255];
+            [
+                levels[(c / 36) as usize],
+                levels[((c % 36) / 6) as usize],
+                levels[(c % 6) as usize],
+            ]
+        }
+        232..=255 => {
+            let v = 8 + (i - 232) * 10;
+            [v, v, v]
+        }
+    }
+}
+
+/// Map an alacritty cell color to RGB: true-color is exact; named and indexed
+/// colors resolve through the standard ANSI / xterm-256 palette.
 fn resolve_rgb(color: alacritty_terminal::vte::ansi::Color) -> [u8; 3] {
     use alacritty_terminal::vte::ansi::{Color, NamedColor};
     match color {
         Color::Spec(rgb) => [rgb.r, rgb.g, rgb.b],
-        Color::Named(NamedColor::Background) => [18, 18, 23],
-        Color::Named(NamedColor::Foreground) => [220, 220, 220],
-        Color::Named(_) => [220, 220, 220],
-        Color::Indexed(_) => [220, 220, 220],
+        Color::Indexed(i) => index_to_rgb(i),
+        Color::Named(n) => match n {
+            NamedColor::Background => [18, 18, 23],
+            NamedColor::Foreground | NamedColor::BrightForeground => [220, 220, 220],
+            NamedColor::Black => index_to_rgb(0),
+            NamedColor::Red => index_to_rgb(1),
+            NamedColor::Green => index_to_rgb(2),
+            NamedColor::Yellow => index_to_rgb(3),
+            NamedColor::Blue => index_to_rgb(4),
+            NamedColor::Magenta => index_to_rgb(5),
+            NamedColor::Cyan => index_to_rgb(6),
+            NamedColor::White => index_to_rgb(7),
+            NamedColor::BrightBlack => index_to_rgb(8),
+            NamedColor::BrightRed => index_to_rgb(9),
+            NamedColor::BrightGreen => index_to_rgb(10),
+            NamedColor::BrightYellow => index_to_rgb(11),
+            NamedColor::BrightBlue => index_to_rgb(12),
+            NamedColor::BrightMagenta => index_to_rgb(13),
+            NamedColor::BrightCyan => index_to_rgb(14),
+            NamedColor::BrightWhite => index_to_rgb(15),
+            // Dim*/Cursor and any future variants: approximate with default fg.
+            _ => [220, 220, 220],
+        },
     }
 }
