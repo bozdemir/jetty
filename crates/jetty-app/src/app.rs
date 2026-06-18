@@ -51,7 +51,7 @@ impl ApplicationHandler<()> for App {
         let window = jetty_platform::build_window(event_loop, "Jetty", (1000, 640));
         let size = window.inner_size();
         let gpu = GpuContext::new(window.clone(), size.width, size.height);
-        let text = TextLayer::new(&gpu, 16.0);
+        let text = TextLayer::new(&gpu.device, &gpu.queue, gpu.format, 16.0);
 
         let pty = PtySession::spawn(COLS as u16, ROWS as u16).expect("pty");
         let writer = pty.writer();

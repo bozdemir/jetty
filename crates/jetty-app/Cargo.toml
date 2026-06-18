@@ -8,3 +8,6 @@ jetty-core = { path = "../jetty-core" }
 jetty-render = { path = "../jetty-render" }
 jetty-platform = { path = "../jetty-platform" }
 winit = "0.30"
+pollster = "0.4"
+wgpu = "29.0"
+png = "0.17"

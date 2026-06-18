@@ -26,7 +26,7 @@ pub struct TextLayer {
 }
 
 impl TextLayer {
-    pub fn new(gpu: &GpuContext, font_size: f32) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, font_size: f32) -> Self {
         let mut font_system = FontSystem::new();
         // Insurance: make sure user-installed fonts (e.g. ~/.local/share/fonts,
         // where MesloLGS NF lives) are in the database, not only the fontconfig
@@ -37,11 +37,11 @@ impl TextLayer {
                 .load_fonts_dir(format!("{home}/.local/share/fonts"));
         }
         let swash = SwashCache::new();
-        let cache = Cache::new(&gpu.device);
-        let viewport = Viewport::new(&gpu.device, &cache);
-        let mut atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.format);
+        let cache = Cache::new(device);
+        let viewport = Viewport::new(device, &cache);
+        let mut atlas = TextAtlas::new(device, queue, &cache, format);
         let renderer =
-            TextRenderer::new(&mut atlas, &gpu.device, MultisampleState::default(), None);
+            TextRenderer::new(&mut atlas, device, MultisampleState::default(), None);
 
         let line_height = (font_size * 1.3).ceil();
         let metrics = Metrics::new(font_size, line_height);
@@ -89,15 +89,15 @@ impl TextLayer {
         let _ = gpu; // size not used for wrapping; viewport is updated per-frame
     }
 
-    /// Clears the frame to the terminal background color and renders the grid text.
-    ///
-    /// Returns `Err(PrepareError)` if glyphon cannot prepare the atlas
-    /// (e.g., atlas full). Frame-acquisition failures (surface lost / occluded)
-    /// are handled internally by `GpuContext::acquire_frame` and silently skip
-    /// the frame — `wgpu::SurfaceError` no longer exists in wgpu 29.
-    pub fn render(
+    /// Renders the terminal grid to an arbitrary TextureView (offscreen or on-screen).
+    /// Does NOT acquire a surface frame and does NOT present — the caller controls that.
+    pub fn render_to(
         &mut self,
-        gpu: &mut GpuContext,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
         snapshot: &GridSnapshot,
     ) -> Result<(), PrepareError> {
         // Build per-cell color spans: one (&str slice, Attrs) pair per cell.
@@ -144,16 +144,13 @@ impl TextLayer {
             None,
         );
 
-        self.viewport.update(
-            &gpu.queue,
-            Resolution { width: gpu.config.width, height: gpu.config.height },
-        );
+        self.viewport.update(queue, Resolution { width, height });
 
         let win_bounds = TextBounds {
             left: 0,
             top: 0,
-            right: gpu.config.width as i32,
-            bottom: gpu.config.height as i32,
+            right: width as i32,
+            bottom: height as i32,
         };
 
         let text_area = TextArea {
@@ -183,8 +180,8 @@ impl TextLayer {
             };
 
             self.renderer.prepare(
-                &gpu.device,
-                &gpu.queue,
+                device,
+                queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
@@ -193,8 +190,8 @@ impl TextLayer {
             )?;
         } else {
             self.renderer.prepare(
-                &gpu.device,
-                &gpu.queue,
+                device,
+                queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
@@ -203,18 +200,13 @@ impl TextLayer {
             )?;
         }
 
-        let Some((frame, view)) = gpu.acquire_frame() else {
-            return Ok(());
-        };
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("text") });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("text") });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("text-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -236,7 +228,25 @@ impl TextLayer {
                 eprintln!("jetty: text render error: {e:?}");
             }
         }
-        gpu.queue.submit(Some(encoder.finish()));
+        queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    /// Clears the frame to the terminal background color and renders the grid text.
+    ///
+    /// Returns `Err(PrepareError)` if glyphon cannot prepare the atlas
+    /// (e.g., atlas full). Frame-acquisition failures (surface lost / occluded)
+    /// are handled internally by `GpuContext::acquire_frame` and silently skip
+    /// the frame — `wgpu::SurfaceError` no longer exists in wgpu 29.
+    pub fn render(
+        &mut self,
+        gpu: &mut GpuContext,
+        snapshot: &GridSnapshot,
+    ) -> Result<(), PrepareError> {
+        let Some((frame, view)) = gpu.acquire_frame() else {
+            return Ok(());
+        };
+        self.render_to(&gpu.device, &gpu.queue, &view, gpu.config.width, gpu.config.height, snapshot)?;
         frame.present();
         Ok(())
     }
