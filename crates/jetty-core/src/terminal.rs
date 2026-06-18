@@ -99,6 +99,13 @@ impl Terminal {
             .map(|p| (p.line.min(self.rows.saturating_sub(1)), p.column.0.min(self.cols.saturating_sub(1))))
             .unwrap_or((0, 0));
 
+        // Scrollbar data: display_offset is how many lines we're scrolled up
+        // (0 = at bottom). history_size() is the number of lines in the scrollback
+        // buffer (total_lines - screen_lines), which is the maximum scroll offset.
+        let grid = self.term.grid();
+        let scroll_offset = grid.display_offset();
+        let scroll_max = grid.history_size();
+
         GridSnapshot {
             cols: self.cols,
             rows: self.rows,
@@ -107,6 +114,8 @@ impl Terminal {
             cursor_col,
             bg_rgba: self.theme.bg,
             cursor_rgb: self.theme.cursor,
+            scroll_offset,
+            scroll_max,
         }
     }
 

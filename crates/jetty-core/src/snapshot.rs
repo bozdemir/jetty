@@ -22,6 +22,11 @@ pub struct GridSnapshot {
     pub bg_rgba: [u8; 4],
     /// Cursor block color — set from the theme.
     pub cursor_rgb: [u8; 3],
+    /// How many lines the view is currently scrolled up (0 = at the bottom).
+    pub scroll_offset: usize,
+    /// Maximum scroll offset = number of lines in scrollback history.
+    /// 0 means no scrollback (no scrollbar should be drawn).
+    pub scroll_max: usize,
 }
 
 impl GridSnapshot {

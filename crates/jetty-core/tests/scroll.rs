@@ -1,6 +1,23 @@
 /// Tests for scrollback history and vertical scrolling.
 use jetty_core::Terminal;
 
+#[test]
+fn snapshot_scroll_offset_and_max_after_scroll_up() {
+    // 20 cols, 5 rows, feed 10 lines so scrollback history is non-empty.
+    let mut term = make_term_with_lines(20, 5, 10);
+
+    // At the bottom, scroll_offset should be 0 and scroll_max > 0.
+    let snap_bottom = term.snapshot();
+    assert_eq!(snap_bottom.scroll_offset, 0, "at bottom, scroll_offset must be 0");
+    assert!(snap_bottom.scroll_max > 0, "expected non-zero scroll_max after feeding 10 lines into 5-row terminal");
+
+    // After scrolling up, scroll_offset must be > 0.
+    term.scroll_lines(3);
+    let snap_up = term.snapshot();
+    assert!(snap_up.scroll_offset > 0, "scroll_offset should be > 0 after scrolling up");
+    assert!(snap_up.scroll_max > 0, "scroll_max should remain > 0 while scrolled up");
+}
+
 /// Feed N numbered lines to the terminal and return a terminal with the
 /// screen sized to `cols x rows`.
 fn make_term_with_lines(cols: usize, rows: usize, count: usize) -> Terminal {

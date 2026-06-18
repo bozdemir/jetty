@@ -20,11 +20,31 @@ pub struct App {
     terminal: Terminal,
     pty: Option<PtySession>,
     writer: Option<Box<dyn Write + Send>>,
+    /// Index into jetty_core::theme::PRESETS for the current theme.
+    theme_idx: usize,
+    /// Background opacity (0.0..=1.0); modifies theme bg alpha at runtime.
+    opacity: f32,
+    /// Track held modifier keys so Ctrl+Shift combos can be detected.
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 impl App {
     pub fn new(proxy: EventLoopProxy<()>) -> Self {
-        App {
+        // Resolve initial theme index from JETTY_THEME env var.
+        let theme_name = std::env::var("JETTY_THEME").unwrap_or_default();
+        let theme_idx = jetty_core::theme::PRESETS
+            .iter()
+            .position(|&n| n == theme_name.as_str())
+            .unwrap_or(0);
+
+        // Resolve initial opacity from JETTY_OPACITY env var.
+        let opacity = std::env::var("JETTY_OPACITY")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+
+        let mut app = App {
             proxy,
             window: None,
             gpu: None,
@@ -32,7 +52,22 @@ impl App {
             terminal: Terminal::new(COLS, ROWS),
             pty: None,
             writer: None,
-        }
+            theme_idx,
+            opacity,
+            modifiers: winit::keyboard::ModifiersState::empty(),
+        };
+        // Apply the initial theme+opacity so Terminal::new env defaults are
+        // overridden by our managed state (avoids double-reads from env).
+        app.apply_theme();
+        app
+    }
+
+    /// Build the current theme from `theme_idx`, apply `opacity` to its bg
+    /// alpha, and push it into the terminal.
+    fn apply_theme(&mut self) {
+        let mut t = jetty_core::Theme::by_name(jetty_core::theme::PRESETS[self.theme_idx]);
+        t.bg[3] = (self.opacity.clamp(0.0, 1.0) * 255.0) as u8;
+        self.terminal.set_theme(t);
     }
 
     fn drain_pty(&mut self) {
@@ -87,6 +122,9 @@ impl ApplicationHandler<()> for App {
                     text.resize(gpu);
                 }
             }
+            WindowEvent::ModifiersChanged(m) => {
+                self.modifiers = m.state();
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Positive y = wheel up = scroll into history (older output).
                 let lines = match delta {
@@ -105,6 +143,40 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                // --- Ctrl+Shift hotkeys (theme switch + opacity adjust) ---
+                // Must be checked BEFORE PageUp/Down and before key_to_bytes so
+                // the intercept key is not also forwarded to the PTY.
+                if self.modifiers.control_key() && self.modifiers.shift_key() {
+                    match &event.logical_key {
+                        Key::Character(s) if s == "t" || s == "T" => {
+                            self.theme_idx = (self.theme_idx + 1)
+                                % jetty_core::theme::PRESETS.len();
+                            self.apply_theme();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        Key::Character(s) if s == "+" || s == "=" => {
+                            self.opacity = (self.opacity + 0.05).min(1.0);
+                            self.apply_theme();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        Key::Character(s) if s == "-" || s == "_" => {
+                            self.opacity = (self.opacity - 0.05).max(0.1);
+                            self.apply_theme();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
                 // PageUp/Down scroll the terminal without sending to the PTY.
                 match &event.logical_key {
                     Key::Named(NamedKey::PageUp) => {

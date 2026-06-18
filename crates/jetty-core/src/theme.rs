@@ -1,3 +1,7 @@
+/// Ordered list of built-in theme preset names. Indices are stable so they
+/// can be used as `theme_idx` in the app state (Ctrl+Shift+T cycles through).
+pub const PRESETS: [&str; 4] = ["default_dark", "gruvbox_dark", "solarized_dark", "light"];
+
 /// Terminal color theme: background, foreground, cursor, and the 16-color ANSI palette.
 #[derive(Clone, Debug)]
 pub struct Theme {
