@@ -6,6 +6,10 @@ use glyphon::{
 use jetty_core::GridSnapshot;
 use wgpu::MultisampleState;
 
+/// The terminal font. Matches the user's Konsole profile: MesloLGS NF — a Nerd
+/// Font, so the zsh prompt's powerline/icon glyphs render correctly.
+const FONT_FAMILY: &str = "MesloLGS NF";
+
 pub struct TextLayer {
     font_system: FontSystem,
     swash: SwashCache,
@@ -24,6 +28,14 @@ pub struct TextLayer {
 impl TextLayer {
     pub fn new(gpu: &GpuContext, font_size: f32) -> Self {
         let mut font_system = FontSystem::new();
+        // Insurance: make sure user-installed fonts (e.g. ~/.local/share/fonts,
+        // where MesloLGS NF lives) are in the database, not only the fontconfig
+        // defaults that FontSystem::new() scans.
+        if let Ok(home) = std::env::var("HOME") {
+            font_system
+                .db_mut()
+                .load_fonts_dir(format!("{home}/.local/share/fonts"));
+        }
         let swash = SwashCache::new();
         let cache = Cache::new(&gpu.device);
         let viewport = Viewport::new(&gpu.device, &cache);
@@ -40,7 +52,7 @@ impl TextLayer {
         // Cursor buffer: a single full-block glyph used to draw the block cursor.
         let mut cursor_buffer = Buffer::new(&mut font_system, metrics);
         cursor_buffer.set_size(&mut font_system, None, None);
-        let cursor_attrs = Attrs::new().family(Family::Monospace);
+        let cursor_attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
         cursor_buffer.set_text(
             &mut font_system,
             "\u{2588}",
@@ -116,12 +128,12 @@ impl TextLayer {
             .map(|(s, e, color)| {
                 (
                     &text[*s..*e],
-                    Attrs::new().family(Family::Monospace).color(*color),
+                    Attrs::new().family(Family::Name(FONT_FAMILY)).color(*color),
                 )
             })
             .collect();
 
-        let default_attrs = Attrs::new().family(Family::Monospace);
+        let default_attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
         // Shaping::Basic avoids kerning/ligatures so every glyph lands exactly
         // one cell-width apart — essential for a terminal grid.
         self.buffer.set_rich_text(
@@ -232,7 +244,7 @@ impl TextLayer {
 
 fn measure_advance(font_system: &mut FontSystem, metrics: Metrics) -> f32 {
     let mut b = Buffer::new(font_system, metrics);
-    let attrs = Attrs::new().family(Family::Monospace);
+    let attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
     // Shaping::Basic avoids kerning so the advance width matches the terminal grid.
     b.set_text(font_system, "M", &attrs, Shaping::Basic, None);
     b.set_size(font_system, None, Some(metrics.line_height));
