@@ -838,6 +838,7 @@ name = "jetty-render"
 version = "0.0.0"
 dependencies = [
  "glyphon",
+ "jetty-core",
  "pollster",
  "raw-window-handle",
  "wgpu",

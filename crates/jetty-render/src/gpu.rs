@@ -63,22 +63,29 @@ impl GpuContext {
         }
     }
 
-    pub fn clear(&mut self, rgba: [f64; 4]) -> Result<(), String> {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Timeout => return Err("timeout".into()),
-            wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
-            wgpu::CurrentSurfaceTexture::Outdated => {
+    /// Acquire the next frame from the swap chain, handling all surface-lost/outdated cases.
+    /// Returns `Some((texture, view))` on success, or `None` if the frame should be skipped
+    /// (surface was reconfigured, occluded, or timed out).
+    pub fn acquire_frame(&mut self) -> Option<(wgpu::SurfaceTexture, wgpu::TextureView)> {
+        let texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.device, &self.config);
-                return Ok(());
+                return None;
             }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Validation => return Err("validation".into()),
+            wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Validation => return None,
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Some((texture, view))
+    }
+
+    pub fn clear(&mut self, rgba: [f64; 4]) -> Result<(), String> {
+        let Some((frame, view)) = self.acquire_frame() else {
+            return Ok(());
+        };
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clear") });
