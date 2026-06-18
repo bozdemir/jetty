@@ -18,8 +18,6 @@ pub struct TextLayer {
     renderer: TextRenderer,
     buffer: Buffer,
     cursor_buffer: Buffer,
-    /// Scrollbar thumb — one ▐ glyph per thumb row, right-edge of the window.
-    scrollbar_buffer: Buffer,
     // Retained for future use (e.g., rescaling on DPI change in Task 7+).
     #[allow(dead_code)]
     metrics: Metrics,
@@ -63,10 +61,6 @@ impl TextLayer {
             None,
         );
 
-        // Scrollbar buffer: populated each frame when there is scrollback.
-        let mut scrollbar_buffer = Buffer::new(&mut font_system, metrics);
-        scrollbar_buffer.set_size(&mut font_system, None, None);
-
         // Measure a monospace cell by shaping a single 'M'.
         let cell_w = measure_advance(&mut font_system, metrics);
         let cell_h = line_height;
@@ -79,7 +73,6 @@ impl TextLayer {
             renderer,
             buffer,
             cursor_buffer,
-            scrollbar_buffer,
             metrics,
             cell_w,
             cell_h,
@@ -198,50 +191,6 @@ impl TextLayer {
                 bounds: win_bounds,
                 // Color::rgba is not available in this glyphon version; use rgb.
                 default_color: Color::rgb(cr, cg, cb),
-                custom_glyphs: &[],
-            });
-        }
-
-        // Scrollbar thumb — only drawn when there is scrollback history.
-        if snapshot.scroll_max > 0 {
-            let total = snapshot.rows + snapshot.scroll_max;
-            // Thumb height in rows (at least 1).
-            let thumb_rows = ((snapshot.rows * snapshot.rows) / total).max(1);
-            // Thumb top row: offset==0 → thumb at BOTTOM; offset==scroll_max → thumb at TOP.
-            let available_rows = snapshot.rows.saturating_sub(thumb_rows);
-            let top_row = if snapshot.scroll_max > 0 {
-                ((snapshot.scroll_max - snapshot.scroll_offset) * available_rows)
-                    / snapshot.scroll_max
-            } else {
-                available_rows
-            };
-
-            // Build the thumb text: `thumb_rows` lines of "▐".
-            let thumb_line = "\u{2590}\n";
-            let thumb_text: String = thumb_line.repeat(thumb_rows);
-            let thumb_text = thumb_text.trim_end_matches('\n');
-
-            let sb_attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
-            self.scrollbar_buffer.set_size(
-                &mut self.font_system,
-                None,
-                Some(height as f32),
-            );
-            self.scrollbar_buffer.set_text(
-                &mut self.font_system,
-                thumb_text,
-                &sb_attrs,
-                Shaping::Basic,
-                None,
-            );
-
-            areas.push(TextArea {
-                buffer: &self.scrollbar_buffer,
-                left: (width as f32) - self.cell_w,
-                top: top_row as f32 * self.cell_h,
-                scale: 1.0,
-                bounds: win_bounds,
-                default_color: Color::rgb(120, 120, 130),
                 custom_glyphs: &[],
             });
         }

@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::sync::Arc;
 use jetty_core::{PtySession, Terminal};
-use jetty_render::{GpuContext, TextLayer};
+use jetty_render::{GpuContext, QuadLayer, TextLayer};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -17,6 +17,7 @@ pub struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuContext>,
     text: Option<TextLayer>,
+    quad: Option<QuadLayer>,
     terminal: Terminal,
     pty: Option<PtySession>,
     writer: Option<Box<dyn Write + Send>>,
@@ -49,6 +50,7 @@ impl App {
             window: None,
             gpu: None,
             text: None,
+            quad: None,
             terminal: Terminal::new(COLS, ROWS),
             pty: None,
             writer: None,
@@ -88,6 +90,7 @@ impl ApplicationHandler<()> for App {
         let size = window.inner_size();
         let gpu = GpuContext::new(window.clone(), size.width, size.height);
         let text = TextLayer::new(&gpu.device, &gpu.queue, gpu.format, 16.0);
+        let quad = QuadLayer::new(&gpu.device, gpu.format);
 
         let pty = PtySession::spawn(COLS as u16, ROWS as u16).expect("pty");
         let writer = pty.writer();
@@ -95,6 +98,7 @@ impl ApplicationHandler<()> for App {
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.text = Some(text);
+        self.quad = Some(quad);
         self.pty = Some(pty);
         self.writer = Some(writer);
 
@@ -206,9 +210,31 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::RedrawRequested => {
                 self.drain_pty();
-                if let (Some(gpu), Some(text)) = (&mut self.gpu, &mut self.text) {
-                    let snap = self.terminal.snapshot();
-                    let _ = text.render(gpu, &snap);
+                let snap = self.terminal.snapshot();
+                let (Some(gpu), Some(text), Some(quad)) =
+                    (&mut self.gpu, &mut self.text, &mut self.quad)
+                else {
+                    return;
+                };
+                let width = gpu.config.width;
+                let height = gpu.config.height;
+                if let Some((frame, view)) = gpu.acquire_frame() {
+                    let _ = text.render_to(
+                        &gpu.device,
+                        &gpu.queue,
+                        &view,
+                        width,
+                        height,
+                        &snap,
+                    );
+                    let mut rects: Vec<jetty_render::Rect> = Vec::new();
+                    if let Some(r) =
+                        jetty_render::scrollbar_rect(&snap, width, height)
+                    {
+                        rects.push(r);
+                    }
+                    quad.render(&gpu.device, &gpu.queue, &view, width, height, &rects);
+                    frame.present();
                 }
             }
             _ => {}

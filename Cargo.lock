@@ -874,6 +874,7 @@ dependencies = [
 name = "jetty-render"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "glyphon",
  "jetty-core",
  "pollster",

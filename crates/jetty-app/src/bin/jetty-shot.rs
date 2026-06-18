@@ -13,7 +13,7 @@
 use std::fs::File;
 use std::io::BufWriter;
 
-use jetty_render::TextLayer;
+use jetty_render::{QuadLayer, TextLayer};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_path =
@@ -104,6 +104,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Render to offscreen texture ---
     text.render_to(&device, &queue, &view, width, height, &snap)?;
+
+    // --- Draw scrollbar quad over the text ---
+    {
+        let mut quad = QuadLayer::new(&device, format);
+        let mut rects: Vec<jetty_render::Rect> = Vec::new();
+        if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height) {
+            rects.push(r);
+        }
+        quad.render(&device, &queue, &view, width, height, &rects);
+    }
 
     // --- Read back to CPU ---
     // wgpu requires bytes_per_row to be a multiple of 256.

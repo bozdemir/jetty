@@ -4,8 +4,9 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
+bytemuck = "1"
 glyphon = "0.11"
 jetty-core = { path = "../jetty-core" }
 pollster = "0.4"
 raw-window-handle = "0.6"
-wgpu = "29.0"
+wgpu = { version = "29.0", features = ["wgsl"] }
