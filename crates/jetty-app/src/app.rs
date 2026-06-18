@@ -35,6 +35,8 @@ pub struct App {
     drag_grab_dy: f32,
     /// Whether the Settings panel popup is currently visible.
     panel_open: bool,
+    /// Whether the user is currently dragging the opacity slider in the Settings panel.
+    dragging_slider: bool,
 }
 
 impl App {
@@ -69,6 +71,7 @@ impl App {
             dragging_scrollbar: false,
             drag_grab_dy: 0.0,
             panel_open: false,
+            dragging_slider: false,
         };
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -110,6 +113,12 @@ impl App {
         self.terminal.scroll_to_offset(offset);
         // suppress unused warning on w
         let _ = w;
+    }
+
+    /// Compute opacity from the current cursor x relative to a slider track rect.
+    fn opacity_from_cursor(&self, track: &jetty_render::Rect) -> f32 {
+        let frac = ((self.cursor.0 as f32 - track.x) / track.w).clamp(0.0, 1.0);
+        (0.1 + frac * 0.9).clamp(0.1, 1.0)
     }
 
     fn drain_pty(&mut self) {
@@ -171,6 +180,19 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                // --- Slider drag continuation ---
+                if self.dragging_slider {
+                    if let Some(gpu) = &self.gpu {
+                        let (w, h) = (gpu.config.width, gpu.config.height);
+                        let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx);
+                        self.opacity = self.opacity_from_cursor(&pv.geom.slider_track);
+                        self.apply_theme();
+                    }
+                    if let Some(w_) = &self.window {
+                        w_.request_redraw();
+                    }
+                    return; // don't also drag the scrollbar
+                }
                 if self.dragging_scrollbar {
                     // Copy width/height to avoid borrow conflicts.
                     let (w, h) = if let Some(gpu) = &self.gpu {
@@ -190,6 +212,41 @@ impl ApplicationHandler<()> for App {
                 } else {
                     return;
                 };
+
+                // --- Settings panel hit-testing (takes priority over scrollbar) ---
+                if self.panel_open {
+                    let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx);
+                    let g = &pv.geom;
+                    // Slider handle or track
+                    if point_in(&g.slider_handle, self.cursor.0, self.cursor.1)
+                        || point_in(&g.slider_track, self.cursor.0, self.cursor.1)
+                    {
+                        self.dragging_slider = true;
+                        self.opacity = self.opacity_from_cursor(&g.slider_track);
+                        self.apply_theme();
+                        if let Some(w_) = &self.window {
+                            w_.request_redraw();
+                        }
+                        return; // consumed
+                    }
+                    // Theme chips
+                    for (i, chip) in g.chips.iter().enumerate() {
+                        if point_in(chip, self.cursor.0, self.cursor.1) {
+                            self.theme_idx = i;
+                            self.apply_theme();
+                            if let Some(w_) = &self.window {
+                                w_.request_redraw();
+                            }
+                            return; // consumed
+                        }
+                    }
+                    // Click anywhere else inside the panel: consume without action
+                    if point_in(&g.panel, self.cursor.0, self.cursor.1) {
+                        return;
+                    }
+                    // Click outside the panel while open: fall through to scrollbar
+                }
+
                 let rows = self.terminal.rows();
                 let scroll_offset = self.terminal.scroll_offset();
                 let scroll_max = self.terminal.scroll_max();
@@ -219,6 +276,7 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
                 self.dragging_scrollbar = false;
+                self.dragging_slider = false;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Positive y = wheel up = scroll into history (older output).
@@ -375,6 +433,11 @@ impl ApplicationHandler<()> for App {
             _ => {}
         }
     }
+}
+
+/// Returns true if the point (x, y) lies within the rect (inclusive on all edges).
+fn point_in(r: &jetty_render::Rect, x: f64, y: f64) -> bool {
+    x as f32 >= r.x && x as f32 <= r.x + r.w && y as f32 >= r.y && y as f32 <= r.y + r.h
 }
 
 fn key_to_bytes(key: &Key) -> Option<Vec<u8>> {
