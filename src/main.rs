@@ -1,3 +1,3 @@
 fn main() {
-    println!("jetty");
+    jetty_app::run();
 }
