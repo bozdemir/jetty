@@ -1,47 +1,132 @@
+use std::io::Write;
 use std::sync::Arc;
+use jetty_core::{PtySession, Terminal};
+use jetty_render::{GpuContext, TextLayer};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-#[derive(Default)]
+const COLS: usize = 100;
+const ROWS: usize = 30;
+
 pub struct App {
+    proxy: EventLoopProxy<()>,
     window: Option<Arc<Window>>,
-    gpu: Option<jetty_render::GpuContext>,
+    gpu: Option<GpuContext>,
+    text: Option<TextLayer>,
+    terminal: Terminal,
+    pty: Option<PtySession>,
+    writer: Option<Box<dyn Write + Send>>,
 }
 
-impl ApplicationHandler for App {
+impl App {
+    pub fn new(proxy: EventLoopProxy<()>) -> Self {
+        App {
+            proxy,
+            window: None,
+            gpu: None,
+            text: None,
+            terminal: Terminal::new(COLS, ROWS),
+            pty: None,
+            writer: None,
+        }
+    }
+
+    fn drain_pty(&mut self) {
+        if let Some(pty) = &self.pty {
+            while let Ok(chunk) = pty.output().try_recv() {
+                self.terminal.feed(&chunk);
+            }
+        }
+    }
+}
+
+impl ApplicationHandler<()> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
-            let window = jetty_platform::build_window(event_loop, "Jetty", (1000, 640));
-            let size = window.inner_size();
-            let gpu = jetty_render::GpuContext::new(window.clone(), size.width, size.height);
-            self.gpu = Some(gpu);
-            window.request_redraw();
-            self.window = Some(window);
+        if self.window.is_some() {
+            return;
+        }
+        let window = jetty_platform::build_window(event_loop, "Jetty", (1000, 640));
+        let size = window.inner_size();
+        let gpu = GpuContext::new(window.clone(), size.width, size.height);
+        let text = TextLayer::new(&gpu, 16.0);
+
+        let pty = PtySession::spawn(COLS as u16, ROWS as u16).expect("pty");
+        let writer = pty.writer();
+
+        self.window = Some(window);
+        self.gpu = Some(gpu);
+        self.text = Some(text);
+        self.pty = Some(pty);
+        self.writer = Some(writer);
+
+        spawn_waker(self.proxy.clone());
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _ev: ()) {
+        self.drain_pty();
+        if let Some(w) = &self.window {
+            w.request_redraw();
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput { event, .. }
-                if event.logical_key == Key::Named(NamedKey::Escape) =>
-            {
-                event_loop.exit();
-            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size.width, size.height);
                 }
+                if let (Some(gpu), Some(text)) = (&self.gpu, &mut self.text) {
+                    text.resize(gpu);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                if let Some(bytes) = key_to_bytes(&event.logical_key) {
+                    if let Some(w) = &mut self.writer {
+                        let _ = w.write_all(&bytes);
+                        let _ = w.flush();
+                    }
+                }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(gpu) = &mut self.gpu {
-                    let _ = gpu.clear([0.07, 0.07, 0.09, 1.0]);
+                self.drain_pty();
+                if let (Some(gpu), Some(text)) = (&mut self.gpu, &mut self.text) {
+                    let snap = self.terminal.snapshot();
+                    let _ = text.render(gpu, &snap);
                 }
             }
             _ => {}
         }
     }
+}
+
+fn key_to_bytes(key: &Key) -> Option<Vec<u8>> {
+    match key {
+        Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),
+        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
+        Key::Named(NamedKey::Tab) => Some(b"\t".to_vec()),
+        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
+        Key::Named(NamedKey::Space) => Some(b" ".to_vec()),
+        Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
+        Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
+        Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
+        Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
+        Key::Character(s) => Some(s.as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
+fn spawn_waker(proxy: EventLoopProxy<()>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        if proxy.send_event(()).is_err() {
+            break;
+        }
+    });
 }
