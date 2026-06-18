@@ -7,6 +7,7 @@ use winit::window::Window;
 pub fn build_window(event_loop: &ActiveEventLoop, title: &str, size: (u32, u32)) -> Arc<Window> {
     let attrs = Window::default_attributes()
         .with_title(title)
-        .with_inner_size(LogicalSize::new(size.0, size.1));
+        .with_inner_size(LogicalSize::new(size.0, size.1))
+        .with_resizable(false);
     Arc::new(event_loop.create_window(attrs).expect("create_window failed"))
 }

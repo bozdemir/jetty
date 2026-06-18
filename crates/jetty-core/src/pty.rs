@@ -14,20 +14,20 @@ impl PtySession {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let cmd = CommandBuilder::new(shell);
         let child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         drop(pair.slave);
 
         let mut reader = pair
             .master
             .try_clone_reader()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         let (tx, rx) = channel::<Vec<u8>>();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];

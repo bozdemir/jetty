@@ -51,6 +51,8 @@ impl Terminal {
         let grid = self.term.grid();
         for row in 0..self.rows {
             for col in 0..self.cols {
+                // NOTE: valid only while there is no scrollback (total_lines == screen_lines).
+                // When scrollback is added, map visible row -> absolute line before indexing.
                 let point = Point::new(Line(row as i32), Column(col));
                 let cell = &grid[point];
                 let fg = resolve_rgb(cell.fg);
