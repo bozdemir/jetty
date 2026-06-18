@@ -118,7 +118,13 @@ impl TextLayer {
                     Color::rgb(cell.fg[0], cell.fg[1], cell.fg[2]),
                 ));
             }
+            // Include the newline as its own span: set_rich_text builds the text
+            // FROM the spans, so without this the line breaks were dropped and the
+            // whole grid collapsed onto one very long line.
+            let nl_start = text.len();
             text.push('\n');
+            let nl_end = text.len();
+            cell_ranges.push((nl_start, nl_end, Color::rgb(220, 220, 220)));
         }
 
         // Build the spans iterator: (&str, Attrs) tuples, borrowing slices from `text`.
@@ -132,6 +138,12 @@ impl TextLayer {
                 )
             })
             .collect();
+
+        // Bound the layout height to the surface so cosmic-text lays out ALL
+        // rows. With height = None it shapes only the first visible line, which
+        // made every row after the first disappear.
+        self.buffer
+            .set_size(&mut self.font_system, None, Some(height as f32));
 
         let default_attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
         // Shaping::Basic avoids kerning/ligatures so every glyph lands exactly
