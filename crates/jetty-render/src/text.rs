@@ -221,10 +221,21 @@ impl TextLayer {
         // PreMultiplied alpha_mode surfaces and harmless for Opaque ones.
         let [br, bg_, bb, ba] = snapshot.bg_rgba;
         let a = ba as f64 / 255.0;
+        // The surface is sRGB, so the clear value must be LINEAR. Convert each
+        // sRGB component to linear, then premultiply by alpha (for PreMultiplied
+        // alpha_mode). Without this, dark theme backgrounds render washed-out.
+        fn srgb_to_linear(c: u8) -> f64 {
+            let s = c as f64 / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        }
         let clear_color = wgpu::Color {
-            r: (br as f64 / 255.0) * a,
-            g: (bg_ as f64 / 255.0) * a,
-            b: (bb as f64 / 255.0) * a,
+            r: srgb_to_linear(br) * a,
+            g: srgb_to_linear(bg_) * a,
+            b: srgb_to_linear(bb) * a,
             a,
         };
 
