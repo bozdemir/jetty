@@ -68,8 +68,14 @@ impl GpuContext {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Timeout => return Err("timeout".into()),
             wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
-            wgpu::CurrentSurfaceTexture::Outdated => return Err("outdated".into()),
-            wgpu::CurrentSurfaceTexture::Lost => return Err("lost".into()),
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
             wgpu::CurrentSurfaceTexture::Validation => return Err("validation".into()),
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
