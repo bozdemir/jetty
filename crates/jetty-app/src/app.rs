@@ -6,7 +6,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::event::MouseScrollDelta;
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 const COLS: usize = 100;
@@ -297,16 +297,16 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 // --- Ctrl+, → toggle Settings panel ---
-                if self.modifiers.control_key() && !self.modifiers.shift_key() {
-                    if let Key::Character(s) = &event.logical_key {
-                        if s == "," {
-                            self.panel_open = !self.panel_open;
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
+                // Match the PHYSICAL key: logical_key for "," is unreliable while
+                // Ctrl is held on X11/Wayland. Keep a logical fallback too.
+                let is_comma = matches!(event.physical_key, PhysicalKey::Code(KeyCode::Comma))
+                    || matches!(&event.logical_key, Key::Character(s) if s.as_str() == ",");
+                if self.modifiers.control_key() && !self.modifiers.shift_key() && is_comma {
+                    self.panel_open = !self.panel_open;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
                     }
+                    return;
                 }
 
                 // --- Escape → close panel if open; otherwise forward to PTY ---
@@ -325,8 +325,8 @@ impl ApplicationHandler<()> for App {
                 // Must be checked BEFORE PageUp/Down and before key_to_bytes so
                 // the intercept key is not also forwarded to the PTY.
                 if self.modifiers.control_key() && self.modifiers.shift_key() {
-                    match &event.logical_key {
-                        Key::Character(s) if s == "t" || s == "T" => {
+                    match event.physical_key {
+                        PhysicalKey::Code(KeyCode::KeyT) => {
                             self.theme_idx = (self.theme_idx + 1)
                                 % jetty_core::theme::PRESETS.len();
                             self.apply_theme();
@@ -335,7 +335,8 @@ impl ApplicationHandler<()> for App {
                             }
                             return;
                         }
-                        Key::Character(s) if s == "+" || s == "=" => {
+                        // "+" lives on the "=" key (Shift+=); match it physically.
+                        PhysicalKey::Code(KeyCode::Equal) => {
                             self.opacity = (self.opacity + 0.05).min(1.0);
                             self.apply_theme();
                             if let Some(w) = &self.window {
@@ -343,7 +344,7 @@ impl ApplicationHandler<()> for App {
                             }
                             return;
                         }
-                        Key::Character(s) if s == "-" || s == "_" => {
+                        PhysicalKey::Code(KeyCode::Minus) => {
                             self.opacity = (self.opacity - 0.05).max(0.1);
                             self.apply_theme();
                             if let Some(w) = &self.window {
