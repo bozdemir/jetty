@@ -13,6 +13,7 @@ pub struct TextLayer {
     viewport: Viewport,
     renderer: TextRenderer,
     buffer: Buffer,
+    cursor_buffer: Buffer,
     // Retained for future use (e.g., rescaling on DPI change in Task 7+).
     #[allow(dead_code)]
     metrics: Metrics,
@@ -33,10 +34,19 @@ impl TextLayer {
         let line_height = (font_size * 1.3).ceil();
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(&mut font_system, metrics);
-        buffer.set_size(
+        // None width disables line wrapping so columns stay on the monospace grid.
+        buffer.set_size(&mut font_system, None, None);
+
+        // Cursor buffer: a single full-block glyph used to draw the block cursor.
+        let mut cursor_buffer = Buffer::new(&mut font_system, metrics);
+        cursor_buffer.set_size(&mut font_system, None, None);
+        let cursor_attrs = Attrs::new().family(Family::Monospace);
+        cursor_buffer.set_text(
             &mut font_system,
-            Some(gpu.config.width as f32),
-            Some(gpu.config.height as f32),
+            "\u{2588}",
+            &cursor_attrs,
+            Shaping::Basic,
+            None,
         );
 
         // Measure a monospace cell by shaping a single 'M'.
@@ -50,6 +60,7 @@ impl TextLayer {
             viewport,
             renderer,
             buffer,
+            cursor_buffer,
             metrics,
             cell_w,
             cell_h,
@@ -61,11 +72,9 @@ impl TextLayer {
     }
 
     pub fn resize(&mut self, gpu: &GpuContext) {
-        self.buffer.set_size(
-            &mut self.font_system,
-            Some(gpu.config.width as f32),
-            Some(gpu.config.height as f32),
-        );
+        // None width keeps wrapping disabled after resize.
+        self.buffer.set_size(&mut self.font_system, None, None);
+        let _ = gpu; // size not used for wrapping; viewport is updated per-frame
     }
 
     /// Clears the frame to the terminal background color and renders the grid text.
@@ -113,11 +122,13 @@ impl TextLayer {
             .collect();
 
         let default_attrs = Attrs::new().family(Family::Monospace);
+        // Shaping::Basic avoids kerning/ligatures so every glyph lands exactly
+        // one cell-width apart — essential for a terminal grid.
         self.buffer.set_rich_text(
             &mut self.font_system,
             spans,
             &default_attrs,
-            Shaping::Advanced,
+            Shaping::Basic,
             None,
         );
 
@@ -126,30 +137,59 @@ impl TextLayer {
             Resolution { width: gpu.config.width, height: gpu.config.height },
         );
 
+        let win_bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: gpu.config.width as i32,
+            bottom: gpu.config.height as i32,
+        };
+
         let text_area = TextArea {
             buffer: &self.buffer,
             left: 0.0,
             top: 0.0,
             scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: gpu.config.width as i32,
-                bottom: gpu.config.height as i32,
-            },
+            bounds: win_bounds,
             default_color: Color::rgb(220, 220, 220),
             custom_glyphs: &[],
         };
 
-        self.renderer.prepare(
-            &gpu.device,
-            &gpu.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            [text_area],
-            &mut self.swash,
-        )?;
+        // Build a block cursor area when the cursor is within bounds.
+        let cursor_in_bounds = snapshot.cursor_row < snapshot.rows
+            && snapshot.cursor_col < snapshot.cols;
+
+        if cursor_in_bounds {
+            let cursor_area = TextArea {
+                buffer: &self.cursor_buffer,
+                left: snapshot.cursor_col as f32 * self.cell_w,
+                top: snapshot.cursor_row as f32 * self.cell_h,
+                scale: 1.0,
+                bounds: win_bounds,
+                // Color::rgba is not available in this glyphon version; use rgb.
+                default_color: Color::rgb(200, 200, 200),
+                custom_glyphs: &[],
+            };
+
+            self.renderer.prepare(
+                &gpu.device,
+                &gpu.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [text_area, cursor_area],
+                &mut self.swash,
+            )?;
+        } else {
+            self.renderer.prepare(
+                &gpu.device,
+                &gpu.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [text_area],
+                &mut self.swash,
+            )?;
+        }
 
         let Some((frame, view)) = gpu.acquire_frame() else {
             return Ok(());
@@ -193,8 +233,9 @@ impl TextLayer {
 fn measure_advance(font_system: &mut FontSystem, metrics: Metrics) -> f32 {
     let mut b = Buffer::new(font_system, metrics);
     let attrs = Attrs::new().family(Family::Monospace);
-    b.set_text(font_system, "M", &attrs, Shaping::Advanced, None);
-    b.set_size(font_system, Some(1000.0), Some(metrics.line_height));
+    // Shaping::Basic avoids kerning so the advance width matches the terminal grid.
+    b.set_text(font_system, "M", &attrs, Shaping::Basic, None);
+    b.set_size(font_system, None, Some(metrics.line_height));
     b.layout_runs()
         .next()
         .and_then(|run| run.glyphs.iter().map(|g| g.w).next())
