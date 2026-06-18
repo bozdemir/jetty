@@ -35,6 +35,13 @@ pkill -f "Xvfb $DISP" 2>/dev/null
 sleep 0.3
 rm -f "$OUT" "$APPLOG"
 
+# Force software rendering on the virtual display: there is no real GPU usable
+# under Xvfb (NVIDIA Vulkan can't present without DRI3), and this keeps the
+# harness entirely off the NVIDIA path. Rasterization is identical to hardware.
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+export VK_ICD_FILENAMES=/nonexistent-disable-vulkan.json
+
 # 1) Isolated virtual display
 Xvfb "$DISP" -screen 0 "${W}x${H}x24" >/tmp/jetty-xvfb.log 2>&1 &
 XVFB_PID=$!

@@ -18,6 +18,10 @@ pub struct GridSnapshot {
     pub cells: Vec<CellSnapshot>,
     pub cursor_row: usize,
     pub cursor_col: usize,
+    /// Terminal background color as RGBA — set from the theme.
+    pub bg_rgba: [u8; 4],
+    /// Cursor block color — set from the theme.
+    pub cursor_rgb: [u8; 3],
 }
 
 impl GridSnapshot {

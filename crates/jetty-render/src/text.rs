@@ -180,6 +180,7 @@ impl TextLayer {
             && snapshot.cursor_col < snapshot.cols;
 
         if cursor_in_bounds {
+            let [cr, cg, cb] = snapshot.cursor_rgb;
             let cursor_area = TextArea {
                 buffer: &self.cursor_buffer,
                 left: snapshot.cursor_col as f32 * self.cell_w,
@@ -187,7 +188,7 @@ impl TextLayer {
                 scale: 1.0,
                 bounds: win_bounds,
                 // Color::rgba is not available in this glyphon version; use rgb.
-                default_color: Color::rgb(200, 200, 200),
+                default_color: Color::rgb(cr, cg, cb),
                 custom_glyphs: &[],
             };
 
@@ -215,18 +216,25 @@ impl TextLayer {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("text") });
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            // Build the clear color from the snapshot's theme bg.
+        // We always premultiply by alpha so the value is correct for
+        // PreMultiplied alpha_mode surfaces and harmless for Opaque ones.
+        let [br, bg_, bb, ba] = snapshot.bg_rgba;
+        let a = ba as f64 / 255.0;
+        let clear_color = wgpu::Color {
+            r: (br as f64 / 255.0) * a,
+            g: (bg_ as f64 / 255.0) * a,
+            b: (bb as f64 / 255.0) * a,
+            a,
+        };
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("text-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.07,
-                            g: 0.07,
-                            b: 0.09,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

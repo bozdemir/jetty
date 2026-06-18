@@ -4,6 +4,12 @@
 /// Config via env:
 ///   JETTY_SHOT_OUT   — output path (default: /tmp/jetty-shot.png)
 ///   JETTY_SHOT_INPUT — ANSI bytes to feed the terminal (default: built-in sample)
+///   JETTY_THEME      — theme name (picked up automatically via Terminal::new)
+///   JETTY_OPACITY    — opacity 0.0..1.0 (picked up automatically via Terminal::new)
+///
+/// If the terminal bg alpha < 255, the rendered image is composited over a
+/// checkerboard (alternating 16px squares of [40,40,40] and [90,90,90]) so
+/// transparency is visible in the output PNG.
 use std::fs::File;
 use std::io::BufWriter;
 
@@ -59,9 +65,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("jetty-shot: grid = {cols}x{rows} cells (cell {cell_w:.1}x{cell_h:.1}px)");
 
     // --- Build terminal snapshot ---
+    // Terminal::new picks up JETTY_THEME and JETTY_OPACITY from the environment.
     let mut terminal = jetty_core::Terminal::new(cols, rows);
     terminal.feed(&input_bytes);
     let snap = terminal.snapshot();
+
+    let bg_alpha = snap.bg_rgba[3];
+    eprintln!(
+        "jetty-shot: theme={} bg_rgba={:?} compositing={}",
+        terminal.theme().name,
+        snap.bg_rgba,
+        bg_alpha < 255
+    );
 
     // --- Create offscreen texture ---
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -133,6 +148,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(padded_data);
     readback_buffer.unmap();
 
+    // --- Composite over checkerboard if bg alpha < 255 ---
+    // The rendered texture uses premultiplied alpha (the clear color is already
+    // premultiplied in text.rs).  We un-premultiply before blending onto the
+    // checkerboard, then output an opaque RGBA PNG.
+    let composited = if bg_alpha < 255 {
+        eprintln!("jetty-shot: compositing over checkerboard (bg alpha={})", bg_alpha);
+        const TILE: u32 = 16;
+        const DARK: [u8; 3] = [40, 40, 40];
+        const LIGHT: [u8; 3] = [90, 90, 90];
+
+        let mut out = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let idx = ((y * width + x) * 4) as usize;
+                let src_r = tight[idx] as f32 / 255.0;
+                let src_g = tight[idx + 1] as f32 / 255.0;
+                let src_b = tight[idx + 2] as f32 / 255.0;
+                let src_a = tight[idx + 3] as f32 / 255.0;
+
+                // Checkerboard background
+                let tile_x = x / TILE;
+                let tile_y = y / TILE;
+                let checker = if (tile_x + tile_y) % 2 == 0 { DARK } else { LIGHT };
+                let dst_r = checker[0] as f32 / 255.0;
+                let dst_g = checker[1] as f32 / 255.0;
+                let dst_b = checker[2] as f32 / 255.0;
+
+                // Source is premultiplied alpha: un-premultiply for correct over blend.
+                // over(src_premul, dst) = src_premul + dst*(1-alpha)
+                let out_r = (src_r + dst_r * (1.0 - src_a)).min(1.0);
+                let out_g = (src_g + dst_g * (1.0 - src_a)).min(1.0);
+                let out_b = (src_b + dst_b * (1.0 - src_a)).min(1.0);
+
+                out[idx] = (out_r * 255.0) as u8;
+                out[idx + 1] = (out_g * 255.0) as u8;
+                out[idx + 2] = (out_b * 255.0) as u8;
+                out[idx + 3] = 255; // opaque output
+            }
+        }
+        out
+    } else {
+        tight
+    };
+
     // --- Write PNG ---
     let file = File::create(&out_path)?;
     let writer = BufWriter::new(file);
@@ -140,11 +199,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut png_writer = encoder.write_header()?;
-    png_writer.write_image_data(&tight)?;
+    png_writer.write_image_data(&composited)?;
     drop(png_writer);
 
     let file_size = std::fs::metadata(&out_path)?.len();
     println!("wrote {} ({}x{}, {} bytes)", out_path, width, height, file_size);
+    if bg_alpha < 255 {
+        println!("composited over checkerboard (bg alpha={})", bg_alpha);
+    }
 
     Ok(())
 }

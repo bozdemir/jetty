@@ -1,4 +1,5 @@
 use crate::snapshot::{CellSnapshot, GridSnapshot};
+use crate::theme::Theme;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term};
@@ -32,13 +33,38 @@ pub struct Terminal {
     parser: Processor,
     cols: usize,
     rows: usize,
+    theme: Theme,
 }
 
 impl Terminal {
     pub fn new(cols: usize, rows: usize) -> Terminal {
         let size = Size { cols, lines: rows };
         let term = Term::new(Config::default(), &size, NoopListener);
-        Terminal { term, parser: Processor::new(), cols, rows }
+
+        // Load theme from JETTY_THEME env var; default to "default_dark".
+        let theme_name = std::env::var("JETTY_THEME").unwrap_or_else(|_| "default_dark".to_string());
+        let mut theme = Theme::by_name(&theme_name);
+
+        // Apply opacity override from JETTY_OPACITY (float 0.0..1.0).
+        // This multiplies into the theme bg alpha, enabling composited transparency.
+        if let Ok(op_str) = std::env::var("JETTY_OPACITY") {
+            if let Ok(opacity) = op_str.parse::<f32>() {
+                let opacity = opacity.clamp(0.0, 1.0);
+                theme.bg[3] = (opacity * 255.0) as u8;
+            }
+        }
+
+        Terminal { term, parser: Processor::new(), cols, rows, theme }
+    }
+
+    /// Replace the active theme at runtime.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    /// Return a reference to the active theme.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -55,8 +81,8 @@ impl Terminal {
                 // When scrollback is added, map visible row -> absolute line before indexing.
                 let point = Point::new(Line(row as i32), Column(col));
                 let cell = &grid[point];
-                let fg = resolve_rgb(cell.fg);
-                let bg = resolve_rgb(cell.bg);
+                let fg = resolve_rgb(&self.theme, cell.fg);
+                let bg = resolve_rgb(&self.theme, cell.bg);
                 cells[row * self.cols + col] = CellSnapshot { c: cell.c, fg, bg };
             }
         }
@@ -67,35 +93,17 @@ impl Terminal {
             cells,
             cursor_row: cursor.line.0.max(0) as usize,
             cursor_col: cursor.column.0,
+            bg_rgba: self.theme.bg,
+            cursor_rgb: self.theme.cursor,
         }
     }
 }
 
-/// The 16 standard ANSI colors (xterm defaults), palette indices 0..=15.
-const ANSI_16: [[u8; 3]; 16] = [
-    [0, 0, 0],       // 0  black
-    [205, 0, 0],     // 1  red
-    [0, 205, 0],     // 2  green
-    [205, 205, 0],   // 3  yellow
-    [0, 0, 238],     // 4  blue
-    [205, 0, 205],   // 5  magenta
-    [0, 205, 205],   // 6  cyan
-    [229, 229, 229], // 7  white
-    [127, 127, 127], // 8  bright black
-    [255, 0, 0],     // 9  bright red
-    [0, 255, 0],     // 10 bright green
-    [255, 255, 0],   // 11 bright yellow
-    [92, 92, 255],   // 12 bright blue
-    [255, 0, 255],   // 13 bright magenta
-    [0, 255, 255],   // 14 bright cyan
-    [255, 255, 255], // 15 bright white
-];
-
 /// Convert a 256-color palette index to RGB (standard xterm scheme):
-/// 0..=15 standard, 16..=231 the 6x6x6 cube, 232..=255 the grayscale ramp.
-fn index_to_rgb(i: u8) -> [u8; 3] {
+/// 0..=15 from the theme palette, 16..=231 the 6x6x6 cube, 232..=255 the grayscale ramp.
+fn index_to_rgb(theme: &Theme, i: u8) -> [u8; 3] {
     match i {
-        0..=15 => ANSI_16[i as usize],
+        0..=15 => theme.palette[i as usize],
         16..=231 => {
             let c = i - 16;
             let levels = [0u8, 95, 135, 175, 215, 255];
@@ -112,34 +120,34 @@ fn index_to_rgb(i: u8) -> [u8; 3] {
     }
 }
 
-/// Map an alacritty cell color to RGB: true-color is exact; named and indexed
-/// colors resolve through the standard ANSI / xterm-256 palette.
-fn resolve_rgb(color: alacritty_terminal::vte::ansi::Color) -> [u8; 3] {
+/// Map an alacritty cell color to RGB using the active theme.
+/// True-color is exact; named and indexed colors resolve through the theme palette.
+fn resolve_rgb(theme: &Theme, color: alacritty_terminal::vte::ansi::Color) -> [u8; 3] {
     use alacritty_terminal::vte::ansi::{Color, NamedColor};
     match color {
         Color::Spec(rgb) => [rgb.r, rgb.g, rgb.b],
-        Color::Indexed(i) => index_to_rgb(i),
+        Color::Indexed(i) => index_to_rgb(theme, i),
         Color::Named(n) => match n {
-            NamedColor::Background => [18, 18, 23],
-            NamedColor::Foreground | NamedColor::BrightForeground => [220, 220, 220],
-            NamedColor::Black => index_to_rgb(0),
-            NamedColor::Red => index_to_rgb(1),
-            NamedColor::Green => index_to_rgb(2),
-            NamedColor::Yellow => index_to_rgb(3),
-            NamedColor::Blue => index_to_rgb(4),
-            NamedColor::Magenta => index_to_rgb(5),
-            NamedColor::Cyan => index_to_rgb(6),
-            NamedColor::White => index_to_rgb(7),
-            NamedColor::BrightBlack => index_to_rgb(8),
-            NamedColor::BrightRed => index_to_rgb(9),
-            NamedColor::BrightGreen => index_to_rgb(10),
-            NamedColor::BrightYellow => index_to_rgb(11),
-            NamedColor::BrightBlue => index_to_rgb(12),
-            NamedColor::BrightMagenta => index_to_rgb(13),
-            NamedColor::BrightCyan => index_to_rgb(14),
-            NamedColor::BrightWhite => index_to_rgb(15),
+            NamedColor::Background => [theme.bg[0], theme.bg[1], theme.bg[2]],
+            NamedColor::Foreground | NamedColor::BrightForeground => theme.fg,
+            NamedColor::Black => index_to_rgb(theme, 0),
+            NamedColor::Red => index_to_rgb(theme, 1),
+            NamedColor::Green => index_to_rgb(theme, 2),
+            NamedColor::Yellow => index_to_rgb(theme, 3),
+            NamedColor::Blue => index_to_rgb(theme, 4),
+            NamedColor::Magenta => index_to_rgb(theme, 5),
+            NamedColor::Cyan => index_to_rgb(theme, 6),
+            NamedColor::White => index_to_rgb(theme, 7),
+            NamedColor::BrightBlack => index_to_rgb(theme, 8),
+            NamedColor::BrightRed => index_to_rgb(theme, 9),
+            NamedColor::BrightGreen => index_to_rgb(theme, 10),
+            NamedColor::BrightYellow => index_to_rgb(theme, 11),
+            NamedColor::BrightBlue => index_to_rgb(theme, 12),
+            NamedColor::BrightMagenta => index_to_rgb(theme, 13),
+            NamedColor::BrightCyan => index_to_rgb(theme, 14),
+            NamedColor::BrightWhite => index_to_rgb(theme, 15),
             // Dim*/Cursor and any future variants: approximate with default fg.
-            _ => [220, 220, 220],
+            _ => theme.fg,
         },
     }
 }
