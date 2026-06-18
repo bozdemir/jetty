@@ -8,7 +8,7 @@ fn pty_echoes_written_bytes() {
     let pty = PtySession::spawn(80, 24).expect("spawn");
     {
         let mut w = pty.writer();
-        // `cat` echoes its stdin back; send a line.
+        // cooked PTY echoes typed input back; send a line.
         use std::io::Write;
         w.write_all(b"jetty-marker\n").unwrap();
         w.flush().unwrap();

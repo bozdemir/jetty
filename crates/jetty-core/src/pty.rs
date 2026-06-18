@@ -54,8 +54,13 @@ impl PtySession {
         &self.rx
     }
 
+    /// Returns a writer for the PTY master (send keystrokes to the shell).
+    ///
+    /// # Panics
+    /// `take_writer()` is one-shot: this may only be called ONCE per `PtySession`.
+    /// A second call panics.
     pub fn writer(&self) -> Box<dyn Write + Send> {
-        self.master.lock().unwrap().take_writer().expect("take_writer")
+        self.master.lock().unwrap().take_writer().expect("writer() can only be called once per PtySession")
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
