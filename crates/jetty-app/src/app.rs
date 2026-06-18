@@ -3,7 +3,7 @@ use std::sync::Arc;
 use jetty_core::{PtySession, Terminal};
 use jetty_render::{GpuContext, QuadLayer, TextLayer};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::event::MouseScrollDelta;
 use winit::keyboard::{Key, NamedKey};
@@ -27,6 +27,12 @@ pub struct App {
     opacity: f32,
     /// Track held modifier keys so Ctrl+Shift combos can be detected.
     modifiers: winit::keyboard::ModifiersState,
+    /// Last known cursor position in physical pixels.
+    cursor: (f64, f64),
+    /// Whether the user is currently dragging the scrollbar thumb.
+    dragging_scrollbar: bool,
+    /// Y offset from thumb top where the user grabbed, in px.
+    drag_grab_dy: f32,
 }
 
 impl App {
@@ -57,6 +63,9 @@ impl App {
             theme_idx,
             opacity,
             modifiers: winit::keyboard::ModifiersState::empty(),
+            cursor: (0.0, 0.0),
+            dragging_scrollbar: false,
+            drag_grab_dy: 0.0,
         };
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -70,6 +79,34 @@ impl App {
         let mut t = jetty_core::Theme::by_name(jetty_core::theme::PRESETS[self.theme_idx]);
         t.bg[3] = (self.opacity.clamp(0.0, 1.0) * 255.0) as u8;
         self.terminal.set_theme(t);
+    }
+
+    /// Compute the scroll offset from the current cursor position during a drag.
+    /// `w` and `h` are the current surface dimensions in physical pixels.
+    fn apply_scroll_from_cursor(&mut self, w: u32, h: u32) {
+        let max = self.terminal.scroll_max();
+        if max == 0 {
+            return;
+        }
+        let screen_h = h as f32;
+        // Recompute thumb height the same way as the geometry function.
+        let rows = self.terminal.rows();
+        let total = rows + max;
+        let thumb_h = (screen_h * rows as f32 / total as f32).max(24.0);
+
+        let travel = screen_h - thumb_h;
+        if travel <= 0.0 {
+            return;
+        }
+
+        let thumb_top = (self.cursor.1 as f32 - self.drag_grab_dy).clamp(0.0, travel);
+        // frac=0 → thumb at top → scroll_offset=max (oldest history)
+        // frac=1 → thumb at bottom → scroll_offset=0 (live bottom)
+        let frac = thumb_top / travel;
+        let offset = ((1.0 - frac) * max as f32).round() as usize;
+        self.terminal.scroll_to_offset(offset);
+        // suppress unused warning on w
+        let _ = w;
     }
 
     fn drain_pty(&mut self) {
@@ -128,6 +165,57 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
+                if self.dragging_scrollbar {
+                    // Copy width/height to avoid borrow conflicts.
+                    let (w, h) = if let Some(gpu) = &self.gpu {
+                        (gpu.config.width, gpu.config.height)
+                    } else {
+                        return;
+                    };
+                    self.apply_scroll_from_cursor(w, h);
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                let (w, h) = if let Some(gpu) = &self.gpu {
+                    (gpu.config.width, gpu.config.height)
+                } else {
+                    return;
+                };
+                let rows = self.terminal.rows();
+                let scroll_offset = self.terminal.scroll_offset();
+                let scroll_max = self.terminal.scroll_max();
+                let cx = self.cursor.0 as f32;
+                let cy = self.cursor.1 as f32;
+
+                if let Some(rect) = jetty_render::scrollbar_rect_geom(rows, scroll_offset, scroll_max, w, h) {
+                    let in_thumb = cx >= rect.x && cx <= rect.x + rect.w
+                        && cy >= rect.y && cy <= rect.y + rect.h;
+                    let in_track = cx >= rect.x && cx <= rect.x + rect.w;
+
+                    if in_thumb {
+                        // Grab the thumb at the exact click point.
+                        self.dragging_scrollbar = true;
+                        self.drag_grab_dy = cy - rect.y;
+                    } else if in_track {
+                        // Clicked the track outside the thumb: jump to that position,
+                        // treating the grab point as the thumb center.
+                        self.dragging_scrollbar = true;
+                        self.drag_grab_dy = rect.h / 2.0;
+                        self.apply_scroll_from_cursor(w, h);
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                self.dragging_scrollbar = false;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Positive y = wheel up = scroll into history (older output).

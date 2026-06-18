@@ -140,6 +140,35 @@ impl Terminal {
             self.scroll_lines(-delta);
         }
     }
+
+    /// Return the current display offset (how many lines scrolled up from bottom).
+    /// 0 = at the live bottom; positive = scrolled into history.
+    pub fn scroll_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// Return the maximum scroll offset (== history_size, same value used in snapshot()).
+    pub fn scroll_max(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
+    /// Scroll to an absolute offset (0 = bottom, scroll_max = top of history).
+    /// The offset is clamped to `0..=scroll_max()`.
+    pub fn scroll_to_offset(&mut self, offset: usize) {
+        let max = self.scroll_max();
+        let offset = offset.min(max);
+        let current = self.scroll_offset();
+        // Delta: positive = scroll up into history, negative = scroll toward bottom.
+        let delta = offset as i32 - current as i32;
+        if delta != 0 {
+            self.term.scroll_display(Scroll::Delta(delta));
+        }
+    }
+
+    /// Return the number of rows (screen lines) in this terminal.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
 }
 
 /// Convert a 256-color palette index to RGB (standard xterm scheme):

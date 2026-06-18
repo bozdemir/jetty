@@ -182,19 +182,22 @@ impl QuadLayer {
     }
 }
 
-pub fn scrollbar_rect(
-    snapshot: &jetty_core::GridSnapshot,
+/// Compute the scrollbar thumb rectangle from raw geometry values.
+/// This is the canonical geometry computation shared by drawing and hit-testing.
+/// Returns `None` when `scroll_max == 0` (nothing to scroll).
+pub fn scrollbar_rect_geom(
+    rows: usize,
+    scroll_offset: usize,
+    scroll_max: usize,
     screen_w: u32,
     screen_h: u32,
 ) -> Option<Rect> {
-    if snapshot.scroll_max == 0 {
+    if scroll_max == 0 {
         return None;
     }
-    let total = snapshot.rows + snapshot.scroll_max;
-    let thumb_h =
-        (screen_h as f32 * snapshot.rows as f32 / total as f32).max(24.0);
-    let frac = (snapshot.scroll_max - snapshot.scroll_offset) as f32
-        / snapshot.scroll_max as f32;
+    let total = rows + scroll_max;
+    let thumb_h = (screen_h as f32 * rows as f32 / total as f32).max(24.0);
+    let frac = (scroll_max - scroll_offset) as f32 / scroll_max as f32;
     let thumb_y = frac * (screen_h as f32 - thumb_h);
     Some(Rect {
         x: screen_w as f32 - 8.0,
@@ -203,4 +206,18 @@ pub fn scrollbar_rect(
         h: thumb_h,
         color: [150, 150, 165, 220],
     })
+}
+
+pub fn scrollbar_rect(
+    snapshot: &jetty_core::GridSnapshot,
+    screen_w: u32,
+    screen_h: u32,
+) -> Option<Rect> {
+    scrollbar_rect_geom(
+        snapshot.rows,
+        snapshot.scroll_offset,
+        snapshot.scroll_max,
+        screen_w,
+        screen_h,
+    )
 }

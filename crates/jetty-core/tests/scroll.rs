@@ -18,6 +18,24 @@ fn snapshot_scroll_offset_and_max_after_scroll_up() {
     assert!(snap_up.scroll_max > 0, "scroll_max should remain > 0 while scrolled up");
 }
 
+#[test]
+fn scroll_to_offset_absolute() {
+    // 20 cols, 5 rows, feed 20 lines so we have ample scrollback history.
+    let mut term = make_term_with_lines(20, 5, 20);
+
+    // At the bottom, scroll_offset should be 0.
+    assert_eq!(term.scroll_offset(), 0, "expected scroll_offset 0 at bottom");
+    assert!(term.scroll_max() > 0, "expected non-zero scroll_max after 20 lines");
+
+    // Scroll to absolute offset 3.
+    term.scroll_to_offset(3);
+    assert_eq!(term.scroll_offset(), 3, "scroll_to_offset(3) should result in scroll_offset==3");
+
+    // Scroll back to 0 (bottom).
+    term.scroll_to_offset(0);
+    assert_eq!(term.scroll_offset(), 0, "scroll_to_offset(0) should result in scroll_offset==0");
+}
+
 /// Feed N numbered lines to the terminal and return a terminal with the
 /// screen sized to `cols x rows`.
 fn make_term_with_lines(cols: usize, rows: usize, count: usize) -> Terminal {
