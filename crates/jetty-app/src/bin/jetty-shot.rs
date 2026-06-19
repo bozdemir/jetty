@@ -96,6 +96,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             terminal.feed(&chunk);
         }
         eprintln!("jetty-shot: JETTY_SHOT_PTY mode drove a real shell for ~3.0s");
+
+        // Optional: inject a command into the live shell after startup settles.
+        // Writes the command + newline to the PTY, then runs the SAME
+        // drain/respond loop for another ~2.0s so the command executes and the
+        // prompt redraws before we snapshot.
+        if let Ok(cmd) = std::env::var("JETTY_SHOT_PTY_CMD") {
+            w.write_all(cmd.as_bytes()).ok();
+            w.write_all(b"\n").ok();
+            w.flush().ok();
+            eprintln!("jetty-shot: injected JETTY_SHOT_PTY_CMD={cmd:?}");
+
+            // ~2.0s: 40 iterations of 50ms.
+            for _ in 0..40 {
+                while let Ok(chunk) = pty.output().try_recv() {
+                    terminal.feed(&chunk);
+                }
+                let replies = terminal.drain_pty_writes();
+                if !replies.is_empty() {
+                    w.write_all(&replies).ok();
+                    w.flush().ok();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            // Final drain after the command loop.
+            while let Ok(chunk) = pty.output().try_recv() {
+                terminal.feed(&chunk);
+            }
+            eprintln!("jetty-shot: ran injected command for ~2.0s");
+        }
     } else {
         terminal.feed(&input_bytes);
     }
