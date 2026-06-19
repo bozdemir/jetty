@@ -67,7 +67,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Build terminal snapshot ---
     // Terminal::new picks up JETTY_THEME and JETTY_OPACITY from the environment.
     let mut terminal = jetty_core::Terminal::new(cols, rows);
-    terminal.feed(&input_bytes);
+
+    if std::env::var("JETTY_SHOT_PTY").is_ok() {
+        // Drive a REAL shell offscreen so we can see the live startup prompt
+        // (e.g. zsh+p10k) settle exactly as in the running app. This feeds the
+        // shell's output into the terminal and writes the terminal's query
+        // replies (DSR/DA/etc.) back to the PTY, which is what clears the
+        // startup red "x".
+        use std::io::Write;
+        let pty = jetty_core::PtySession::spawn(cols as u16, rows as u16)?;
+        let mut w = pty.writer();
+
+        // ~3.0s: 60 iterations of 50ms. Each iteration drain shell output ->
+        // feed terminal; then drain terminal replies -> write back to the PTY.
+        for _ in 0..60 {
+            while let Ok(chunk) = pty.output().try_recv() {
+                terminal.feed(&chunk);
+            }
+            let replies = terminal.drain_pty_writes();
+            if !replies.is_empty() {
+                w.write_all(&replies).ok();
+                w.flush().ok();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Final drain to capture anything emitted during the last sleep.
+        while let Ok(chunk) = pty.output().try_recv() {
+            terminal.feed(&chunk);
+        }
+        eprintln!("jetty-shot: JETTY_SHOT_PTY mode drove a real shell for ~3.0s");
+    } else {
+        terminal.feed(&input_bytes);
+    }
 
     // Optional: scroll the view before snapshotting (JETTY_SHOT_SCROLL, i32, positive = up).
     if let Ok(scroll_str) = std::env::var("JETTY_SHOT_SCROLL") {
