@@ -1,23 +1,79 @@
 use crate::snapshot::{CellSnapshot, GridSnapshot};
 use crate::theme::Theme;
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term, point_to_viewport};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Processor, Rgb};
 
 /// EventListener that captures the terminal's write-back bytes (replies to
-/// host queries such as DSR/DA) and forwards them over a channel so the app
-/// can write them back to the PTY. Without this, queries from the shell
-/// (e.g. p10k/zsh capability probes) get no response and time out, which is
-/// what produced the red "x" at the first prompt.
+/// host queries such as DSR/DA, text-area size, and OSC color queries) and
+/// forwards them over a channel so the app can write them back to the PTY.
+/// Without this, queries from the shell (e.g. p10k/zsh capability probes) get
+/// no response and time out, which is what produced the red "x" at the first
+/// prompt. p10k/zsh issue several distinct query types and any unanswered one
+/// can make a prompt-hook command fail, so we answer all of them, not just
+/// `PtyWrite`.
 #[derive(Clone)]
 struct EventProxy {
     tx: std::sync::mpsc::Sender<Vec<u8>>,
+    /// Terminal geometry, needed to answer `TextAreaSizeRequest` (\e[14t/\e[18t).
+    cols: u16,
+    rows: u16,
+    /// Theme snapshot used to answer OSC `ColorRequest` queries with sensible
+    /// colors. Captured at construction; runtime theme changes don't need to be
+    /// reflected here since these replies only affect the shell's capability
+    /// probing, not rendering.
+    theme: Theme,
 }
+
+impl EventProxy {
+    /// Resolve a color-request index to an RGB reply.
+    ///
+    /// The index follows alacritty's `colors` table: `0..=255` are the
+    /// palette / 6x6x6 cube / grayscale ramp, and the named-color slots use
+    /// `NamedColor` discriminants (`Foreground = 256`, `Background = 257`,
+    /// `Cursor = 258`). Anything else falls back to the default foreground.
+    fn color_for_index(&self, index: usize) -> Rgb {
+        let [r, g, b] = match index {
+            0..=255 => index_to_rgb(&self.theme, index as u8),
+            256 => self.theme.fg,            // NamedColor::Foreground
+            257 => [self.theme.bg[0], self.theme.bg[1], self.theme.bg[2]], // Background
+            258 => self.theme.cursor,        // NamedColor::Cursor
+            _ => self.theme.fg,
+        };
+        Rgb { r, g, b }
+    }
+}
+
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(s) = event {
-            let _ = self.tx.send(s.into_bytes());
+        match event {
+            // Replies to DSR/DA-style queries the terminal answers itself.
+            Event::PtyWrite(s) => {
+                let _ = self.tx.send(s.into_bytes());
+            }
+            // \e[14t (text area size in pixels) / \e[18t (size in cells).
+            // The formatter turns a WindowSize into the proper escape reply.
+            // Cell pixel sizes are not meaningful for our renderer, so we use a
+            // small constant; the cell/col/line counts are what shells care about.
+            Event::TextAreaSizeRequest(fmt) => {
+                let window_size = WindowSize {
+                    num_lines: self.rows,
+                    num_cols: self.cols,
+                    cell_width: 1,
+                    cell_height: 1,
+                };
+                let _ = self.tx.send(fmt(window_size).into_bytes());
+            }
+            // OSC 4/10/11/12 color queries. Reply with a reasonable color drawn
+            // from the active theme so p10k's color-capability probes succeed.
+            Event::ColorRequest(index, fmt) => {
+                let rgb = self.color_for_index(index);
+                let _ = self.tx.send(fmt(rgb).into_bytes());
+            }
+            // Bell/Title/Wakeup/ClipboardStore/MouseCursorDirty and the rest are
+            // intentionally ignored for now (Title/Bell are a later concern).
+            _ => {}
         }
     }
 }
@@ -54,7 +110,6 @@ impl Terminal {
         let size = Size { cols, lines: rows };
         let config = Config { scrolling_history: 10_000, ..Default::default() };
         let (tx, pty_write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let term = Term::new(config, &size, EventProxy { tx });
 
         // Load theme from JETTY_THEME env var; default to "default_dark".
         let theme_name = std::env::var("JETTY_THEME").unwrap_or_else(|_| "default_dark".to_string());
@@ -68,6 +123,17 @@ impl Terminal {
                 theme.bg[3] = (opacity * 255.0) as u8;
             }
         }
+
+        // The listener needs the geometry and theme so it can answer
+        // TextAreaSizeRequest and ColorRequest queries. Clamp the usize
+        // dimensions into the u16 that WindowSize expects.
+        let proxy = EventProxy {
+            tx,
+            cols: cols.min(u16::MAX as usize) as u16,
+            rows: rows.min(u16::MAX as usize) as u16,
+            theme: theme.clone(),
+        };
+        let term = Term::new(config, &size, proxy);
 
         Terminal { term, parser: Processor::new(), cols, rows, theme, pty_write_rx }
     }
