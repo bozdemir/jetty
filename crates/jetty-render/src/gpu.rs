@@ -13,32 +13,48 @@ impl GpuContext {
         window: Arc<W>,
         width: u32,
         height: u32,
-    ) -> Self {
+    ) -> Option<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance.create_surface(window.clone()).expect("surface");
+        let surface = match instance.create_surface(window.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("jetty: GPU init failed (surface: {e}); running without rendering");
+                return None;
+            }
+        };
         // Prefer the integrated (Intel) GPU. On hybrid Intel+NVIDIA systems under
         // X11, driving the discrete NVIDIA GPU via Vulkan can crash the KWin/X
         // compositor — and a terminal has no need for discrete-GPU power.
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
-        }))
-        .expect("no adapter");
+        })) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("jetty: GPU init failed (no adapter: {e}); running without rendering");
+                return None;
+            }
+        };
         eprintln!(
             "jetty: GPU adapter = {} ({:?})",
             adapter.get_info().name,
             adapter.get_info().backend
         );
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        let (device, queue) = match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("jetty-device"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::default(),
             trace: wgpu::Trace::Off,
             ..Default::default()
-        }))
-        .expect("device");
+        })) {
+            Ok(dq) => dq,
+            Err(e) => {
+                eprintln!("jetty: GPU init failed (device: {e}); running without rendering");
+                return None;
+            }
+        };
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -71,7 +87,7 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
 
-        Self { surface, device, queue, config, format }
+        Some(Self { surface, device, queue, config, format })
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {

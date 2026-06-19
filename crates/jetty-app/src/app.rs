@@ -37,6 +37,8 @@ pub struct App {
     panel_open: bool,
     /// Whether the user is currently dragging the opacity slider in the Settings panel.
     dragging_slider: bool,
+    /// Whether JETTY_DEBUG is set — enables input/panel state logging to stderr.
+    debug: bool,
 }
 
 impl App {
@@ -55,6 +57,8 @@ impl App {
             .map(|v| v.clamp(0.0, 1.0))
             .unwrap_or(1.0);
 
+        let debug = std::env::var("JETTY_DEBUG").is_ok();
+
         let mut app = App {
             proxy,
             window: None,
@@ -72,6 +76,7 @@ impl App {
             drag_grab_dy: 0.0,
             panel_open: false,
             dragging_slider: false,
+            debug,
         };
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -138,16 +143,21 @@ impl ApplicationHandler<()> for App {
         let window = jetty_platform::build_window(event_loop, "Jetty", (1000, 640));
         let size = window.inner_size();
         let gpu = GpuContext::new(window.clone(), size.width, size.height);
-        let text = TextLayer::new(&gpu.device, &gpu.queue, gpu.format, 16.0);
-        let quad = QuadLayer::new(&gpu.device, gpu.format);
+        let (text, quad) = if let Some(ref g) = gpu {
+            let text = TextLayer::new(&g.device, &g.queue, g.format, 16.0);
+            let quad = QuadLayer::new(&g.device, g.format);
+            (Some(text), Some(quad))
+        } else {
+            (None, None)
+        };
 
         let pty = PtySession::spawn(COLS as u16, ROWS as u16).expect("pty");
         let writer = pty.writer();
 
         self.window = Some(window);
-        self.gpu = Some(gpu);
-        self.text = Some(text);
-        self.quad = Some(quad);
+        self.gpu = gpu;
+        self.text = text;
+        self.quad = quad;
         self.pty = Some(pty);
         self.writer = Some(writer);
 
@@ -269,6 +279,17 @@ impl ApplicationHandler<()> for App {
                     input::MouseAction::None => {}
                 }
             }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
+                // Right-click toggles the Settings panel — reliable, no keyboard
+                // layout dependency.
+                self.panel_open = !self.panel_open;
+                if self.debug {
+                    eprintln!("PANEL toggled via right-click -> open={}", self.panel_open);
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
                 self.dragging_scrollbar = false;
                 self.dragging_slider = false;
@@ -293,9 +314,27 @@ impl ApplicationHandler<()> for App {
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
-                match input::decide_key(ctrl, shift, event.physical_key, &event.logical_key, self.panel_open) {
+                let action = input::decide_key(ctrl, shift, event.physical_key.clone(), &event.logical_key, self.panel_open);
+                if self.debug {
+                    let action_name = match &action {
+                        input::KeyAction::TogglePanel => "TogglePanel",
+                        input::KeyAction::ClosePanel => "ClosePanel",
+                        input::KeyAction::CycleTheme => "CycleTheme",
+                        input::KeyAction::OpacityUp => "OpacityUp",
+                        input::KeyAction::OpacityDown => "OpacityDown",
+                        input::KeyAction::ScrollPageUp => "ScrollPageUp",
+                        input::KeyAction::ScrollPageDown => "ScrollPageDown",
+                        input::KeyAction::Send(_) => "Send",
+                        input::KeyAction::None => "None",
+                    };
+                    eprintln!("KEY ctrl={ctrl} shift={shift} physical={:?} -> {action_name}", event.physical_key);
+                }
+                match action {
                     input::KeyAction::TogglePanel => {
                         self.panel_open = !self.panel_open;
+                        if self.debug {
+                            eprintln!("PANEL toggled via key -> open={}", self.panel_open);
+                        }
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
