@@ -77,6 +77,19 @@ pub fn decide_key(
         _ => {}
     }
 
+    // Ctrl+<letter> → control byte (Ctrl+C = 0x03 SIGINT, Ctrl+D = EOF, Ctrl+Z,
+    // Ctrl+L clear, ...). Keyed by PHYSICAL position so it is layout-independent.
+    // Must come before the plain key_to_bytes fallback, which would otherwise send
+    // the literal letter instead of the control code. (Our own shortcuts use
+    // Ctrl+Shift, so they are already handled above and never reach here.)
+    if ctrl && !shift {
+        if let PhysicalKey::Code(code) = physical {
+            if let Some(b) = ctrl_byte(code) {
+                return KeyAction::Send(vec![b]);
+            }
+        }
+    }
+
     // Rule 8: everything else → convert to bytes and send to PTY.
     match key_to_bytes(logical) {
         Some(bytes) => KeyAction::Send(bytes),
@@ -158,6 +171,22 @@ pub fn decide_mouse_press(
 /// Returns `true` when the point `(x, y)` lies within the rect (inclusive).
 pub fn point_in(r: &jetty_render::Rect, x: f32, y: f32) -> bool {
     x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+}
+
+/// Map a physical letter key to its Ctrl control byte: Ctrl+A=1 .. Ctrl+Z=26
+/// (so Ctrl+C=3=SIGINT, Ctrl+D=4=EOF, Ctrl+Z=26, Ctrl+L=12=clear). Uses the
+/// physical key position, so it is independent of the keyboard layout.
+fn ctrl_byte(code: KeyCode) -> Option<u8> {
+    use KeyCode::*;
+    let n: u8 = match code {
+        KeyA => 1, KeyB => 2, KeyC => 3, KeyD => 4, KeyE => 5, KeyF => 6,
+        KeyG => 7, KeyH => 8, KeyI => 9, KeyJ => 10, KeyK => 11, KeyL => 12,
+        KeyM => 13, KeyN => 14, KeyO => 15, KeyP => 16, KeyQ => 17, KeyR => 18,
+        KeyS => 19, KeyT => 20, KeyU => 21, KeyV => 22, KeyW => 23, KeyX => 24,
+        KeyY => 25, KeyZ => 26,
+        _ => return None,
+    };
+    Some(n)
 }
 
 /// Translate a winit logical key into the byte sequence a terminal expects.

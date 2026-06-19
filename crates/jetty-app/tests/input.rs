@@ -69,6 +69,29 @@ fn ctrl_shift_o_toggles_panel() {
 }
 
 #[test]
+fn ctrl_c_sends_sigint() {
+    // Ctrl+C must send 0x03 (SIGINT), not the literal letter "c".
+    let a = decide_key(true, false, phys(KeyCode::KeyC), &Key::Character("c".into()), false);
+    assert_eq!(a, KeyAction::Send(vec![3]));
+}
+
+#[test]
+fn ctrl_letters_send_control_bytes() {
+    assert_eq!(
+        decide_key(true, false, phys(KeyCode::KeyD), &Key::Character("d".into()), false),
+        KeyAction::Send(vec![4]) // Ctrl+D = EOF
+    );
+    assert_eq!(
+        decide_key(true, false, phys(KeyCode::KeyZ), &Key::Character("z".into()), false),
+        KeyAction::Send(vec![26]) // Ctrl+Z = suspend
+    );
+    assert_eq!(
+        decide_key(true, false, phys(KeyCode::KeyL), &Key::Character("l".into()), false),
+        KeyAction::Send(vec![12]) // Ctrl+L = clear
+    );
+}
+
+#[test]
 fn escape_closes_open_panel() {
     let action = decide_key(
         false,
