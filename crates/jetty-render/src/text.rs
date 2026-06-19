@@ -94,6 +94,11 @@ impl TextLayer {
 
     /// Renders the terminal grid to an arbitrary TextureView (offscreen or on-screen).
     /// Does NOT acquire a surface frame and does NOT present — the caller controls that.
+    ///
+    /// When `clear` is true this pass clears the view to the theme background
+    /// first (legacy self-contained behavior). When false it uses `LoadOp::Load`
+    /// so it draws ON TOP of an already-painted background — used by callers that
+    /// run a per-cell background quad pass (which owns the clear) before the text.
     pub fn render_to(
         &mut self,
         device: &wgpu::Device,
@@ -102,6 +107,7 @@ impl TextLayer {
         width: u32,
         height: u32,
         snapshot: &GridSnapshot,
+        clear: bool,
     ) -> Result<(), PrepareError> {
         // Build per-cell color spans: one (&str slice, Attrs) pair per cell.
         // We build a single String containing all text, then collect borrowed slices from it.
@@ -212,36 +218,24 @@ impl TextLayer {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("text") });
         {
-            // Build the clear color from the snapshot's theme bg.
-        // We always premultiply by alpha so the value is correct for
-        // PreMultiplied alpha_mode surfaces and harmless for Opaque ones.
-        let [br, bg_, bb, ba] = snapshot.bg_rgba;
-        let a = ba as f64 / 255.0;
-        // The surface is sRGB, so the clear value must be LINEAR. Convert each
-        // sRGB component to linear, then premultiply by alpha (for PreMultiplied
-        // alpha_mode). Without this, dark theme backgrounds render washed-out.
-        fn srgb_to_linear(c: u8) -> f64 {
-            let s = c as f64 / 255.0;
-            if s <= 0.04045 {
-                s / 12.92
+            // When clearing, build the clear color from the snapshot's theme bg.
+            // Premultiplied by alpha so the value is correct for PreMultiplied
+            // alpha_mode surfaces and harmless for Opaque ones. This matches the
+            // per-cell background pass's `default_bg_clear`. When `clear` is false
+            // the background was already painted by a prior quad pass, so we load.
+            let load = if clear {
+                wgpu::LoadOp::Clear(crate::quad::default_bg_clear(snapshot))
             } else {
-                ((s + 0.055) / 1.055).powf(2.4)
-            }
-        }
-        let clear_color = wgpu::Color {
-            r: srgb_to_linear(br) * a,
-            g: srgb_to_linear(bg_) * a,
-            b: srgb_to_linear(bb) * a,
-            a,
-        };
+                wgpu::LoadOp::Load
+            };
 
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("text-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -368,7 +362,8 @@ impl TextLayer {
         let Some((frame, view)) = gpu.acquire_frame() else {
             return Ok(());
         };
-        self.render_to(&gpu.device, &gpu.queue, &view, gpu.config.width, gpu.config.height, snapshot)?;
+        // Self-contained path: this pass owns the frame clear.
+        self.render_to(&gpu.device, &gpu.queue, &view, gpu.config.width, gpu.config.height, snapshot, true)?;
         frame.present();
         Ok(())
     }

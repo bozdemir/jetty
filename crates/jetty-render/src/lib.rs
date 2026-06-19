@@ -4,5 +4,5 @@ mod quad;
 mod panel;
 pub use gpu::GpuContext;
 pub use text::TextLayer;
-pub use quad::{QuadLayer, Rect, scrollbar_rect, scrollbar_rect_geom};
+pub use quad::{QuadLayer, Rect, cell_bg_rects, default_bg_clear, scrollbar_rect, scrollbar_rect_geom};
 pub use panel::{build_panel, PanelView, PanelGeom};

@@ -1,5 +1,3 @@
-use wgpu::util::DeviceExt;
-
 const QUAD_SHADER: &str = r#"
 struct Screen { size: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> screen: Screen;
@@ -30,6 +28,13 @@ pub struct QuadLayer {
     pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Persistent instance buffer, grown on demand and rewritten each frame via
+    /// `queue.write_buffer` instead of being recreated. `instance_cap` is the
+    /// current capacity in bytes.
+    instance_buf: Option<wgpu::Buffer>,
+    instance_cap: u64,
+    /// Scratch CPU buffer reused across frames to pack instance floats.
+    instance_scratch: Vec<f32>,
 }
 
 impl QuadLayer {
@@ -116,9 +121,58 @@ impl QuadLayer {
             cache: None,
         });
 
-        Self { pipeline, uniform_buf, bind_group }
+        Self {
+            pipeline,
+            uniform_buf,
+            bind_group,
+            instance_buf: None,
+            instance_cap: 0,
+            instance_scratch: Vec::new(),
+        }
     }
 
+    /// Pack `rects` into the persistent instance buffer, growing it only when the
+    /// existing capacity is too small. Returns the byte length of the packed data.
+    /// The data is uploaded via `queue.write_buffer`, never recreated per frame.
+    fn upload_instances(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rects: &[Rect],
+    ) -> u64 {
+        self.instance_scratch.clear();
+        self.instance_scratch.reserve(rects.len() * 8);
+        for r in rects {
+            self.instance_scratch.push(r.x);
+            self.instance_scratch.push(r.y);
+            self.instance_scratch.push(r.w);
+            self.instance_scratch.push(r.h);
+            self.instance_scratch.push(r.color[0] as f32 / 255.0);
+            self.instance_scratch.push(r.color[1] as f32 / 255.0);
+            self.instance_scratch.push(r.color[2] as f32 / 255.0);
+            self.instance_scratch.push(r.color[3] as f32 / 255.0);
+        }
+        let bytes = bytemuck::cast_slice::<f32, u8>(&self.instance_scratch);
+        let needed = bytes.len() as u64;
+
+        // Grow the persistent buffer only when it cannot hold this frame's data.
+        if self.instance_buf.is_none() || self.instance_cap < needed {
+            // Round up to reduce churn from frame-to-frame size jitter.
+            let new_cap = needed.max(self.instance_cap * 2).max(256);
+            self.instance_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("quad-instances"),
+                size: new_cap,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.instance_cap = new_cap;
+        }
+
+        queue.write_buffer(self.instance_buf.as_ref().unwrap(), 0, bytes);
+        needed
+    }
+
+    /// Draw `rects` over whatever is already in `view` (`LoadOp::Load`).
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -128,30 +182,54 @@ impl QuadLayer {
         screen_h: u32,
         rects: &[Rect],
     ) {
-        if rects.is_empty() {
+        self.render_inner(device, queue, view, screen_w, screen_h, rects, None);
+    }
+
+    /// Clear `view` to `clear_color`, then draw `rects` on top. Used for the
+    /// per-cell background pass that runs UNDER the terminal text: it owns the
+    /// frame clear so `TextLayer::render_to` can run with `LoadOp::Load`.
+    ///
+    /// Unlike `render`, this always runs (even with no rects) so the clear is not
+    /// skipped on a screen made entirely of default-bg cells.
+    pub fn render_clear(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        screen_w: u32,
+        screen_h: u32,
+        rects: &[Rect],
+        clear_color: wgpu::Color,
+    ) {
+        self.render_inner(device, queue, view, screen_w, screen_h, rects, Some(clear_color));
+    }
+
+    fn render_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        screen_w: u32,
+        screen_h: u32,
+        rects: &[Rect],
+        clear_color: Option<wgpu::Color>,
+    ) {
+        // With nothing to draw and no clear requested, there is no work to do.
+        if rects.is_empty() && clear_color.is_none() {
             return;
         }
 
         let uniform_data: [f32; 4] = [screen_w as f32, screen_h as f32, 0.0, 0.0];
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(&uniform_data));
 
-        let mut instance_data: Vec<f32> = Vec::with_capacity(rects.len() * 8);
-        for r in rects {
-            instance_data.push(r.x);
-            instance_data.push(r.y);
-            instance_data.push(r.w);
-            instance_data.push(r.h);
-            instance_data.push(r.color[0] as f32 / 255.0);
-            instance_data.push(r.color[1] as f32 / 255.0);
-            instance_data.push(r.color[2] as f32 / 255.0);
-            instance_data.push(r.color[3] as f32 / 255.0);
+        if !rects.is_empty() {
+            self.upload_instances(device, queue, rects);
         }
 
-        let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("quad-instances"),
-            contents: bytemuck::cast_slice(&instance_data),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let load = match clear_color {
+            Some(c) => wgpu::LoadOp::Clear(c),
+            None => wgpu::LoadOp::Load,
+        };
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("quad-encoder"),
@@ -163,7 +241,7 @@ impl QuadLayer {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -173,13 +251,88 @@ impl QuadLayer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, instance_buf.slice(..));
-            pass.draw(0..6, 0..rects.len() as u32);
+            if !rects.is_empty() {
+                let buf = self.instance_buf.as_ref().unwrap();
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..rects.len() as u32);
+            }
         }
         queue.submit(Some(encoder.finish()));
     }
+}
+
+/// Convert an sRGB component (0..=255) to linear float (0.0..=1.0), matching the
+/// quad shader's `s2l` and `TextLayer`'s clear-color conversion. The surface is
+/// sRGB, so wgpu `Clear` values must be linear.
+fn srgb_to_linear(c: u8) -> f64 {
+    let s = c as f64 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The wgpu clear color for the terminal's default background, derived from the
+/// snapshot's theme bg. Premultiplied by alpha so transparent themes composite
+/// correctly under `PreMultiplied` alpha mode (and harmless when alpha == 255).
+///
+/// This is the same value `TextLayer::render_to` used to clear with; it now lives
+/// here so the per-cell background quad pass (which owns the clear) can reuse it.
+pub fn default_bg_clear(snapshot: &jetty_core::GridSnapshot) -> wgpu::Color {
+    let [br, bg_, bb, ba] = snapshot.bg_rgba;
+    let a = ba as f64 / 255.0;
+    wgpu::Color {
+        r: srgb_to_linear(br) * a,
+        g: srgb_to_linear(bg_) * a,
+        b: srgb_to_linear(bb) * a,
+        a,
+    }
+}
+
+/// Build per-cell background rectangles for every cell whose background differs
+/// from the theme's default background (`snapshot.bg_rgba[0..3]`). Horizontal
+/// runs of cells sharing the same bg in a row are coalesced into a single Rect.
+///
+/// Each rect is opaque (alpha 255): a colored cell background should fully cover,
+/// even on a transparent theme — only default-bg cells stay transparent (handled
+/// by the frame clear, which keeps the theme's alpha).
+pub fn cell_bg_rects(
+    snapshot: &jetty_core::GridSnapshot,
+    cell_w: f32,
+    cell_h: f32,
+) -> Vec<Rect> {
+    let default_bg = [snapshot.bg_rgba[0], snapshot.bg_rgba[1], snapshot.bg_rgba[2]];
+    let mut rects: Vec<Rect> = Vec::new();
+
+    for row in 0..snapshot.rows {
+        let mut col = 0;
+        while col < snapshot.cols {
+            let bg = snapshot.cell(row, col).bg;
+            if bg == default_bg {
+                col += 1;
+                continue;
+            }
+            // Extend the run while the bg stays equal.
+            let start = col;
+            col += 1;
+            while col < snapshot.cols && snapshot.cell(row, col).bg == bg {
+                col += 1;
+            }
+            let run = (col - start) as f32;
+            rects.push(Rect {
+                x: start as f32 * cell_w,
+                y: row as f32 * cell_h,
+                w: run * cell_w,
+                h: cell_h,
+                color: [bg[0], bg[1], bg[2], 255],
+            });
+        }
+    }
+
+    rects
 }
 
 /// Compute the scrollbar thumb rectangle from raw geometry values.

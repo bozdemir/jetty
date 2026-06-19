@@ -497,6 +497,20 @@ impl ApplicationHandler<()> for App {
                 let width = gpu.config.width;
                 let height = gpu.config.height;
                 if let Some((frame, view)) = gpu.acquire_frame() {
+                    // Pass 1: clear to the theme bg and paint per-cell background
+                    // quads (reverse-video / colored backgrounds) UNDER the text.
+                    let (cell_w, cell_h) = text.cell_size();
+                    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h);
+                    quad.render_clear(
+                        &gpu.device,
+                        &gpu.queue,
+                        &view,
+                        width,
+                        height,
+                        &bg_rects,
+                        jetty_render::default_bg_clear(&snap),
+                    );
+                    // Pass 2: draw glyphs on top of the painted background (load).
                     let _ = text.render_to(
                         &gpu.device,
                         &gpu.queue,
@@ -504,6 +518,7 @@ impl ApplicationHandler<()> for App {
                         width,
                         height,
                         &snap,
+                        false,
                     );
                     let mut rects: Vec<jetty_render::Rect> = Vec::new();
                     if let Some(r) =

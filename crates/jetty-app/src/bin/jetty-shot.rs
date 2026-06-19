@@ -162,12 +162,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // --- Render to offscreen texture ---
-    text.render_to(&device, &queue, &view, width, height, &snap)?;
+    let mut quad = QuadLayer::new(&device, format);
+
+    // --- Pass 1: clear to theme bg + paint per-cell background quads UNDER text ---
+    let (cell_w, cell_h) = text.cell_size();
+    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h);
+    quad.render_clear(
+        &device,
+        &queue,
+        &view,
+        width,
+        height,
+        &bg_rects,
+        jetty_render::default_bg_clear(&snap),
+    );
+
+    // --- Pass 2: render the grid text on top of the painted background (load) ---
+    text.render_to(&device, &queue, &view, width, height, &snap, false)?;
 
     // --- Draw scrollbar quad (and optionally the settings panel) over the text ---
     {
-        let mut quad = QuadLayer::new(&device, format);
         let mut rects: Vec<jetty_render::Rect> = Vec::new();
         if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height) {
             rects.push(r);
