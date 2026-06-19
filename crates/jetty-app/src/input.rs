@@ -23,18 +23,24 @@ pub enum KeyAction {
 /// * `physical`   – layout-independent [`PhysicalKey`] from the event
 /// * `logical`    – the produced [`Key`] from the event
 /// * `panel_open` – whether the Settings panel is currently visible
+/// * `app_cursor` – whether DECCKM application cursor keys are enabled
+///   (`\e[?1h`); when true, arrow keys are encoded with the SS3 (`\eO`) prefix
+///   instead of CSI (`\e[`).
 ///
 /// The rules mirror `app.rs` exactly:
 /// 1. Ctrl+, (no shift)         → TogglePanel
 /// 2. Escape                    → ClosePanel if panel open, else Send(ESC)
-/// 3. Ctrl+Shift+T              → CycleTheme
-/// 4. Ctrl+Shift+Equal          → OpacityUp
-/// 5. Ctrl+Shift+Minus          → OpacityDown
-/// 6. PageUp                    → ScrollPageUp
-/// 7. PageDown                  → ScrollPageDown
-/// 8. Ctrl+<symbol> (Space/[/\\/]) → control byte (0x00, 0x1b, 0x1c, 0x1d)
-/// 9. Alt+<key> that yields bytes  → ESC-prefixed Send(esc + bytes)
-/// 10. Otherwise: key_to_bytes  → Send(bytes) or None
+/// 3. Ctrl+Shift+O              → TogglePanel
+/// 4. Ctrl+Shift+T              → CycleTheme
+/// 5. Ctrl+Shift+Equal          → OpacityUp
+/// 6. Ctrl+Shift+Minus          → OpacityDown
+/// 7. PageUp                    → ScrollPageUp
+/// 8. PageDown                  → ScrollPageDown
+/// 9. Ctrl+<letter/symbol> → control byte, regardless of shift (the explicit
+///    Ctrl+Shift shortcuts in rules 3-6 are intercepted first). When Alt is also
+///    held, the control byte is ESC-prefixed (Ctrl+Alt+b → ESC + 0x02).
+/// 10. Alt+<key> that yields bytes → ESC-prefixed Send(esc + bytes)
+/// 11. Otherwise: key_to_bytes  → Send(bytes) or None
 pub fn decide_key(
     ctrl: bool,
     shift: bool,
@@ -42,6 +48,7 @@ pub fn decide_key(
     physical: PhysicalKey,
     logical: &Key,
     panel_open: bool,
+    app_cursor: bool,
 ) -> KeyAction {
     // Rule 1: Ctrl+, → toggle panel.
     // Match the PHYSICAL key; keep a logical fallback for platforms where
@@ -86,17 +93,40 @@ pub fn decide_key(
     // (0x00), Ctrl+[ = ESC (0x1b), Ctrl+\ = FS (0x1c), Ctrl+] = GS (0x1d). Keyed by
     // PHYSICAL position so it is layout-independent. Must come before the plain
     // key_to_bytes fallback, which would otherwise send the literal character
-    // instead of the control code. (Our own shortcuts use Ctrl+Shift, so they are
-    // already handled above and never reach here.)
-    if ctrl && !shift {
+    // instead of the control code.
+    //
+    // Applies REGARDLESS of shift: Ctrl+Shift+C == Ctrl+C for control purposes
+    // (both → 0x03). The explicit Ctrl+Shift app shortcuts (O/T/Equal/Minus) are
+    // intercepted above and never reach here, so they keep their special meaning.
+    //
+    // When Alt/Meta is also held, the control byte is ESC-prefixed (the classic
+    // "Meta sends Escape" convention), e.g. Ctrl+Alt+b → ESC + 0x02.
+    if ctrl {
         if let PhysicalKey::Code(code) = physical {
             if let Some(b) = ctrl_byte(code) {
+                if alt {
+                    return KeyAction::Send(vec![0x1b, b]);
+                }
                 return KeyAction::Send(vec![b]);
             }
         }
     }
 
-    // Rule 9 + fallback: convert the key to its byte sequence. When Alt/Meta is
+    // Arrow keys honor DECCKM (application cursor mode). When `app_cursor` is set
+    // (`\e[?1h`), arrows are encoded with the SS3 prefix (`\eO A/B/C/D`) instead of
+    // the default CSI prefix (`\e[ A/B/C/D`) so apps like vim/readline see the
+    // sequences they expect.
+    if let Some(bytes) = cursor_key_bytes(logical, app_cursor) {
+        if alt {
+            let mut out = Vec::with_capacity(bytes.len() + 1);
+            out.push(0x1b);
+            out.extend_from_slice(&bytes);
+            return KeyAction::Send(out);
+        }
+        return KeyAction::Send(bytes);
+    }
+
+    // Fallback: convert the key to its byte sequence. When Alt/Meta is
     // held and the key produces bytes, send them ESC-prefixed (the classic
     // "Meta sends Escape" convention), e.g. Alt+b → ESC b, Alt+Enter → ESC CR.
     match key_to_bytes(logical) {
@@ -212,8 +242,36 @@ fn ctrl_byte(code: KeyCode) -> Option<u8> {
     Some(n)
 }
 
+/// Encode the four arrow keys honoring DECCKM (application cursor mode).
+///
+/// Returns `None` for any non-arrow key. When `app_cursor` is true the SS3
+/// prefix (`\eO`) is used; otherwise the default CSI prefix (`\e[`) is used:
+///
+/// | key        | normal (CSI) | app_cursor (SS3) |
+/// |------------|--------------|------------------|
+/// | ArrowUp    | `\e[A`       | `\eOA`           |
+/// | ArrowDown  | `\e[B`       | `\eOB`           |
+/// | ArrowRight | `\e[C`       | `\eOC`           |
+/// | ArrowLeft  | `\e[D`       | `\eOD`           |
+pub fn cursor_key_bytes(key: &Key, app_cursor: bool) -> Option<Vec<u8>> {
+    let final_byte = match key {
+        Key::Named(NamedKey::ArrowUp) => b'A',
+        Key::Named(NamedKey::ArrowDown) => b'B',
+        Key::Named(NamedKey::ArrowRight) => b'C',
+        Key::Named(NamedKey::ArrowLeft) => b'D',
+        _ => return None,
+    };
+    // CSI (`\e[`) by default; SS3 (`\eO`) under DECCKM.
+    let prefix = if app_cursor { b'O' } else { b'[' };
+    Some(vec![0x1b, prefix, final_byte])
+}
+
 /// Translate a winit logical key into the byte sequence a terminal expects.
 /// This is the single source of truth — both `app.rs` and tests use it.
+///
+/// Arrow keys here always use the default CSI (`\e[`) encoding. Callers that
+/// need DECCKM-aware arrows should use [`cursor_key_bytes`] (or [`decide_key`],
+/// which routes arrows through it).
 pub fn key_to_bytes(key: &Key) -> Option<Vec<u8>> {
     match key {
         Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),

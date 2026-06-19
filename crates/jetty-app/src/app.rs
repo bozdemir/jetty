@@ -406,7 +406,8 @@ impl ApplicationHandler<()> for App {
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
-                let action = input::decide_key(ctrl, shift, alt, event.physical_key.clone(), &event.logical_key, self.panel_open);
+                let app_cursor = self.terminal.app_cursor_keys();
+                let action = input::decide_key(ctrl, shift, alt, event.physical_key.clone(), &event.logical_key, self.panel_open, app_cursor);
                 if self.debug {
                     let action_name = match &action {
                         input::KeyAction::TogglePanel => "TogglePanel",
