@@ -5,6 +5,8 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, point_to_viewport};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor, Rgb};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// EventListener that captures the terminal's write-back bytes (replies to
 /// host queries such as DSR/DA, text-area size, and OSC color queries) and
@@ -25,6 +27,10 @@ struct EventProxy {
     /// reflected here since these replies only affect the shell's capability
     /// probing, not rendering.
     theme: Theme,
+    /// Set to `true` when the terminal reports the child process (the shell)
+    /// has exited (`Event::ChildExit`) or requests shutdown (`Event::Exit`).
+    /// Shared with the owning `Terminal` so the app can close the window.
+    child_exited: Arc<AtomicBool>,
 }
 
 impl EventProxy {
@@ -72,6 +78,11 @@ impl EventListener for EventProxy {
                 let rgb = self.color_for_index(index);
                 let _ = self.tx.send(fmt(rgb).into_bytes());
             }
+            // The shell process exited (`ChildExit`) or the terminal requested
+            // shutdown (`Exit`). Flag it so the app can close the window.
+            Event::ChildExit(_) | Event::Exit => {
+                self.child_exited.store(true, Ordering::SeqCst);
+            }
             // Bell/Title/Wakeup/ClipboardStore/MouseCursorDirty and the rest are
             // intentionally ignored for now (Title/Bell are a later concern).
             _ => {}
@@ -104,6 +115,9 @@ pub struct Terminal {
     theme: Theme,
     /// Receives the terminal's write-back bytes (replies to host queries).
     pty_write_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    /// Set to `true` once the shell child process exits; shared with the
+    /// `EventProxy` listener that observes `Event::ChildExit`/`Event::Exit`.
+    child_exited: Arc<AtomicBool>,
 }
 
 impl Terminal {
@@ -128,15 +142,17 @@ impl Terminal {
         // The listener needs the geometry and theme so it can answer
         // TextAreaSizeRequest and ColorRequest queries. Clamp the usize
         // dimensions into the u16 that WindowSize expects.
+        let child_exited = Arc::new(AtomicBool::new(false));
         let proxy = EventProxy {
             tx,
             cols: cols.min(u16::MAX as usize) as u16,
             rows: rows.min(u16::MAX as usize) as u16,
             theme: theme.clone(),
+            child_exited: Arc::clone(&child_exited),
         };
         let term = Term::new(config, &size, proxy);
 
-        Terminal { term, parser: Processor::new(), cols, rows, theme, pty_write_rx }
+        Terminal { term, parser: Processor::new(), cols, rows, theme, pty_write_rx, child_exited }
     }
 
     /// Drain all currently-pending write-back byte chunks emitted by the
@@ -179,8 +195,14 @@ impl Terminal {
                 let col = vp.column.0;
                 if row < self.rows && col < self.cols {
                     let cell = item.cell;
-                    let fg = resolve_rgb(&self.theme, cell.fg);
-                    let bg = resolve_rgb(&self.theme, cell.bg);
+                    let mut fg = resolve_rgb(&self.theme, cell.fg);
+                    let mut bg = resolve_rgb(&self.theme, cell.bg);
+                    // Reverse video (`\e[7m`, also used by selections and `ls`
+                    // highlights): swap fg/bg after resolving to RGB so the cell
+                    // renders inverted once backgrounds are painted.
+                    if cell.flags.contains(Flags::INVERSE) {
+                        std::mem::swap(&mut fg, &mut bg);
+                    }
                     // A double-width glyph occupies two grid cells: the WIDE_CHAR
                     // cell holds the actual char, and the following
                     // WIDE_CHAR_SPACER cell is a placeholder. alacritty stores a
@@ -297,6 +319,30 @@ impl Terminal {
         use alacritty_terminal::term::TermMode;
         self.term.mode().contains(TermMode::SGR_MOUSE)
     }
+
+    /// Whether the running application requested SGR-encoded mouse reports
+    /// (`\e[?1006h`). Spec-named alias of [`Terminal::sgr_mouse`] for the
+    /// input/app layers.
+    pub fn mouse_sgr(&self) -> bool {
+        use alacritty_terminal::term::TermMode;
+        self.term.mode().contains(TermMode::SGR_MOUSE)
+    }
+
+    /// Whether the application has enabled DECCKM application cursor keys
+    /// (`\e[?1h`). When true, the arrow keys should be encoded with the `SS3`
+    /// (`\eO`) prefix instead of `CSI` (`\e[`) so apps like vim/readline see the
+    /// expected sequences.
+    pub fn app_cursor_keys(&self) -> bool {
+        use alacritty_terminal::term::TermMode;
+        self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    /// Whether the shell child process has exited (or the terminal requested
+    /// shutdown). Set asynchronously by the `EventProxy` listener; the app
+    /// polls this to close the window when the shell exits.
+    pub fn child_exited(&self) -> bool {
+        self.child_exited.load(Ordering::SeqCst)
+    }
 }
 
 /// Convert a 256-color palette index to RGB (standard xterm scheme):
@@ -411,6 +457,41 @@ mod tests {
         // Disabling turns it back off.
         t.feed(b"\x1b[?1000l");
         assert!(!t.mouse_mode(), "mouse mode should be off after \\e[?1000l");
+    }
+
+    #[test]
+    fn reverse_video_swaps_fg_and_bg() {
+        // `\e[7m` (reverse video) must swap the resolved fg/bg RGB so the cell
+        // renders inverted. Capture the cell's normal colors first, then the
+        // inverted cell, and assert they are swapped.
+        let mut plain = Terminal::new(20, 5);
+        plain.feed(b"X");
+        let normal = *plain.snapshot().cell(0, 0);
+
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"\x1b[7mX");
+        let inverted = *t.snapshot().cell(0, 0);
+
+        assert_eq!(inverted.fg, normal.bg, "reverse video: fg should be old bg");
+        assert_eq!(inverted.bg, normal.fg, "reverse video: bg should be old fg");
+    }
+
+    #[test]
+    fn app_cursor_keys_toggles() {
+        let mut t = Terminal::new(20, 5);
+        assert!(!t.app_cursor_keys(), "DECCKM off by default");
+        // \e[?1h: enable application cursor keys (DECCKM).
+        t.feed(b"\x1b[?1h");
+        assert!(t.app_cursor_keys(), "DECCKM on after \\e[?1h");
+        // \e[?1l: disable.
+        t.feed(b"\x1b[?1l");
+        assert!(!t.app_cursor_keys(), "DECCKM off after \\e[?1l");
+    }
+
+    #[test]
+    fn child_exited_false_by_default() {
+        let t = Terminal::new(20, 5);
+        assert!(!t.child_exited(), "child should not be flagged exited at start");
     }
 
     #[test]
