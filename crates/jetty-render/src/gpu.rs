@@ -57,22 +57,29 @@ impl GpuContext {
         };
 
         let caps = surface.get_capabilities(&adapter);
+        // Prefer an sRGB format; if the driver reports no formats at all (e.g. an
+        // incompatible surface returns an empty list), fall back to a sane default
+        // rather than panicking on `formats[0]`.
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb);
 
         // Prefer an alpha-capable composite mode for window transparency.
         // PreMultiplied is most widely supported on Wayland/macOS; fall back to
-        // PostMultiplied, then whatever the driver reports first.
+        // PostMultiplied, then whatever the driver reports first, then Auto.
         let alpha_mode = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
             wgpu::CompositeAlphaMode::PreMultiplied
         } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
             wgpu::CompositeAlphaMode::PostMultiplied
         } else {
-            caps.alpha_modes[0]
+            caps.alpha_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Auto)
         };
 
         let config = wgpu::SurfaceConfiguration {
@@ -105,9 +112,31 @@ impl GpuContext {
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                // Stale configuration (e.g. after a resize); reconfigure and skip
+                // this frame. The next acquire will use the new config.
                 self.surface.configure(&self.device, &self.config);
                 return None;
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                // A genuinely lost surface: reconfigure and retry the acquire
+                // once. Reconfiguring is the best safe recovery available here,
+                // since full surface recreation would require the window handle,
+                // which GpuContext does not retain (DEFERRED — see below).
+                self.surface.configure(&self.device, &self.config);
+                match self.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(t)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    other => {
+                        // Reconfigure did not recover the surface. Log rather than
+                        // spinning silently so the failure is observable.
+                        eprintln!(
+                            "jetty: surface lost and reconfigure did not recover it ({other:?}); \
+                             skipping frame (surface recreation not yet supported)"
+                        );
+                        return None;
+                    }
+                }
             }
             wgpu::CurrentSurfaceTexture::Occluded
             | wgpu::CurrentSurfaceTexture::Timeout
