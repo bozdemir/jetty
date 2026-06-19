@@ -18,6 +18,10 @@ pub struct GridSnapshot {
     pub cells: Vec<CellSnapshot>,
     pub cursor_row: usize,
     pub cursor_col: usize,
+    /// Whether the cursor should be drawn. Apps hide the cursor via DECTCEM
+    /// (`\e[?25l`); when hidden, alacritty reports `CursorShape::Hidden` and this
+    /// is set to `false` so the renderer skips the block cursor.
+    pub cursor_visible: bool,
     /// Terminal background color as RGBA — set from the theme.
     pub bg_rgba: [u8; 4],
     /// Cursor block color — set from the theme.

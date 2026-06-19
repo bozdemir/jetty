@@ -2,8 +2,9 @@ use crate::snapshot::{CellSnapshot, GridSnapshot};
 use crate::theme::Theme;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, point_to_viewport};
-use alacritty_terminal::vte::ansi::{Processor, Rgb};
+use alacritty_terminal::vte::ansi::{CursorShape, Processor, Rgb};
 
 /// EventListener that captures the terminal's write-back bytes (replies to
 /// host queries such as DSR/DA, text-area size, and OSC color queries) and
@@ -180,10 +181,27 @@ impl Terminal {
                     let cell = item.cell;
                     let fg = resolve_rgb(&self.theme, cell.fg);
                     let bg = resolve_rgb(&self.theme, cell.bg);
-                    cells[row * self.cols + col] = CellSnapshot { c: cell.c, fg, bg };
+                    // A double-width glyph occupies two grid cells: the WIDE_CHAR
+                    // cell holds the actual char, and the following
+                    // WIDE_CHAR_SPACER cell is a placeholder. alacritty stores a
+                    // space (or stale char) in the spacer; the wide glyph from the
+                    // preceding cell already visually spans both columns via the
+                    // font, so we force the spacer to a blank to keep columns
+                    // aligned (preserving the spacer's own bg).
+                    let c = if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        ' '
+                    } else {
+                        cell.c
+                    };
+                    cells[row * self.cols + col] = CellSnapshot { c, fg, bg };
                 }
             }
         }
+
+        // Apps hide the cursor with DECTCEM (`\e[?25l`); alacritty then reports
+        // the renderable cursor shape as `CursorShape::Hidden`. Treat that as not
+        // visible so the renderer skips the block cursor.
+        let cursor_visible = content.cursor.shape != CursorShape::Hidden;
 
         // Cursor point is in terminal coordinates; convert to viewport (display) row.
         let cursor_vp = point_to_viewport(display_offset, content.cursor.point);
@@ -204,6 +222,7 @@ impl Terminal {
             cells,
             cursor_row,
             cursor_col,
+            cursor_visible,
             bg_rgba: self.theme.bg,
             cursor_rgb: self.theme.cursor,
             scroll_offset,
@@ -313,5 +332,61 @@ fn resolve_rgb(theme: &Theme, color: alacritty_terminal::vte::ansi::Color) -> [u
             // Dim*/Cursor and any future variants: approximate with default fg.
             _ => theme.fg,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_visible_by_default() {
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"hello");
+        let snap = t.snapshot();
+        assert!(snap.cursor_visible, "cursor should be visible by default");
+    }
+
+    #[test]
+    fn cursor_hidden_after_dectcem_off() {
+        let mut t = Terminal::new(20, 5);
+        // DECTCEM off: hide the cursor.
+        t.feed(b"\x1b[?25l");
+        let snap = t.snapshot();
+        assert!(!snap.cursor_visible, "cursor should be hidden after \\e[?25l");
+    }
+
+    #[test]
+    fn cursor_reshown_after_dectcem_on() {
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"\x1b[?25l");
+        assert!(!t.snapshot().cursor_visible);
+        // DECTCEM on: show the cursor again.
+        t.feed(b"\x1b[?25h");
+        assert!(t.snapshot().cursor_visible, "cursor should be visible after \\e[?25h");
+    }
+
+    #[test]
+    fn plain_text_is_unchanged() {
+        // Regression: hiding-cursor / wide-char handling must not alter ASCII text.
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"hello world");
+        let snap = t.snapshot();
+        assert_eq!(&snap.row_text(0)[..11], "hello world");
+    }
+
+    #[test]
+    fn wide_char_spacer_is_blanked() {
+        // A double-width CJK glyph occupies its WIDE_CHAR cell plus a following
+        // WIDE_CHAR_SPACER cell. The wide char lands in column 0; column 1 (the
+        // spacer) must read as a blank so columns stay aligned, and the char after
+        // it lands in column 2.
+        let mut t = Terminal::new(20, 5);
+        // U+4E16 (世) is a double-width character, followed by ASCII 'X'.
+        t.feed("世X".as_bytes());
+        let snap = t.snapshot();
+        assert_eq!(snap.cell(0, 0).c, '世', "wide char in column 0");
+        assert_eq!(snap.cell(0, 1).c, ' ', "spacer column blanked");
+        assert_eq!(snap.cell(0, 2).c, 'X', "following char in column 2");
     }
 }

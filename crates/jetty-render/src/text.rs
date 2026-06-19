@@ -181,10 +181,11 @@ impl TextLayer {
         // Build a Vec of TextAreas; cursor and scrollbar are pushed when applicable.
         let mut areas: Vec<TextArea> = vec![text_area];
 
-        // Block cursor area when the cursor is within bounds.
+        // Block cursor area when the cursor is visible and within bounds.
+        // Apps that hide the cursor (DECTCEM `\e[?25l`) clear `cursor_visible`.
         let cursor_in_bounds = snapshot.cursor_row < snapshot.rows
             && snapshot.cursor_col < snapshot.cols;
-        if cursor_in_bounds {
+        if snapshot.cursor_visible && cursor_in_bounds {
             let [cr, cg, cb] = snapshot.cursor_rgb;
             areas.push(TextArea {
                 buffer: &self.cursor_buffer,
