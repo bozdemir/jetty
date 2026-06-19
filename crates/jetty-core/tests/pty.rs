@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn pty_echoes_written_bytes() {
-    let pty = PtySession::spawn(80, 24).expect("spawn");
+    let pty = PtySession::spawn(80, 24, || {}).expect("spawn");
     {
         let mut w = pty.writer();
         // cooked PTY echoes typed input back; send a line.

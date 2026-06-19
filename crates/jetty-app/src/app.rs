@@ -195,7 +195,15 @@ impl ApplicationHandler<()> for App {
             (None, None)
         };
 
-        let pty = PtySession::spawn(COLS as u16, ROWS as u16).expect("pty");
+        // Pass an `on_data` callback that wakes the winit event loop the
+        // instant bytes arrive from the PTY. This means drain_pty (and thus
+        // the query-reply write) runs within ~1ms of any PTY output rather
+        // than waiting up to 16ms for a polling tick — critical for p10k's
+        // cursor-position / capability queries which have tight timeouts.
+        let proxy_wake = self.proxy.clone();
+        let pty = PtySession::spawn(COLS as u16, ROWS as u16, move || {
+            let _ = proxy_wake.send_event(());
+        }).expect("pty");
         let writer = pty.writer();
 
         self.window = Some(window);
@@ -205,6 +213,9 @@ impl ApplicationHandler<()> for App {
         self.pty = Some(pty);
         self.writer = Some(writer);
 
+        // Slow safety heartbeat — 100ms is enough for any future time-based UI
+        // while virtually eliminating idle CPU waste. Real responsiveness now
+        // comes from the on_data wake above, not from this tick.
         spawn_waker(self.proxy.clone());
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -577,8 +588,12 @@ impl ApplicationHandler<()> for App {
 
 
 fn spawn_waker(proxy: EventLoopProxy<()>) {
+    // Slow safety heartbeat: 100ms is sufficient for any time-based UI ticking.
+    // Responsiveness for PTY data (including p10k query replies) is now driven
+    // by the on_data callback in PtySession::spawn, which wakes the loop
+    // immediately on every chunk — so this tick no longer sets the latency floor.
     std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(16));
+        std::thread::sleep(std::time::Duration::from_millis(100));
         if proxy.send_event(()).is_err() {
             break;
         }

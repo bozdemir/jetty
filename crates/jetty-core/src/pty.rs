@@ -10,7 +10,13 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    pub fn spawn(cols: u16, rows: u16) -> std::io::Result<PtySession> {
+    /// Spawn a PTY running the user's shell.
+    ///
+    /// `on_data` is called from the reader thread every time a chunk of bytes
+    /// arrives from the PTY (and once more on EOF/error). Use it to wake the
+    /// application's event loop immediately so query replies (DSR/DA/etc.) are
+    /// sent back to the shell within ~1ms instead of waiting for a polling tick.
+    pub fn spawn(cols: u16, rows: u16, on_data: impl Fn() + Send + 'static) -> std::io::Result<PtySession> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -38,11 +44,20 @@ impl PtySession {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => {
+                        // EOF or error — notify the app so it can react (e.g.
+                        // detect child exit) without waiting for the next tick.
+                        on_data();
+                        break;
+                    }
                     Ok(n) => {
                         if tx.send(buf[..n].to_vec()).is_err() {
                             break;
                         }
+                        // Wake the app IMMEDIATELY so drain_pty runs and any
+                        // query replies (\\e[6n CPR etc.) are written back to
+                        // the shell within ~1ms, well inside p10k's timeout.
+                        on_data();
                     }
                 }
             }

@@ -75,12 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // replies (DSR/DA/etc.) back to the PTY, which is what clears the
         // startup red "x".
         use std::io::Write;
-        let pty = jetty_core::PtySession::spawn(cols as u16, rows as u16)?;
+        let pty = jetty_core::PtySession::spawn(cols as u16, rows as u16, || {})?;
         let mut w = pty.writer();
 
-        // ~3.0s: 60 iterations of 50ms. Each iteration drain shell output ->
-        // feed terminal; then drain terminal replies -> write back to the PTY.
-        for _ in 0..60 {
+        // ~3.5s startup settle: 700 iterations of 5ms.
+        // Short sleep = replies go out within ~5ms of each query, well inside
+        // p10k's capability-probe timeouts (mirrors the fixed live-app latency).
+        for _ in 0..700 {
             while let Ok(chunk) = pty.output().try_recv() {
                 terminal.feed(&chunk);
             }
@@ -89,26 +90,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 w.write_all(&replies).ok();
                 w.flush().ok();
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
         // Final drain to capture anything emitted during the last sleep.
         while let Ok(chunk) = pty.output().try_recv() {
             terminal.feed(&chunk);
         }
-        eprintln!("jetty-shot: JETTY_SHOT_PTY mode drove a real shell for ~3.0s");
+        eprintln!("jetty-shot: JETTY_SHOT_PTY mode drove a real shell for ~3.5s");
 
         // Optional: inject a command into the live shell after startup settles.
-        // Writes the command + newline to the PTY, then runs the SAME
-        // drain/respond loop for another ~2.0s so the command executes and the
-        // prompt redraws before we snapshot.
+        // Writes the command + newline to the PTY, then runs the SAME tight
+        // drain/respond loop for another ~3.5s so the command executes and the
+        // prompt fully redraws (including p10k's post-command queries) before we
+        // snapshot.
         if let Ok(cmd) = std::env::var("JETTY_SHOT_PTY_CMD") {
             w.write_all(cmd.as_bytes()).ok();
             w.write_all(b"\n").ok();
             w.flush().ok();
             eprintln!("jetty-shot: injected JETTY_SHOT_PTY_CMD={cmd:?}");
 
-            // ~2.0s: 40 iterations of 50ms.
-            for _ in 0..40 {
+            // ~3.5s: 700 iterations of 5ms — tight loop so replies are prompt.
+            for _ in 0..700 {
                 while let Ok(chunk) = pty.output().try_recv() {
                     terminal.feed(&chunk);
                 }
@@ -117,13 +119,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     w.write_all(&replies).ok();
                     w.flush().ok();
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
             // Final drain after the command loop.
             while let Ok(chunk) = pty.output().try_recv() {
                 terminal.feed(&chunk);
             }
-            eprintln!("jetty-shot: ran injected command for ~2.0s");
+            eprintln!("jetty-shot: ran injected command for ~3.5s");
         }
     } else {
         terminal.feed(&input_bytes);
