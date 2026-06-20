@@ -61,9 +61,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+    // Allow rendering with a specific font family for visual comparison.
+    let font_family = std::env::var("JETTY_FONT_FAMILY")
+        .unwrap_or_else(|_| "MesloLGS NF".to_string());
+    if std::env::var("JETTY_FONT_FAMILY").is_ok() {
+        eprintln!("jetty-shot: JETTY_FONT_FAMILY={font_family:?}");
+    }
+
     // --- Build TextLayer ---
-    let mut text = TextLayer::new(&device, &queue, format, font_size);
+    let mut text = TextLayer::new_with_family(&device, &queue, format, font_size, &font_family);
     let (cell_w, cell_h) = text.cell_size();
+    let mono_families = text.monospace_families();
+    eprintln!("jetty-shot: {} monospace families found (e.g. {:?})", mono_families.len(), mono_families.first());
 
     let cols = (width as f32 / cell_w).floor().max(1.0) as usize;
     let rows = (height as f32 / cell_h).floor().max(1.0) as usize;
@@ -209,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .position(|&n| n == theme_name.as_str())
                 .unwrap_or(0);
 
-            let pv = jetty_render::build_panel(width, height, opacity, theme_idx, font_size);
+            let pv = jetty_render::build_panel(width, height, opacity, theme_idx, font_size, &[], "", 0);
             rects.extend(pv.quads);
             eprintln!(
                 "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx}, font_size={font_size})"

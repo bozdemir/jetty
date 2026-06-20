@@ -185,6 +185,9 @@ pub enum MouseAction {
     FontPlus,
     /// User clicked the font-size reset button ("reset").
     FontReset,
+    /// User clicked a font-family row. The index is
+    /// `geom.font_scroll_offset + row_index` into the families list.
+    SetFont(usize),
     /// User clicked inside the panel but not on any widget — swallow the event.
     ConsumePanel,
     /// User pressed inside the scrollbar thumb. `grab_dy` is `cy - rect.y`.
@@ -235,6 +238,12 @@ pub fn decide_mouse_press(
         }
         if point_in(&g.font_reset, cx, cy) {
             return MouseAction::FontReset;
+        }
+        // Font-family list rows.
+        for (i, row) in g.font_rows.iter().enumerate() {
+            if point_in(row, cx, cy) {
+                return MouseAction::SetFont(g.font_scroll_offset + i);
+            }
         }
         // Inside panel but not a widget → consume.
         if point_in(&g.panel, cx, cy) {

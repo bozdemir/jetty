@@ -38,6 +38,12 @@ pub struct App {
     /// Current logical (device-independent) font size in points. Changed at
     /// runtime via Ctrl+Equal/Ctrl+Minus/Ctrl+0 (font up/down/reset).
     font_logical: f32,
+    /// Current font family name (runtime-settable via the font picker).
+    font_family: String,
+    /// Cached sorted monospace family list (populated once TextLayer is built).
+    font_families: Vec<String>,
+    /// Scroll offset into `font_families` for the panel's font-family list.
+    font_scroll_offset: usize,
     /// Track held modifier keys so Ctrl+Shift combos can be detected.
     modifiers: winit::keyboard::ModifiersState,
     /// Last known cursor position in physical pixels.
@@ -74,6 +80,10 @@ impl App {
 
         let debug = std::env::var("JETTY_DEBUG").is_ok();
 
+        // Resolve initial font family from JETTY_FONT_FAMILY env var.
+        let font_family = std::env::var("JETTY_FONT_FAMILY")
+            .unwrap_or_else(|_| "MesloLGS NF".to_string());
+
         let mut app = App {
             proxy,
             window: None,
@@ -86,6 +96,9 @@ impl App {
             theme_idx,
             opacity,
             font_logical: FONT_LOGICAL_DEFAULT,
+            font_family,
+            font_families: Vec::new(),
+            font_scroll_offset: 0,
             modifiers: winit::keyboard::ModifiersState::empty(),
             cursor: (0.0, 0.0),
             dragging_scrollbar: false,
@@ -266,8 +279,27 @@ impl App {
         self.font_logical = clamped;
         let scale = self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
         if let Some(ref g) = self.gpu {
-            let new_text = TextLayer::new(&g.device, &g.queue, g.format, clamped * scale);
+            let new_text = TextLayer::new_with_family(
+                &g.device, &g.queue, g.format, clamped * scale, &self.font_family,
+            );
             self.text = Some(new_text);
+            // Re-populate family list from the new TextLayer.
+            if let Some(ref t) = self.text {
+                self.font_families = t.monospace_families();
+            }
+        }
+        self.reflow();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Change the font family at runtime. Updates `font_family`, tells the
+    /// TextLayer to remeasure, then reflows and requests a redraw.
+    fn set_font_family(&mut self, name: String) {
+        self.font_family = name;
+        if let Some(text) = &mut self.text {
+            text.set_font_family(&self.font_family);
         }
         self.reflow();
         if let Some(w) = &self.window {
@@ -289,7 +321,9 @@ impl ApplicationHandler<()> for App {
         let scale = window.scale_factor() as f32;
         let gpu = GpuContext::new(window.clone(), size.width, size.height);
         let (text, quad, cols, rows) = if let Some(ref g) = gpu {
-            let text = TextLayer::new(&g.device, &g.queue, g.format, self.font_logical * scale);
+            let text = TextLayer::new_with_family(
+                &g.device, &g.queue, g.format, self.font_logical * scale, &self.font_family,
+            );
             let (cw, ch) = text.cell_size();
             // Derive the grid from the physical pixel size and the physical cell size.
             let cols = (size.width as f32 / cw).floor().max(1.0) as usize;
@@ -299,6 +333,11 @@ impl ApplicationHandler<()> for App {
         } else {
             (None, None, FALLBACK_COLS, FALLBACK_ROWS)
         };
+        // Populate the cached font family list from the new TextLayer.
+        if let Some(ref t) = text {
+            self.font_families = t.monospace_families();
+            eprintln!("jetty: found {} monospace families", self.font_families.len());
+        }
 
         // Re-build the terminal with the derived grid size so the PTY and
         // terminal agree with the actual window layout.
@@ -377,7 +416,9 @@ impl ApplicationHandler<()> for App {
                 // handles the surface-size change, so we only touch the font here.
                 let scale = scale_factor as f32;
                 if let Some(ref g) = self.gpu {
-                    let new_text = TextLayer::new(&g.device, &g.queue, g.format, self.font_logical * scale);
+                    let new_text = TextLayer::new_with_family(
+                        &g.device, &g.queue, g.format, self.font_logical * scale, &self.font_family,
+                    );
                     self.text = Some(new_text);
                 }
                 self.reflow();
@@ -394,7 +435,7 @@ impl ApplicationHandler<()> for App {
                 if self.dragging_slider {
                     if let Some(gpu) = &self.gpu {
                         let (w, h) = (gpu.config.width, gpu.config.height);
-                        let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical);
+                        let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset);
                         self.opacity = self.opacity_from_cursor(&pv.geom.slider_track);
                         self.apply_theme();
                     }
@@ -433,7 +474,7 @@ impl ApplicationHandler<()> for App {
                 };
 
                 let panel_geom = if self.panel_open {
-                    Some(jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical).geom)
+                    Some(jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset).geom)
                 } else {
                     None
                 };
@@ -478,6 +519,12 @@ impl ApplicationHandler<()> for App {
                     }
                     input::MouseAction::FontReset => {
                         self.set_font_size(FONT_LOGICAL_DEFAULT);
+                    }
+                    input::MouseAction::SetFont(idx) => {
+                        if let Some(name) = self.font_families.get(idx) {
+                            let name = name.clone();
+                            self.set_font_family(name);
+                        }
                     }
                     input::MouseAction::ConsumePanel => {
                         // Swallow the click; no state change needed.
@@ -574,6 +621,37 @@ impl ApplicationHandler<()> for App {
                     }
                 };
                 if lines != 0 {
+                    // When the panel is open and the cursor is over the font-family
+                    // list, wheel-scroll the list instead of the terminal scrollback.
+                    if self.panel_open && !self.font_families.is_empty() {
+                        if let Some(gpu) = &self.gpu {
+                            let (w, h) = (gpu.config.width, gpu.config.height);
+                            let pv = jetty_render::build_panel(
+                                w, h, self.opacity, self.theme_idx, self.font_logical,
+                                &self.font_families, &self.font_family, self.font_scroll_offset,
+                            );
+                            let cx = self.cursor.0 as f32;
+                            let cy = self.cursor.1 as f32;
+                            let over_list = pv.geom.font_rows.iter()
+                                .any(|r| cx >= r.x && cx <= r.x + r.w
+                                         && cy >= pv.geom.font_rows.first().map(|r| r.y).unwrap_or(0.0)
+                                         && cy <= pv.geom.font_rows.last().map(|r| r.y + r.h).unwrap_or(0.0));
+                            if over_list {
+                                // lines > 0 = wheel up = scroll list up (decrement offset).
+                                let max_offset = self.font_families.len().saturating_sub(1);
+                                if lines > 0 {
+                                    self.font_scroll_offset = self.font_scroll_offset.saturating_sub(1);
+                                } else {
+                                    self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
+                                }
+                                if let Some(win) = &self.window {
+                                    win.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+
                     // When the app enabled mouse reporting, forward wheel events
                     // as SGR button 64 (up) / 65 (down) — but only over the
                     // terminal area, so wheeling over the scrollbar still scrolls
@@ -636,6 +714,7 @@ impl ApplicationHandler<()> for App {
                         input::KeyAction::FontDown => "FontDown",
                         input::KeyAction::FontReset => "FontReset",
                         input::KeyAction::Copy => "Copy",
+
                         input::KeyAction::Paste => "Paste",
                         input::KeyAction::Send(_) => "Send",
                         input::KeyAction::None => "None",
@@ -778,7 +857,7 @@ impl ApplicationHandler<()> for App {
                     }
                     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
                     if panel_open {
-                        let pv = jetty_render::build_panel(width, height, opacity, theme_idx, self.font_logical);
+                        let pv = jetty_render::build_panel(width, height, opacity, theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset);
                         rects.extend(pv.quads);
                         labels = pv.labels;
                     }

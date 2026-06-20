@@ -6,9 +6,9 @@ use glyphon::{
 use jetty_core::GridSnapshot;
 use wgpu::MultisampleState;
 
-/// The terminal font. Matches the user's Konsole profile: MesloLGS NF — a Nerd
-/// Font, so the zsh prompt's powerline/icon glyphs render correctly.
-const FONT_FAMILY: &str = "MesloLGS NF";
+/// The default terminal font. Matches the user's Konsole profile: MesloLGS NF
+/// — a Nerd Font, so the zsh prompt's powerline/icon glyphs render correctly.
+const FONT_FAMILY_DEFAULT: &str = "MesloLGS NF";
 
 pub struct TextLayer {
     font_system: FontSystem,
@@ -25,10 +25,23 @@ pub struct TextLayer {
     cell_h: f32,
     /// Growable pool of glyphon Buffers reused across frames for overlay labels.
     overlay_buffers: Vec<Buffer>,
+    /// Current font family name (runtime-settable via `set_font_family`).
+    font_family: String,
 }
 
 impl TextLayer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, font_size: f32) -> Self {
+        Self::new_with_family(device, queue, format, font_size, FONT_FAMILY_DEFAULT)
+    }
+
+    /// Like `new`, but allows specifying the initial font family.
+    pub fn new_with_family(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        font_size: f32,
+        family: &str,
+    ) -> Self {
         let mut font_system = FontSystem::new();
         // Insurance: make sure user-installed fonts (e.g. ~/.local/share/fonts,
         // where MesloLGS NF lives) are in the database, not only the fontconfig
@@ -54,7 +67,7 @@ impl TextLayer {
         // Cursor buffer: a single full-block glyph used to draw the block cursor.
         let mut cursor_buffer = Buffer::new(&mut font_system, metrics);
         cursor_buffer.set_size(&mut font_system, None, None);
-        let cursor_attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
+        let cursor_attrs = Attrs::new().family(Family::Name(family));
         cursor_buffer.set_text(
             &mut font_system,
             "\u{2588}",
@@ -64,7 +77,7 @@ impl TextLayer {
         );
 
         // Measure a monospace cell by shaping a single 'M'.
-        let cell_w = measure_advance(&mut font_system, metrics);
+        let cell_w = measure_advance_family(&mut font_system, metrics, family);
         let cell_h = line_height;
 
         Self {
@@ -79,7 +92,66 @@ impl TextLayer {
             cell_w,
             cell_h,
             overlay_buffers: Vec::new(),
+            font_family: family.to_string(),
         }
+    }
+
+    /// Returns the sorted, deduplicated list of monospaced font family names
+    /// known to the font system. Uses `fontdb::FaceInfo::monospaced` to detect
+    /// monospace faces; falls back to name-based matching when the flag is absent.
+    pub fn monospace_families(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut families: Vec<String> = Vec::new();
+
+        for face in self.font_system.db().faces() {
+            if face.monospaced {
+                // The first family entry is always English US.
+                if let Some((name, _)) = face.families.first() {
+                    if seen.insert(name.clone()) {
+                        families.push(name.clone());
+                    }
+                }
+            }
+        }
+
+        // Fallback: if nothing was found via the flag, collect by name patterns.
+        if families.is_empty() {
+            let keywords = ["Mono", "Code", "Consolas", "Menlo", "Meslo", "Term", "Fixed"];
+            for face in self.font_system.db().faces() {
+                if let Some((name, _)) = face.families.first() {
+                    let matches = keywords.iter().any(|kw| name.contains(kw));
+                    if matches && seen.insert(name.clone()) {
+                        families.push(name.clone());
+                    }
+                }
+            }
+        }
+
+        families.sort();
+        families
+    }
+
+    /// Change the active font family at runtime. Updates `font_family`, remeasures
+    /// the cell size, and resets the cursor buffer glyph with the new family.
+    /// The caller must call `reflow()` and `request_redraw()` after this.
+    pub fn set_font_family(&mut self, name: &str) {
+        self.font_family = name.to_string();
+        // Re-measure cell width with the new family.
+        self.cell_w = measure_advance_family(&mut self.font_system, self.metrics, name);
+        // Reset cursor buffer glyph so the block cursor uses the new family.
+        let cursor_attrs = Attrs::new().family(Family::Name(&self.font_family));
+        self.cursor_buffer.set_text(
+            &mut self.font_system,
+            "\u{2588}",
+            &cursor_attrs,
+            Shaping::Basic,
+            None,
+        );
+    }
+
+    /// Returns the currently active font family name.
+    pub fn font_family(&self) -> &str {
+        &self.font_family
     }
 
     pub fn cell_size(&self) -> (f32, f32) {
@@ -138,12 +210,13 @@ impl TextLayer {
 
         // Build the spans iterator: (&str, Attrs) tuples, borrowing slices from `text`.
         // We collect into a Vec to satisfy the borrow checker (spans borrow `text`).
+        let family_name = self.font_family.clone();
         let spans: Vec<(&str, Attrs)> = cell_ranges
             .iter()
             .map(|(s, e, color)| {
                 (
                     &text[*s..*e],
-                    Attrs::new().family(Family::Name(FONT_FAMILY)).color(*color),
+                    Attrs::new().family(Family::Name(&family_name)).color(*color),
                 )
             })
             .collect();
@@ -154,7 +227,7 @@ impl TextLayer {
         self.buffer
             .set_size(&mut self.font_system, None, Some(height as f32));
 
-        let default_attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
+        let default_attrs = Attrs::new().family(Family::Name(&family_name));
         // Shaping::Basic avoids kerning/ligatures so every glyph lands exactly
         // one cell-width apart — essential for a terminal grid.
         self.buffer.set_rich_text(
@@ -287,10 +360,11 @@ impl TextLayer {
         };
 
         // First pass: set text content (requires &mut font_system, so can't borrow bufs as &T simultaneously).
+        let family_name = self.font_family.clone();
         for (i, (text, _x, _y, _rgb)) in labels.iter().enumerate() {
             let buf = &mut self.overlay_buffers[i];
             buf.set_size(&mut self.font_system, None, Some(height as f32));
-            let attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
+            let attrs = Attrs::new().family(Family::Name(&family_name));
             buf.set_text(&mut self.font_system, text, &attrs, Shaping::Basic, None);
         }
 
@@ -369,9 +443,9 @@ impl TextLayer {
     }
 }
 
-fn measure_advance(font_system: &mut FontSystem, metrics: Metrics) -> f32 {
+fn measure_advance_family(font_system: &mut FontSystem, metrics: Metrics, family: &str) -> f32 {
     let mut b = Buffer::new(font_system, metrics);
-    let attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
+    let attrs = Attrs::new().family(Family::Name(family));
     // Shaping::Basic avoids kerning so the advance width matches the terminal grid.
     b.set_text(font_system, "M", &attrs, Shaping::Basic, None);
     b.set_size(font_system, None, Some(metrics.line_height));
