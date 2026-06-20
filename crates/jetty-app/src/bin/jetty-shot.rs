@@ -209,10 +209,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .position(|&n| n == theme_name.as_str())
                 .unwrap_or(0);
 
-            let pv = jetty_render::build_panel(width, height, opacity, theme_idx);
+            let pv = jetty_render::build_panel(width, height, opacity, theme_idx, font_size);
             rects.extend(pv.quads);
             eprintln!(
-                "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx})"
+                "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx}, font_size={font_size})"
             );
             pv.labels
         } else {

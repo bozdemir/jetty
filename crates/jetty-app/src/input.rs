@@ -83,6 +83,9 @@ pub fn decide_key(
     // (not Comma), so it never matched.
     if ctrl && shift {
         match physical {
+            // KeyP is the dedicated "open Settings dialog" hotkey.
+            // KeyO is kept as an alias for backwards compatibility.
+            PhysicalKey::Code(KeyCode::KeyP) => return KeyAction::TogglePanel,
             PhysicalKey::Code(KeyCode::KeyO) => return KeyAction::TogglePanel,
             PhysicalKey::Code(KeyCode::KeyT) => return KeyAction::CycleTheme,
             PhysicalKey::Code(KeyCode::Equal) => return KeyAction::OpacityUp,
@@ -176,6 +179,12 @@ pub enum MouseAction {
     StartSliderDrag,
     /// User clicked a theme chip. The index is into `jetty_core::theme::PRESETS`.
     SetTheme(usize),
+    /// User clicked the font-size decrement button ("−").
+    FontMinus,
+    /// User clicked the font-size increment button ("+").
+    FontPlus,
+    /// User clicked the font-size reset button ("reset").
+    FontReset,
     /// User clicked inside the panel but not on any widget — swallow the event.
     ConsumePanel,
     /// User pressed inside the scrollbar thumb. `grab_dy` is `cy - rect.y`.
@@ -216,6 +225,16 @@ pub fn decide_mouse_press(
             if point_in(chip, cx, cy) {
                 return MouseAction::SetTheme(i);
             }
+        }
+        // Font-size buttons (checked before generic ConsumePanel).
+        if point_in(&g.font_minus, cx, cy) {
+            return MouseAction::FontMinus;
+        }
+        if point_in(&g.font_plus, cx, cy) {
+            return MouseAction::FontPlus;
+        }
+        if point_in(&g.font_reset, cx, cy) {
+            return MouseAction::FontReset;
         }
         // Inside panel but not a widget → consume.
         if point_in(&g.panel, cx, cy) {

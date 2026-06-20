@@ -394,7 +394,7 @@ impl ApplicationHandler<()> for App {
                 if self.dragging_slider {
                     if let Some(gpu) = &self.gpu {
                         let (w, h) = (gpu.config.width, gpu.config.height);
-                        let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx);
+                        let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical);
                         self.opacity = self.opacity_from_cursor(&pv.geom.slider_track);
                         self.apply_theme();
                     }
@@ -433,7 +433,7 @@ impl ApplicationHandler<()> for App {
                 };
 
                 let panel_geom = if self.panel_open {
-                    Some(jetty_render::build_panel(w, h, self.opacity, self.theme_idx).geom)
+                    Some(jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical).geom)
                 } else {
                     None
                 };
@@ -469,6 +469,15 @@ impl ApplicationHandler<()> for App {
                         if let Some(w_) = &self.window {
                             w_.request_redraw();
                         }
+                    }
+                    input::MouseAction::FontMinus => {
+                        self.set_font_size(self.font_logical - 1.0);
+                    }
+                    input::MouseAction::FontPlus => {
+                        self.set_font_size(self.font_logical + 1.0);
+                    }
+                    input::MouseAction::FontReset => {
+                        self.set_font_size(FONT_LOGICAL_DEFAULT);
                     }
                     input::MouseAction::ConsumePanel => {
                         // Swallow the click; no state change needed.
@@ -769,7 +778,7 @@ impl ApplicationHandler<()> for App {
                     }
                     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
                     if panel_open {
-                        let pv = jetty_render::build_panel(width, height, opacity, theme_idx);
+                        let pv = jetty_render::build_panel(width, height, opacity, theme_idx, self.font_logical);
                         rects.extend(pv.quads);
                         labels = pv.labels;
                     }
