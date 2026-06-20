@@ -266,8 +266,11 @@ pub fn build_panel(
                 [190, 190, 205]
             };
             // Truncate long names to avoid overflowing the panel.
-            let display = if name.len() > 36 {
-                format!("{}…", &name[..35])
+            // Use char-boundary-safe truncation to avoid panicking on
+            // multibyte UTF-8 characters (e.g. accented/CJK family names).
+            let display = if name.chars().count() > 36 {
+                let truncated: String = name.chars().take(34).collect();
+                format!("{}…", truncated)
             } else {
                 name.clone()
             };
