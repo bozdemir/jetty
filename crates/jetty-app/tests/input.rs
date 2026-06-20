@@ -358,13 +358,13 @@ fn ctrl_alt_b_sends_esc_prefixed_control_byte() {
 }
 
 // ---------------------------------------------------------------------------
-// Ctrl+Shift+<non-shortcut letter> → control byte (fix #2)
+// Ctrl+Shift+C / Ctrl+Shift+V → clipboard Copy / Paste
 // ---------------------------------------------------------------------------
 
 #[test]
 fn ctrl_shift_c_sends_sigint() {
-    // Ctrl+Shift+C == Ctrl+C for control purposes: it must still send 0x03,
-    // not the literal "C". (C is not one of the explicit Ctrl+Shift shortcuts.)
+    // Ctrl+Shift+C is now the "Copy selection" shortcut, not a SIGINT.
+    // (Previously it sent 0x03; the new clipboard feature takes priority.)
     let action = decide_key(
         true, // ctrl
         true, // shift
@@ -374,7 +374,22 @@ fn ctrl_shift_c_sends_sigint() {
         false,
         false,
     );
-    assert_eq!(action, KeyAction::Send(vec![3]));
+    assert_eq!(action, KeyAction::Copy);
+}
+
+#[test]
+fn ctrl_shift_v_pastes() {
+    // Ctrl+Shift+V is the "Paste" shortcut.
+    let action = decide_key(
+        true, // ctrl
+        true, // shift
+        false,
+        phys(KeyCode::KeyV),
+        &Key::Character("V".into()),
+        false,
+        false,
+    );
+    assert_eq!(action, KeyAction::Paste);
 }
 
 #[test]

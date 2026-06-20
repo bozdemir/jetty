@@ -1,4 +1,5 @@
 mod app;
+pub mod clipboard;
 pub mod input;
 
 use winit::event_loop::{ControlFlow, EventLoop};

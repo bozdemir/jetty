@@ -3,11 +3,13 @@ pub struct CellSnapshot {
     pub c: char,
     pub fg: [u8; 3],
     pub bg: [u8; 3],
+    /// Whether this cell is part of the current text selection.
+    pub selected: bool,
 }
 
 impl Default for CellSnapshot {
     fn default() -> Self {
-        CellSnapshot { c: ' ', fg: [220, 220, 220], bg: [18, 18, 23] }
+        CellSnapshot { c: ' ', fg: [220, 220, 220], bg: [18, 18, 23], selected: false }
     }
 }
 

@@ -7,7 +7,7 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::event::MouseScrollDelta;
 use winit::window::{Window, WindowId};
-use crate::input;
+use crate::{clipboard, input};
 
 /// Default logical (device-independent) font size in points. This is the value
 /// used when the user resets the font size with Ctrl+0 and on first launch.
@@ -50,6 +50,8 @@ pub struct App {
     panel_open: bool,
     /// Whether the user is currently dragging the opacity slider in the Settings panel.
     dragging_slider: bool,
+    /// Whether the user is currently dragging a text selection with the mouse.
+    selecting: bool,
     /// Whether JETTY_DEBUG is set — enables input/panel state logging to stderr.
     debug: bool,
 }
@@ -90,6 +92,7 @@ impl App {
             drag_grab_dy: 0.0,
             panel_open: false,
             dragging_slider: false,
+            selecting: false,
             debug,
         };
         // Apply the initial theme+opacity so Terminal::new env defaults are
@@ -151,6 +154,39 @@ impl App {
         let col = (self.cursor.0 as f32 / cell_w).floor() as i64 + 1;
         let row = (self.cursor.1 as f32 / cell_h).floor() as i64 + 1;
         Some((col.max(1) as usize, row.max(1) as usize))
+    }
+
+    /// Convert the current cursor pixel position into 0-based viewport cell
+    /// coordinates `(line, col)` clamped to the terminal grid. Returns `None`
+    /// when the renderer is not yet available.
+    fn cursor_cell_0(&self) -> Option<(usize, usize)> {
+        let (cell_w, cell_h) = self.text.as_ref()?.cell_size();
+        if cell_w <= 0.0 || cell_h <= 0.0 {
+            return None;
+        }
+        let cols = self.terminal.cols().saturating_sub(1);
+        let rows = self.terminal.rows().saturating_sub(1);
+        let col = ((self.cursor.0 as f32 / cell_w).floor() as i64).clamp(0, cols as i64) as usize;
+        let line = ((self.cursor.1 as f32 / cell_h).floor() as i64).clamp(0, rows as i64) as usize;
+        Some((line, col))
+    }
+
+    /// Paste `text` to the PTY, wrapping in bracketed-paste sequences if the
+    /// running application has enabled `\e[?2004h`.
+    fn paste_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(w) = &mut self.writer {
+            if self.terminal.bracketed_paste() {
+                let _ = w.write_all(b"\x1b[200~");
+            }
+            let _ = w.write_all(text.as_bytes());
+            if self.terminal.bracketed_paste() {
+                let _ = w.write_all(b"\x1b[201~");
+            }
+            let _ = w.flush();
+        }
     }
 
     /// Encode a mouse event and write it to the PTY. Used only when the running
@@ -379,6 +415,15 @@ impl ApplicationHandler<()> for App {
                         win.request_redraw();
                     }
                 }
+                // --- Text selection drag continuation ---
+                if self.selecting && !self.terminal.mouse_mode() {
+                    if let Some((line, col)) = self.cursor_cell_0() {
+                        self.terminal.selection_update(line, col);
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
+                    }
+                }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 let (w, h) = if let Some(gpu) = &self.gpu {
@@ -442,24 +487,29 @@ impl ApplicationHandler<()> for App {
                     }
                     input::MouseAction::None => {
                         // The click landed in the terminal area (not a panel or
-                        // scrollbar widget). Only when the running app enabled
-                        // mouse reporting do we forward it as an SGR mouse press;
-                        // otherwise leave behavior unchanged (a no-op here).
+                        // scrollbar widget). When the app enabled mouse reporting,
+                        // forward the press; otherwise start a text selection.
                         if self.terminal.mouse_mode() {
                             self.send_mouse_report(input::MouseEvent::LeftPress);
+                        } else {
+                            // Clear prior selection and begin a new one.
+                            self.terminal.selection_clear();
+                            if let Some((line, col)) = self.cursor_cell_0() {
+                                self.terminal.selection_start(line, col);
+                            }
+                            self.selecting = true;
+                            if let Some(win) = &self.window {
+                                win.request_redraw();
+                            }
                         }
                     }
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
-                // Right-click toggles the Settings panel — reliable, no keyboard
-                // layout dependency.
-                self.panel_open = !self.panel_open;
-                if self.debug {
-                    eprintln!("PANEL toggled via right-click -> open={}", self.panel_open);
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+                // Right-click: paste from clipboard (no longer opens the settings
+                // panel — use Ctrl+, or Ctrl+Shift+O to toggle the panel).
+                if let Some(text) = clipboard::get() {
+                    self.paste_text(&text);
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
@@ -469,6 +519,26 @@ impl ApplicationHandler<()> for App {
                 self.dragging_scrollbar = false;
                 self.dragging_slider = false;
 
+                // End text selection and copy-on-select.
+                if self.selecting {
+                    self.selecting = false;
+                    // Copy-on-select: if we got any text, put it in the clipboard.
+                    if let Some(text) = self.terminal.selection_text() {
+                        if !text.is_empty() {
+                            clipboard::set(&text);
+                        } else {
+                            // Empty drag (plain click) — clear the selection highlight.
+                            self.terminal.selection_clear();
+                        }
+                    } else {
+                        // No selection text → plain click, clear selection.
+                        self.terminal.selection_clear();
+                    }
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                }
+
                 // Forward a release report only when the app enabled mouse mode
                 // and this release did not terminate a host-widget drag. We do
                 // not re-check widget hit-testing here: the matching press was
@@ -476,6 +546,12 @@ impl ApplicationHandler<()> for App {
                 // None), so a non-drag release pairs with that forwarded press.
                 if !was_dragging && self.terminal.mouse_mode() {
                     self.send_mouse_report(input::MouseEvent::LeftRelease);
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Middle, .. } => {
+                // Middle-click: paste from clipboard (same as right-click).
+                if let Some(text) = clipboard::get() {
+                    self.paste_text(&text);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -550,6 +626,8 @@ impl ApplicationHandler<()> for App {
                         input::KeyAction::FontUp => "FontUp",
                         input::KeyAction::FontDown => "FontDown",
                         input::KeyAction::FontReset => "FontReset",
+                        input::KeyAction::Copy => "Copy",
+                        input::KeyAction::Paste => "Paste",
                         input::KeyAction::Send(_) => "Send",
                         input::KeyAction::None => "None",
                     };
@@ -613,6 +691,20 @@ impl ApplicationHandler<()> for App {
                     }
                     input::KeyAction::FontReset => {
                         self.set_font_size(FONT_LOGICAL_DEFAULT);
+                    }
+                    input::KeyAction::Copy => {
+                        // Copy the current selection to the clipboard.
+                        if let Some(text) = self.terminal.selection_text() {
+                            if !text.is_empty() {
+                                clipboard::set(&text);
+                            }
+                        }
+                    }
+                    input::KeyAction::Paste => {
+                        // Paste from the clipboard into the PTY.
+                        if let Some(text) = clipboard::get() {
+                            self.paste_text(&text);
+                        }
                     }
                     input::KeyAction::Send(bytes) => {
                         // Any real keystroke jumps back to the bottom so the user sees their input.

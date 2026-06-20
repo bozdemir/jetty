@@ -292,9 +292,14 @@ pub fn default_bg_clear(snapshot: &jetty_core::GridSnapshot) -> wgpu::Color {
     }
 }
 
+/// The selection highlight background color (sRGB).
+const SELECTION_BG: [u8; 3] = [60, 90, 160];
+
 /// Build per-cell background rectangles for every cell whose background differs
-/// from the theme's default background (`snapshot.bg_rgba[0..3]`). Horizontal
-/// runs of cells sharing the same bg in a row are coalesced into a single Rect.
+/// from the theme's default background (`snapshot.bg_rgba[0..3]`), plus
+/// selection highlight rects for all selected cells (overriding their normal bg).
+/// Horizontal runs of cells sharing the same effective bg in a row are coalesced
+/// into a single Rect.
 ///
 /// Each rect is opaque (alpha 255): a colored cell background should fully cover,
 /// even on a transparent theme — only default-bg cells stay transparent (handled
@@ -310,15 +315,22 @@ pub fn cell_bg_rects(
     for row in 0..snapshot.rows {
         let mut col = 0;
         while col < snapshot.cols {
-            let bg = snapshot.cell(row, col).bg;
-            if bg == default_bg {
+            let cell = snapshot.cell(row, col);
+            // Effective bg: selection overrides normal bg.
+            let effective_bg = if cell.selected { SELECTION_BG } else { cell.bg };
+            if effective_bg == default_bg && !cell.selected {
                 col += 1;
                 continue;
             }
-            // Extend the run while the bg stays equal.
+            // Extend the run while the effective bg stays equal.
             let start = col;
             col += 1;
-            while col < snapshot.cols && snapshot.cell(row, col).bg == bg {
+            while col < snapshot.cols {
+                let next = snapshot.cell(row, col);
+                let next_bg = if next.selected { SELECTION_BG } else { next.bg };
+                if next_bg != effective_bg {
+                    break;
+                }
                 col += 1;
             }
             let run = (col - start) as f32;
@@ -327,7 +339,7 @@ pub fn cell_bg_rects(
                 y: row as f32 * cell_h,
                 w: run * cell_w,
                 h: cell_h,
-                color: [bg[0], bg[1], bg[2], 255],
+                color: [effective_bg[0], effective_bg[1], effective_bg[2], 255],
             });
         }
     }

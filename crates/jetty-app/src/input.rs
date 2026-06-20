@@ -16,6 +16,10 @@ pub enum KeyAction {
     FontDown,
     /// Reset font size to the default (16.0).
     FontReset,
+    /// Copy the current selection to the clipboard (Ctrl+Shift+C).
+    Copy,
+    /// Paste from the clipboard into the PTY (Ctrl+Shift+V).
+    Paste,
     /// Raw bytes to write to the PTY.
     Send(Vec<u8>),
     None,
@@ -83,6 +87,8 @@ pub fn decide_key(
             PhysicalKey::Code(KeyCode::KeyT) => return KeyAction::CycleTheme,
             PhysicalKey::Code(KeyCode::Equal) => return KeyAction::OpacityUp,
             PhysicalKey::Code(KeyCode::Minus) => return KeyAction::OpacityDown,
+            PhysicalKey::Code(KeyCode::KeyC) => return KeyAction::Copy,
+            PhysicalKey::Code(KeyCode::KeyV) => return KeyAction::Paste,
             _ => {}
         }
     }
