@@ -218,7 +218,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .position(|&n| n == theme_name.as_str())
                 .unwrap_or(0);
 
-            let pv = jetty_render::build_panel(width, height, opacity, theme_idx, font_size, &[], "", 0);
+            let pv = jetty_render::build_panel(
+                width, height, opacity, theme_idx, font_size,
+                &mono_families,
+                mono_families.first().map(String::as_str).unwrap_or(""),
+                0,
+            );
             rects.extend(pv.quads);
             eprintln!(
                 "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx}, font_size={font_size})"
