@@ -205,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let shot_panel = std::env::var("JETTY_SHOT_PANEL").unwrap_or_else(|_| "0".to_string());
-        let panel_labels = if shot_panel == "1" {
+        let mut panel_labels = if shot_panel == "1" {
             // Read opacity + theme_idx from env (same vars as the live app).
             let opacity = std::env::var("JETTY_OPACITY")
                 .ok()
@@ -246,6 +246,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Vec::new()
         };
+
+        // JETTY_SHOT_MENU — render the right-click context menu for visual checks.
+        if std::env::var("JETTY_SHOT_MENU").is_ok() {
+            let menu = jetty_render::build_context_menu(620.0, 120.0, width, height, Some(1));
+            rects.extend(menu.quads);
+            panel_labels.extend(menu.labels);
+        }
 
         quad.render(&device, &queue, &view, width, height, &rects);
 
