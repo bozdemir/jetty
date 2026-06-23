@@ -218,15 +218,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .position(|&n| n == theme_name.as_str())
                 .unwrap_or(0);
 
+            // JETTY_SHOT_PANEL_OFFSET="dx,dy" — two f32 (default "0,0").
+            // Lets the caller verify the moveable-dialog path at an offset.
+            let (panel_dx, panel_dy) = std::env::var("JETTY_SHOT_PANEL_OFFSET")
+                .ok()
+                .and_then(|s| {
+                    let mut parts = s.splitn(2, ',');
+                    let dx = parts.next()?.parse::<f32>().ok()?;
+                    let dy = parts.next()?.parse::<f32>().ok()?;
+                    Some((dx, dy))
+                })
+                .unwrap_or((0.0, 0.0));
+
             let pv = jetty_render::build_panel(
                 width, height, opacity, theme_idx, font_size,
                 &mono_families,
                 mono_families.first().map(String::as_str).unwrap_or(""),
                 0,
+                panel_dx,
+                panel_dy,
             );
             rects.extend(pv.quads);
             eprintln!(
-                "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx}, font_size={font_size})"
+                "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx}, font_size={font_size}, offset=({panel_dx},{panel_dy}))"
             );
             pv.labels
         } else {

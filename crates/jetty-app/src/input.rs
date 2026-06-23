@@ -188,6 +188,12 @@ pub enum MouseAction {
     /// User clicked a font-family row. The index is
     /// `geom.font_scroll_offset + row_index` into the families list.
     SetFont(usize),
+    /// User clicked the ▲ font-list scroll button — scroll up (offset−1).
+    FontScrollUp,
+    /// User clicked the ▼ font-list scroll button — scroll down (offset+1).
+    FontScrollDown,
+    /// User pressed on the title bar (not on any widget) — start dialog drag.
+    StartDialogDrag,
     /// User clicked inside the panel but not on any widget — swallow the event.
     ConsumePanel,
     /// User pressed inside the scrollbar thumb. `grab_dy` is `cy - rect.y`.
@@ -204,14 +210,18 @@ pub enum MouseAction {
 /// * `scrollbar` – The current scrollbar thumb [`Rect`], if any.
 /// * `cx`, `cy`  – Cursor position in physical pixels.
 ///
-/// Priority matches `app.rs`:
+/// Priority:
 /// 1. If panel open: slider handle/track → StartSliderDrag
 /// 2. If panel open: theme chip i        → SetTheme(i)
-/// 3. If panel open: inside panel rect   → ConsumePanel
-/// 4. (Falls through to scrollbar when click is outside open panel)
-/// 5. Inside scrollbar thumb             → StartScrollbarDrag
-/// 6. Inside scrollbar track x-range     → ScrollbarTrackJump
-/// 7. Anything else                      → None
+/// 3. If panel open: font-size buttons   → FontMinus/Plus/Reset
+/// 4. If panel open: font-scroll buttons → FontScrollUp/FontScrollDown
+/// 5. If panel open: font-family row     → SetFont(idx)
+/// 6. If panel open: title bar (top ~36px, no widget hit) → StartDialogDrag
+/// 7. If panel open: inside panel rect   → ConsumePanel
+/// 8. (Falls through to scrollbar when click is outside open panel)
+/// 9. Inside scrollbar thumb             → StartScrollbarDrag
+/// 10. Inside scrollbar track x-range    → ScrollbarTrackJump
+/// 11. Anything else                     → None
 pub fn decide_mouse_press(
     panel: Option<&jetty_render::PanelGeom>,
     scrollbar: Option<&jetty_render::Rect>,
@@ -239,11 +249,22 @@ pub fn decide_mouse_press(
         if point_in(&g.font_reset, cx, cy) {
             return MouseAction::FontReset;
         }
+        // Font-list scroll buttons.
+        if point_in(&g.font_scroll_up, cx, cy) {
+            return MouseAction::FontScrollUp;
+        }
+        if point_in(&g.font_scroll_down, cx, cy) {
+            return MouseAction::FontScrollDown;
+        }
         // Font-family list rows.
         for (i, row) in g.font_rows.iter().enumerate() {
             if point_in(row, cx, cy) {
                 return MouseAction::SetFont(g.font_scroll_offset + i);
             }
+        }
+        // Title bar (top ~36px) — drag handle; must come before generic consume.
+        if point_in(&g.title_bar, cx, cy) {
+            return MouseAction::StartDialogDrag;
         }
         // Inside panel but not a widget → consume.
         if point_in(&g.panel, cx, cy) {

@@ -17,6 +17,13 @@ pub struct PanelGeom {
     pub font_rows: Vec<Rect>,
     /// The scroll offset into the families list at the time of rendering.
     pub font_scroll_offset: usize,
+    /// The draggable title-bar strip at the top of the panel (~36px tall).
+    /// A left-press here that does NOT hit any widget starts a dialog drag.
+    pub title_bar: Rect,
+    /// ▲ scroll button — decrements font_scroll_offset.
+    pub font_scroll_up: Rect,
+    /// ▼ scroll button — increments font_scroll_offset.
+    pub font_scroll_down: Rect,
 }
 
 /// Full description of how to draw the settings panel for one frame.
@@ -39,7 +46,9 @@ const MAX_FONT_ROWS: usize = 5;
 /// Build the settings panel for the given screen size, opacity (0.1..=1.0),
 /// selected theme index (index into `jetty_core::theme::PRESETS`), current
 /// logical font size (`font_size`), the list of monospace font families, the
-/// currently selected family name, and the scroll offset into the family list.
+/// currently selected family name, the scroll offset into the family list, and
+/// a user drag offset (`dx`, `dy`) added to the centered position so the dialog
+/// can be moved. The panel is clamped to remain fully on-screen.
 pub fn build_panel(
     screen_w: u32,
     screen_h: u32,
@@ -49,20 +58,37 @@ pub fn build_panel(
     families: &[String],
     selected_family: &str,
     font_scroll_offset: usize,
+    dx: f32,
+    dy: f32,
 ) -> PanelView {
     const PANEL_W: f32 = 380.0;
-    // Extra 120px for the font-family list (5 rows × 22px + header + padding).
-    const PANEL_H: f32 = 390.0;
 
-    let px = ((screen_w as f32 - PANEL_W) / 2.0).floor();
-    let py = ((screen_h as f32 - PANEL_H) / 2.0).floor();
+    // ── Vertical layout (non-overlapping bands, each ≥12px gap from prior) ──
+    //
+    //  py+ 0  .. py+36   Title bar  (title label at py+12)
+    //  py+48  .. py+96   Opacity band  (label at py+48, track at py+84)
+    //                    slider track h=6 → bottom py+90; handle h=18 → bottom py+96
+    //  py+108 .. py+156  Font-size band  (label at py+108, buttons at py+128, btn h=28 → bottom py+156)
+    //  py+168 .. py+176  "Font" section header label
+    //  py+190 ..         Font-family list rows (5×(22+2)=120px → bottom py+310)
+    //  py+322            "Theme" label (12px gap after list bottom)
+    //  py+342            Theme chips (h=36 → bottom py+378)
+    //  PANEL_H = 378 + 18 = 396
+
+    const PANEL_H: f32 = 396.0;
+
+    // Center, then apply the user drag offset, then clamp to screen edges.
+    let sw = screen_w as f32;
+    let sh = screen_h as f32;
+    let px = (((sw - PANEL_W) / 2.0).floor() + dx).clamp(0.0, (sw - PANEL_W).max(0.0));
+    let py = (((sh - PANEL_H) / 2.0).floor() + dy).clamp(0.0, (sh - PANEL_H).max(0.0));
 
     // --- Full-screen dim quad (drawn before everything else) ---
     let dim_rect = Rect {
         x: 0.0,
         y: 0.0,
-        w: screen_w as f32,
-        h: screen_h as f32,
+        w: sw,
+        h: sh,
         color: [0, 0, 0, 140],
     };
 
@@ -82,7 +108,17 @@ pub fn build_panel(
         color: [28, 28, 36, 240],
     };
 
-    // --- Opacity slider ---
+    // --- Title bar (draggable handle: py+0 .. py+36) ---
+    let title_bar = Rect {
+        x: px,
+        y: py,
+        w: PANEL_W,
+        h: 36.0,
+        color: [0, 0, 0, 0], // drawn via bg; color unused for hit-test
+    };
+
+    // --- Opacity band (py+48 .. py+96) ---
+    // Label at py+48; track centred at py+84 (h=6); handle at py+78 (h=18).
     let slider_track = Rect {
         x: px + 16.0,
         y: py + 84.0,
@@ -100,9 +136,8 @@ pub fn build_panel(
         color: [185, 185, 205, 255],
     };
 
-    // --- Font-size row (y = py + 120..py + 160) ---
-    // Layout: [label "Font size  NN"] [−] [+] [reset]
-    // Buttons are 28×28 px, spaced by 8px.
+    // --- Font-size band (py+108 .. py+156) ---
+    // Label at py+108; "Npt" readout at py+134; buttons at py+128 (h=28 → bottom py+156).
     let font_btn_y = py + 128.0;
     let font_minus_x = px + 200.0;
     let font_plus_x  = font_minus_x + 36.0;
@@ -130,14 +165,33 @@ pub fn build_panel(
         color: [55, 55, 72, 255],
     };
 
-    // --- Font-family list (y = py + 170..py + 290) ---
-    // Up to MAX_FONT_ROWS rows of 22px, with a 2px gap between rows.
-    // Selected row is highlighted. Scroll offset shifts which families are shown.
-    // Cap: only the first MAX_FONT_ROWS families starting at font_scroll_offset
-    // are displayed. Wheel scrolling is handled in app.rs by adjusting font_scroll_offset.
+    // --- Font scroll buttons (▲ / ▼) in the "Font" header row at py+168 ---
+    // Two 20×20 buttons placed at the right side of the header row.
+    let scroll_btn_y = py + 166.0;
+    let scroll_down_x = px + PANEL_W - 16.0 - 20.0;        // ▼ rightmost
+    let scroll_up_x   = scroll_down_x - 24.0;               // ▲ left of ▼
+    let font_scroll_up = Rect {
+        x: scroll_up_x,
+        y: scroll_btn_y,
+        w: 20.0,
+        h: 20.0,
+        color: [55, 55, 72, 255],
+    };
+    let font_scroll_down = Rect {
+        x: scroll_down_x,
+        y: scroll_btn_y,
+        w: 20.0,
+        h: 20.0,
+        color: [55, 55, 72, 255],
+    };
+
+    // --- Font-family list (py+190 .. py+310) ---
+    // "Font" header at py+168; list rows start at py+190.
+    // 5 rows × (22px row + 2px gap) = 120px → list bottom = py+310.
+    // Theme label at py+322 (12px gap); chips at py+342.
     const ROW_H: f32 = 22.0;
     const ROW_GAP: f32 = 2.0;
-    let list_top = py + 174.0;
+    let list_top = py + 190.0;
     let list_x = px + 16.0;
     let list_w = PANEL_W - 32.0;
 
@@ -163,14 +217,12 @@ pub fn build_panel(
         });
     }
 
-    // --- Theme chips (below the font-family list) ---
+    // --- Theme chips (py+342 .. py+378) ---
+    // "Theme" label at py+322; chips at py+342 (h=36 → bottom py+378).
     let presets = jetty_core::theme::PRESETS;
     let num_presets = presets.len(); // should be 4
 
-    // Theme chips start after the font list area.
-    // Font list occupies py+162 (header) through py+162 + MAX_FONT_ROWS*(ROW_H+ROW_GAP) ~= py+282.
-    // Chips start at py+300.
-    let chip_top = py + 306.0;
+    let chip_top = py + 342.0;
     let mut chip_rects: Vec<Rect> = Vec::with_capacity(num_presets);
     for i in 0..num_presets {
         let chip_x = px + 16.0 + i as f32 * 88.0;
@@ -196,6 +248,10 @@ pub fn build_panel(
     quads.push(font_minus);
     quads.push(font_plus);
     quads.push(font_reset);
+
+    // Font-family scroll buttons (▲ / ▼).
+    quads.push(font_scroll_up);
+    quads.push(font_scroll_down);
 
     // Font-family list background rows.
     quads.extend_from_slice(&font_row_rects);
@@ -225,19 +281,19 @@ pub fn build_panel(
     // Title.
     labels.push(("Settings".to_string(), px + 16.0, py + 12.0, [230, 230, 240]));
 
-    // Opacity label.
+    // Opacity label (band top at py+48).
     let pct = (opacity * 100.0).round() as i32;
     labels.push((
         format!("Opacity  {}%", pct),
         px + 16.0,
-        py + 54.0,
+        py + 48.0,
         [200, 200, 210],
     ));
 
-    // Font-size section header.
-    labels.push(("Font size".to_string(), px + 16.0, py + 110.0, [200, 200, 210]));
+    // Font-size section header (band top at py+108).
+    labels.push(("Font size".to_string(), px + 16.0, py + 108.0, [200, 200, 210]));
 
-    // Current font-size readout (left of the buttons).
+    // Current font-size readout aligned with buttons.
     let fs_display = font_size.round() as i32;
     labels.push((
         format!("{}pt", fs_display),
@@ -251,8 +307,12 @@ pub fn build_panel(
     labels.push(("+".to_string(),  font_plus_x  + 8.0,  font_btn_y + 6.0,  [200, 200, 215]));
     labels.push(("rst".to_string(), font_reset_x + 6.0, font_btn_y + 6.0,  [200, 200, 215]));
 
-    // Font-family section header.
-    labels.push(("Font".to_string(), px + 16.0, py + 158.0, [200, 200, 210]));
+    // Font-family section header (at py+168; list starts at py+190).
+    labels.push(("Font".to_string(), px + 16.0, py + 168.0, [200, 200, 210]));
+
+    // Scroll button labels (▲ / ▼).
+    labels.push(("^".to_string(), scroll_up_x   + 6.0, scroll_btn_y + 4.0, [200, 200, 215]));
+    labels.push(("v".to_string(), scroll_down_x + 6.0, scroll_btn_y + 4.0, [200, 200, 215]));
 
     // Font-family row labels.
     for i in 0..visible_count {
@@ -281,11 +341,11 @@ pub fn build_panel(
     // Show a scroll hint if there are more families than visible rows.
     if families.len() > MAX_FONT_ROWS {
         let hint = format!("({}/{})", offset + visible_count, families.len());
-        labels.push((hint, px + PANEL_W - 60.0, py + 158.0, [140, 140, 155]));
+        labels.push((hint, px + PANEL_W - 60.0, py + 168.0, [140, 140, 155]));
     }
 
-    // Theme section label.
-    labels.push(("Theme".to_string(), px + 16.0, py + 278.0, [200, 200, 210]));
+    // Theme section label (at py+322; 12px gap after list bottom py+310).
+    labels.push(("Theme".to_string(), px + 16.0, py + 322.0, [200, 200, 210]));
 
     // Chip name labels.
     for i in 0..num_presets {
@@ -321,6 +381,9 @@ pub fn build_panel(
         font_reset,
         font_rows: font_row_rects,
         font_scroll_offset: offset,
+        title_bar,
+        font_scroll_up,
+        font_scroll_down,
     };
 
     PanelView { quads, labels, geom }

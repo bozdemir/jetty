@@ -471,7 +471,7 @@ fn arrow_keys_app_cursor_mode_all_directions() {
 
 /// Build a real PanelGeom for a 1000×640 window at 70% opacity, theme index 1.
 fn make_panel_geom() -> jetty_render::PanelGeom {
-    jetty_render::build_panel(1000, 640, 0.7, 1, 16.0, &[], "", 0).geom
+    jetty_render::build_panel(1000, 640, 0.7, 1, 16.0, &[], "", 0, 0.0, 0.0).geom
 }
 
 /// Build a scrollbar rect that is non-None (requires scroll_max > 0).
@@ -515,12 +515,23 @@ fn click_chip_2_sets_theme_2() {
 #[test]
 fn click_inside_panel_not_widget_consumes() {
     let geom = make_panel_geom();
-    // Click somewhere in the panel background: near top-left of panel,
-    // but not over any widget (slider or chip).
+    // Click somewhere in the panel background below the title bar (y+40) and
+    // below the opacity slider (y+96), but not over any widget.
+    // This should consume the click without triggering a drag or action.
     let cx = geom.panel.x + 5.0;
-    let cy = geom.panel.y + 5.0;
+    let cy = geom.panel.y + 100.0; // below title bar (36px) and slider (96px)
     let action = decide_mouse_press(Some(&geom), None, cx, cy);
     assert_eq!(action, MouseAction::ConsumePanel);
+}
+
+#[test]
+fn click_title_bar_starts_dialog_drag() {
+    let geom = make_panel_geom();
+    // Click within the title bar strip (top 36px) — not on a widget.
+    let cx = geom.panel.x + 10.0;
+    let cy = geom.panel.y + 10.0;
+    let action = decide_mouse_press(Some(&geom), None, cx, cy);
+    assert_eq!(action, MouseAction::StartDialogDrag);
 }
 
 #[test]

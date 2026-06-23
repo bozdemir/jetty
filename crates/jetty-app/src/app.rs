@@ -60,6 +60,15 @@ pub struct App {
     selecting: bool,
     /// Whether JETTY_DEBUG is set — enables input/panel state logging to stderr.
     debug: bool,
+    /// Accumulated drag offset for the settings dialog (physical pixels).
+    panel_dx: f32,
+    panel_dy: f32,
+    /// Whether the user is currently dragging the settings dialog by its title bar.
+    dragging_dialog: bool,
+    /// Cursor position (physical px) where the dialog drag started.
+    drag_dialog_anchor: (f32, f32),
+    /// panel_dx / panel_dy at the moment the dialog drag started.
+    drag_dialog_start: (f32, f32),
 }
 
 impl App {
@@ -107,6 +116,11 @@ impl App {
             dragging_slider: false,
             selecting: false,
             debug,
+            panel_dx: 0.0,
+            panel_dy: 0.0,
+            dragging_dialog: false,
+            drag_dialog_anchor: (0.0, 0.0),
+            drag_dialog_start: (0.0, 0.0),
         };
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -431,11 +445,22 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                // --- Dialog drag continuation ---
+                if self.dragging_dialog {
+                    let cx = self.cursor.0 as f32;
+                    let cy = self.cursor.1 as f32;
+                    self.panel_dx = self.drag_dialog_start.0 + (cx - self.drag_dialog_anchor.0);
+                    self.panel_dy = self.drag_dialog_start.1 + (cy - self.drag_dialog_anchor.1);
+                    if let Some(w_) = &self.window {
+                        w_.request_redraw();
+                    }
+                    return;
+                }
                 // --- Slider drag continuation ---
                 if self.dragging_slider {
                     if let Some(gpu) = &self.gpu {
                         let (w, h) = (gpu.config.width, gpu.config.height);
-                        let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset);
+                        let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset, self.panel_dx, self.panel_dy);
                         self.opacity = self.opacity_from_cursor(&pv.geom.slider_track);
                         self.apply_theme();
                     }
@@ -474,7 +499,7 @@ impl ApplicationHandler<()> for App {
                 };
 
                 let panel_geom = if self.panel_open {
-                    Some(jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset).geom)
+                    Some(jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset, self.panel_dx, self.panel_dy).geom)
                 } else {
                     None
                 };
@@ -526,6 +551,25 @@ impl ApplicationHandler<()> for App {
                             self.set_font_family(name);
                         }
                     }
+                    input::MouseAction::FontScrollUp => {
+                        self.font_scroll_offset = self.font_scroll_offset.saturating_sub(1);
+                        if let Some(w_) = &self.window {
+                            w_.request_redraw();
+                        }
+                    }
+                    input::MouseAction::FontScrollDown => {
+                        const MAX_FONT_ROWS: usize = 5;
+                        let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
+                        self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
+                        if let Some(w_) = &self.window {
+                            w_.request_redraw();
+                        }
+                    }
+                    input::MouseAction::StartDialogDrag => {
+                        self.dragging_dialog = true;
+                        self.drag_dialog_anchor = (self.cursor.0 as f32, self.cursor.1 as f32);
+                        self.drag_dialog_start = (self.panel_dx, self.panel_dy);
+                    }
                     input::MouseAction::ConsumePanel => {
                         // Swallow the click; no state change needed.
                     }
@@ -569,11 +613,12 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                // If we were dragging a host widget (scrollbar/slider), the
+                // If we were dragging a host widget (scrollbar/slider/dialog), the
                 // release just ends that drag and is never forwarded to the app.
-                let was_dragging = self.dragging_scrollbar || self.dragging_slider;
+                let was_dragging = self.dragging_scrollbar || self.dragging_slider || self.dragging_dialog;
                 self.dragging_scrollbar = false;
                 self.dragging_slider = false;
+                self.dragging_dialog = false;
 
                 // End text selection and copy-on-select.
                 if self.selecting {
@@ -629,6 +674,7 @@ impl ApplicationHandler<()> for App {
                             let pv = jetty_render::build_panel(
                                 w, h, self.opacity, self.theme_idx, self.font_logical,
                                 &self.font_families, &self.font_family, self.font_scroll_offset,
+                                self.panel_dx, self.panel_dy,
                             );
                             let cx = self.cursor.0 as f32;
                             let cy = self.cursor.1 as f32;
@@ -638,7 +684,9 @@ impl ApplicationHandler<()> for App {
                                          && cy <= pv.geom.font_rows.last().map(|r| r.y + r.h).unwrap_or(0.0));
                             if over_list {
                                 // lines > 0 = wheel up = scroll list up (decrement offset).
-                                let max_offset = self.font_families.len().saturating_sub(1);
+                                // max_offset: last window that still shows MAX_FONT_ROWS entries.
+                                const MAX_FONT_ROWS: usize = 5;
+                                let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
                                 if lines > 0 {
                                     self.font_scroll_offset = self.font_scroll_offset.saturating_sub(1);
                                 } else {
@@ -857,7 +905,7 @@ impl ApplicationHandler<()> for App {
                     }
                     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
                     if panel_open {
-                        let pv = jetty_render::build_panel(width, height, opacity, theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset);
+                        let pv = jetty_render::build_panel(width, height, opacity, theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset, self.panel_dx, self.panel_dy);
                         rects.extend(pv.quads);
                         labels = pv.labels;
                     }
