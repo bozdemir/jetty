@@ -7,7 +7,7 @@ fn named_ansi_color_maps_to_palette() {
     term.feed(b"\x1b[31mX"); // SGR 31: red foreground
     let snap = term.snapshot();
     assert_eq!(snap.cell(0, 0).c, 'X');
-    assert_eq!(snap.cell(0, 0).fg, [205, 0, 0]); // standard ANSI red
+    assert_eq!(snap.cell(0, 0).fg, [243, 139, 168]); // Catppuccin Mocha red (default theme)
 }
 
 #[test]
@@ -15,7 +15,7 @@ fn bright_ansi_color_maps_to_palette() {
     let mut term = Terminal::new(80, 24);
     term.feed(b"\x1b[92mX"); // SGR 92: bright green foreground
     let snap = term.snapshot();
-    assert_eq!(snap.cell(0, 0).fg, [0, 255, 0]);
+    assert_eq!(snap.cell(0, 0).fg, [166, 227, 161]); // Catppuccin Mocha bright green
 }
 
 #[test]

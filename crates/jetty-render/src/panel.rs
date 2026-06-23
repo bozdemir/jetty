@@ -37,7 +37,7 @@ pub struct PanelView {
 }
 
 /// Short display names for each preset, in PRESETS order.
-const CHIP_NAMES: [&str; 4] = ["Dark", "Gruvbox", "Solar", "Light"];
+const CHIP_NAMES: [&str; 4] = ["Mocha", "Tokyo", "Gruvbox", "Dracula"];
 
 /// Maximum number of font-family rows displayed in the panel at once.
 /// If more families exist, the list scrolls via `font_scroll_offset`.

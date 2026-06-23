@@ -1,13 +1,13 @@
 // Tests for the theme system.
 use jetty_core::{Terminal, Theme};
 
-/// Unknown JETTY_THEME name falls back to default_dark background.
+/// Unknown JETTY_THEME name falls back to the default theme (catppuccin_mocha).
 #[test]
-fn unknown_theme_env_falls_back_to_default_dark() {
+fn unknown_theme_env_falls_back_to_default() {
     // We use set_theme so env ordering doesn't affect other tests.
     let mut term = Terminal::new(80, 24);
     term.set_theme(Theme::by_name("nonexistent_theme_xyz"));
-    assert_eq!(term.theme().bg, [18, 18, 23, 255]);
+    assert_eq!(term.theme().bg, [30, 30, 46, 255]); // Catppuccin Mocha base
 }
 
 /// Setting a non-default theme changes the snapshot bg_rgba.

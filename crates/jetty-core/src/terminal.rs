@@ -128,8 +128,8 @@ impl Terminal {
         let config = Config { scrolling_history: 10_000, ..Default::default() };
         let (tx, pty_write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
-        // Load theme from JETTY_THEME env var; default to "default_dark".
-        let theme_name = std::env::var("JETTY_THEME").unwrap_or_else(|_| "default_dark".to_string());
+        // Load theme from JETTY_THEME env var; default to "catppuccin_mocha".
+        let theme_name = std::env::var("JETTY_THEME").unwrap_or_else(|_| "catppuccin_mocha".to_string());
         let mut theme = Theme::by_name(&theme_name);
 
         // Apply opacity override from JETTY_OPACITY (float 0.0..1.0).
