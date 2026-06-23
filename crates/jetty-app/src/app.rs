@@ -69,6 +69,10 @@ pub struct App {
     drag_dialog_anchor: (f32, f32),
     /// panel_dx / panel_dy at the moment the dialog drag started.
     drag_dialog_start: (f32, f32),
+    /// When Some, the right-click context menu is open at this physical-pixel position.
+    context_menu: Option<(f32, f32)>,
+    /// Index of the menu item currently under the cursor (for hover highlight).
+    menu_hover: Option<usize>,
 }
 
 impl App {
@@ -121,6 +125,8 @@ impl App {
             dragging_dialog: false,
             drag_dialog_anchor: (0.0, 0.0),
             drag_dialog_start: (0.0, 0.0),
+            context_menu: None,
+            menu_hover: None,
         };
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -490,6 +496,24 @@ impl ApplicationHandler<()> for App {
                         }
                     }
                 }
+                // --- Context menu hover update ---
+                if let Some((mx, my)) = self.context_menu {
+                    if let Some(gpu) = &self.gpu {
+                        let (win_w, win_h) = (gpu.config.width, gpu.config.height);
+                        let menu = jetty_render::build_context_menu(mx, my, win_w, win_h, None);
+                        let cx = self.cursor.0 as f32;
+                        let cy = self.cursor.1 as f32;
+                        let new_hover = menu.item_rects.iter().position(|r| {
+                            cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
+                        });
+                        if new_hover != self.menu_hover {
+                            self.menu_hover = new_hover;
+                            if let Some(win) = &self.window {
+                                win.request_redraw();
+                            }
+                        }
+                    }
+                }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 let (w, h) = if let Some(gpu) = &self.gpu {
@@ -497,6 +521,46 @@ impl ApplicationHandler<()> for App {
                 } else {
                     return;
                 };
+
+                // --- Context menu hit-test (consume the click entirely) ---
+                if let Some((mx, my)) = self.context_menu.take() {
+                    self.menu_hover = None;
+                    let cx = self.cursor.0 as f32;
+                    let cy = self.cursor.1 as f32;
+                    let menu = jetty_render::build_context_menu(mx, my, w, h, None);
+                    let hit = menu.item_rects.iter().position(|r| {
+                        cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
+                    });
+                    if let Some(idx) = hit {
+                        match idx {
+                            0 => {
+                                // Copy
+                                if let Some(text) = self.terminal.selection_text() {
+                                    if !text.is_empty() {
+                                        clipboard::set(&text);
+                                    }
+                                }
+                            }
+                            1 => {
+                                // Paste
+                                if let Some(text) = clipboard::get() {
+                                    self.paste_text(&text);
+                                }
+                            }
+                            2 => {
+                                // Select All
+                                self.terminal.select_all();
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Whether we hit an item or clicked outside, the menu is
+                    // closed (Take above) — request a redraw and consume the click.
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                    return;
+                }
 
                 let panel_geom = if self.panel_open {
                     Some(jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset, self.panel_dx, self.panel_dy).geom)
@@ -606,10 +670,17 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
-                // Right-click: paste from clipboard (no longer opens the settings
-                // panel — use Ctrl+, or Ctrl+Shift+O to toggle the panel).
-                if let Some(text) = clipboard::get() {
-                    self.paste_text(&text);
+                // Right-click: open the context menu (Copy / Paste / Select All).
+                // If the settings panel is open, ignore — the panel captures all
+                // interaction while it is visible.
+                if !self.panel_open {
+                    let cx = self.cursor.0 as f32;
+                    let cy = self.cursor.1 as f32;
+                    self.context_menu = Some((cx, cy));
+                    self.menu_hover = None;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
@@ -843,6 +914,15 @@ impl ApplicationHandler<()> for App {
                         }
                     }
                     input::KeyAction::Send(bytes) => {
+                        // Escape closes the context menu (if open) before forwarding to PTY.
+                        if bytes == [0x1b] && self.context_menu.is_some() {
+                            self.context_menu = None;
+                            self.menu_hover = None;
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         // Any real keystroke jumps back to the bottom so the user sees their input.
                         self.terminal.scroll_to_bottom();
                         if let Some(w) = &mut self.writer {
@@ -919,6 +999,21 @@ impl ApplicationHandler<()> for App {
                             height,
                             &labels,
                         );
+                    }
+                    // Draw the right-click context menu on top of everything.
+                    if let Some((mx, my)) = self.context_menu {
+                        let menu = jetty_render::build_context_menu(mx, my, width, height, self.menu_hover);
+                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &menu.quads);
+                        if !menu.labels.is_empty() {
+                            let _ = text.render_overlays(
+                                &gpu.device,
+                                &gpu.queue,
+                                &view,
+                                width,
+                                height,
+                                &menu.labels,
+                            );
+                        }
                     }
                     frame.present();
                 }

@@ -440,6 +440,28 @@ impl Terminal {
         use alacritty_terminal::term::TermMode;
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
+
+    /// Select all text — the entire scrollback history plus the visible screen.
+    ///
+    /// Creates a Simple selection from the oldest history line (top-left) to the
+    /// last visible row (bottom-right), so a subsequent `selection_text()` call
+    /// returns the full terminal contents. Any prior selection is replaced.
+    pub fn select_all(&mut self) {
+        let grid = self.term.grid();
+        let history = grid.history_size();
+        let cols = self.cols;
+        let rows = self.rows;
+        // The grid uses negative line indices for history in alacritty's model.
+        // `history_size()` lines of scrollback live above line 0.
+        // We want to start at the very top of history and end at the last row.
+        // alacritty's Line type is a newtype over i32 (via index::Line).
+        use alacritty_terminal::index::Line;
+        let top = Point::new(Line(-(history as i32)), Column(0));
+        let bottom = Point::new(Line(rows as i32 - 1), Column(cols.saturating_sub(1)));
+        let mut sel = Selection::new(SelectionType::Simple, top, Side::Left);
+        sel.update(bottom, Side::Right);
+        self.term.selection = Some(sel);
+    }
 }
 
 /// Convert a 256-color palette index to RGB (standard xterm scheme):
@@ -639,6 +661,18 @@ mod tests {
             assert!(!snap2.cell(0, col).selected,
                 "cell (0, {col}) should not be selected after clear");
         }
+    }
+
+    #[test]
+    fn select_all_covers_full_content() {
+        // Feed two lines; select_all should produce text containing both words.
+        let mut t = Terminal::new(20, 5);
+        // Write "hello", then a carriage-return+newline to move to row 1.
+        t.feed(b"hello\r\nworld");
+        t.select_all();
+        let text = t.selection_text().unwrap_or_default();
+        assert!(text.contains("hello"), "select_all text should contain 'hello'; got {text:?}");
+        assert!(text.contains("world"), "select_all text should contain 'world'; got {text:?}");
     }
 
     #[test]
