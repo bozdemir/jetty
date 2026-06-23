@@ -390,7 +390,7 @@ impl ApplicationHandler<()> for App {
         // If the shell child exited while we were draining its last output,
         // close the window. The waker fires this ~10x/s, so we react within a
         // frame of the shell exiting. `event_loop.exit()` is safe to call here.
-        if self.terminal.child_exited() {
+        if self.terminal.child_exited() || self.pty.as_ref().is_some_and(|p| p.child_exited()) {
             event_loop.exit();
             return;
         }
@@ -858,7 +858,7 @@ impl ApplicationHandler<()> for App {
                 // The shell may have exited as part of the output we just
                 // drained (e.g. the user typed `exit`); close the window rather
                 // than render one more dead frame.
-                if self.terminal.child_exited() {
+                if self.terminal.child_exited() || self.pty.as_ref().is_some_and(|p| p.child_exited()) {
                     event_loop.exit();
                     return;
                 }

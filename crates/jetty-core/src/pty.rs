@@ -1,11 +1,13 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 
 pub struct PtySession {
     master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
     rx: Receiver<Vec<u8>>,
+    exited: Arc<AtomicBool>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
@@ -40,13 +42,18 @@ impl PtySession {
             .try_clone_reader()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         let (tx, rx) = channel::<Vec<u8>>();
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_reader = Arc::clone(&exited);
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
-                        // EOF or error — notify the app so it can react (e.g.
-                        // detect child exit) without waiting for the next tick.
+                        // EOF or error means the shell closed the PTY (the user
+                        // pressed Ctrl+D or ran `exit`). Flag it BEFORE waking the
+                        // app so its post-drain child-exit check sees it and closes
+                        // the window instead of hanging on a dead shell.
+                        exited_reader.store(true, Ordering::SeqCst);
                         on_data();
                         break;
                     }
@@ -66,12 +73,20 @@ impl PtySession {
         Ok(PtySession {
             master: Arc::new(Mutex::new(pair.master)),
             rx,
+            exited,
             _child: child,
         })
     }
 
     pub fn output(&self) -> &Receiver<Vec<u8>> {
         &self.rx
+    }
+
+    /// Whether the shell child has exited — the reader thread saw EOF/error on
+    /// the PTY master (Ctrl+D / `exit`). The app polls this after draining the
+    /// output to close the window instead of freezing on a dead shell.
+    pub fn child_exited(&self) -> bool {
+        self.exited.load(Ordering::SeqCst)
     }
 
     /// Returns a writer for the PTY master (send keystrokes to the shell).
