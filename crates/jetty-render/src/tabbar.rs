@@ -83,14 +83,19 @@ pub fn build_tab_bar_ex(
     // Theme-derived colors.
     let bg = [theme.bg[0], theme.bg[1], theme.bg[2], 255];
     let accent = theme.palette[4]; // blue
-    let active_bg = [accent[0], accent[1], accent[2], 255];
-    // Inactive tab: a dim blend toward the accent so it reads as part of the bar.
-    let inactive_bg = [
-        ((bg[0] as u16 + accent[0] as u16) / 3) as u8,
-        ((bg[1] as u16 + accent[1] as u16) / 3) as u8,
-        ((bg[2] as u16 + accent[2] as u16) / 3) as u8,
-        255,
-    ];
+    // Tab fills are SUBTLE accent tints of the bar bg (not a full bright slab):
+    // the active tab is a soft tinted panel topped with a bright accent indicator
+    // bar (drawn in the loop); inactive tabs barely lift off the bar so they recede.
+    let tint = |t: f32| -> [u8; 4] {
+        [
+            (bg[0] as f32 + (accent[0] as f32 - bg[0] as f32) * t) as u8,
+            (bg[1] as f32 + (accent[1] as f32 - bg[1] as f32) * t) as u8,
+            (bg[2] as f32 + (accent[2] as f32 - bg[2] as f32) * t) as u8,
+            255,
+        ]
+    };
+    let active_bg = tint(0.22);
+    let inactive_bg = tint(0.07);
     let fg = theme.fg;
     let dim_fg = [
         (fg[0] as u16 * 2 / 3) as u8,
@@ -189,6 +194,20 @@ pub fn build_tab_bar_ex(
         ));
         // Fill: the rounded tab body on top of the border.
         quads.push(Rect::rounded(body_x, body_y, body_w, body_h, bg_color, TAB_RADIUS));
+
+        // Active tab: a bright accent indicator bar along the bottom edge — the
+        // modern "selected" marker, so the active tab pops without a bright slab.
+        if *active && !being_renamed {
+            let bar_h = 2.5;
+            quads.push(Rect::rounded(
+                body_x + 6.0,
+                body_y + body_h - bar_h - 1.0,
+                body_w - 12.0,
+                bar_h,
+                active_border,
+                bar_h / 2.0,
+            ));
+        }
 
         let label_color = if *active || being_renamed { fg } else { dim_fg };
         if being_renamed {
