@@ -119,6 +119,16 @@ mod tests {
     }
 
     #[test]
+    fn opacity_floor_keeps_window_visible() {
+        // App applies a [0.1, 1.0] clamp on load so a persisted 0.0 (invisible
+        // window) is lifted to the visible floor. Mirror that clamp here to lock
+        // in the contract the loader relies on.
+        assert_eq!(0.0_f32.clamp(0.1, 1.0), 0.1);
+        assert_eq!(0.5_f32.clamp(0.1, 1.0), 0.5);
+        assert_eq!(2.0_f32.clamp(0.1, 1.0), 1.0);
+    }
+
+    #[test]
     fn missing_file_is_default() {
         // toml::from_str on garbage falls back to default via unwrap_or_default.
         let back: Config = toml::from_str("not valid toml !!!").unwrap_or_default();

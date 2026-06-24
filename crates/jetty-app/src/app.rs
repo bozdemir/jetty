@@ -305,7 +305,9 @@ impl App {
         if let Some(i) = jetty_core::theme::PRESETS.iter().position(|&n| n == cfg.theme.as_str()) {
             app.theme_idx = i;
         }
-        app.opacity = cfg.opacity.clamp(0.0, 1.0);
+        // Clamp opacity to a VISIBLE floor: a persisted 0.0 would load a fully
+        // transparent (invisible) window, which looks like a launch failure.
+        app.opacity = cfg.opacity.clamp(0.1, 1.0);
         app.font_logical = cfg.font_size.clamp(6.0, 48.0);
         app.font_family = cfg.font_family;
         app.corner_radius = cfg.corner_radius.clamp(0.0, 24.0);
@@ -803,7 +805,10 @@ impl App {
         self.settings_gpu = None;
         self.settings_text = None;
         self.settings_quad = None;
+        // Clear BOTH drag flags so a drag in progress when the window closes
+        // doesn't leave a stale flag set that misbehaves on reopen.
         self.dragging_slider = false;
+        self.dragging_radius = false;
         if self.debug {
             eprintln!("SETTINGS window closed");
         }
@@ -1121,6 +1126,27 @@ impl ApplicationHandler<AppEvent> for App {
         if let Some(ref t) = text {
             self.font_families = t.monospace_families();
             eprintln!("jetty: found {} monospace families", self.font_families.len());
+
+            // Validate the persisted font family: if it's empty or no longer
+            // present among the enumerated monospace families (e.g. the user
+            // uninstalled it), fall back to the default ("MesloLGS NF" when
+            // available, otherwise the first family) and log the substitution.
+            let valid = !self.font_family.is_empty()
+                && self.font_families.iter().any(|f| f == &self.font_family);
+            if !valid {
+                let fallback = if self.font_families.iter().any(|f| f == "MesloLGS NF") {
+                    "MesloLGS NF".to_string()
+                } else {
+                    self.font_families.first().cloned().unwrap_or_default()
+                };
+                if !fallback.is_empty() {
+                    eprintln!(
+                        "jetty: configured font family {:?} not found; falling back to {:?}",
+                        self.font_family, fallback
+                    );
+                    self.font_family = fallback;
+                }
+            }
         }
 
         // Build the rounded-corner mask (final fullscreen pass) for the borderless
