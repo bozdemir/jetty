@@ -258,6 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 panel_radius,
                 panel_dx,
                 panel_dy,
+                terminal.theme(),
             );
             rects.extend(pv.quads);
             eprintln!(
@@ -280,6 +281,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let help = jetty_render::build_help_overlay(width, height);
             rects.extend(help.quads);
             panel_labels.extend(help.labels);
+        }
+
+        // JETTY_SHOT_TABBAR — render a sample tab strip (3 tabs, one active, plus
+        // the window controls) over the top of the frame so the rounded tabs +
+        // borders can be inspected.
+        if std::env::var("JETTY_SHOT_TABBAR").is_ok() {
+            let tabs = [
+                ("Tab 1".to_string(), true),
+                ("Tab 2".to_string(), false),
+                ("Tab 3".to_string(), false),
+            ];
+            let bar = jetty_render::build_tab_bar(width, &tabs, terminal.theme());
+            rects.extend(bar.quads);
+            panel_labels.extend(bar.labels);
+            eprintln!("jetty-shot: JETTY_SHOT_TABBAR rendered 3 sample tabs (rounded + bordered)");
         }
 
         quad.render(&device, &queue, &view, width, height, &rects);

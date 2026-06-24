@@ -771,10 +771,11 @@ impl App {
     /// Build the panel view for the settings window in its own coordinate space
     /// (the panel is centred to fill the fixed-size window; no drag offset).
     fn settings_panel_view(&self, w: u32, h: u32) -> jetty_render::PanelView {
+        let theme = self.current_theme();
         jetty_render::build_panel(
             w, h, self.opacity, self.theme_idx, self.font_logical,
             &self.font_families, &self.font_family, self.font_scroll_offset,
-            self.corner_radius, 0.0, 0.0,
+            self.corner_radius, 0.0, 0.0, &theme,
         )
     }
 
@@ -789,6 +790,7 @@ impl App {
         // stack mutably below without overlapping the immutable self borrows.
         let families = self.font_families.clone();
         let family = self.font_family.clone();
+        let theme = self.current_theme();
         let (Some(gpu), Some(text), Some(quad)) =
             (&mut self.settings_gpu, &mut self.settings_text, &mut self.settings_quad)
         else {
@@ -798,7 +800,7 @@ impl App {
         let height = gpu.config.height;
         let pv = jetty_render::build_panel(
             width, height, opacity, theme_idx, font_logical,
-            &families, &family, font_scroll_offset, corner_radius, 0.0, 0.0,
+            &families, &family, font_scroll_offset, corner_radius, 0.0, 0.0, &theme,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
             // Clear the window background to the panel border color, then paint the

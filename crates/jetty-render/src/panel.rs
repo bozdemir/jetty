@@ -53,6 +53,7 @@ const MAX_FONT_ROWS: usize = 5;
 /// currently selected family name, the scroll offset into the family list, and
 /// a user drag offset (`dx`, `dy`) added to the centered position so the dialog
 /// can be moved. The panel is clamped to remain fully on-screen.
+#[allow(clippy::too_many_arguments)]
 pub fn build_panel(
     screen_w: u32,
     screen_h: u32,
@@ -65,8 +66,53 @@ pub fn build_panel(
     corner_radius: f32,
     dx: f32,
     dy: f32,
+    theme: &jetty_core::Theme,
 ) -> PanelView {
     const PANEL_W: f32 = 380.0;
+
+    // --- Theme-derived panel chrome colors ---
+    // All panel colors are derived from the ACTIVE theme so the settings window
+    // re-skins itself when the theme changes (instead of staying a fixed dark
+    // gray). `lerp` blends bg→fg by `t` for shades that keep contrast on both
+    // dark and light themes.
+    let tbg = theme.bg; // [r,g,b,a]
+    let tfg = theme.fg; // [r,g,b]
+    let accent = theme.palette[4]; // blue accent
+    let lerp = |t: f32| -> [u8; 3] {
+        [
+            (tbg[0] as f32 + (tfg[0] as f32 - tbg[0] as f32) * t).round() as u8,
+            (tbg[1] as f32 + (tfg[1] as f32 - tbg[1] as f32) * t).round() as u8,
+            (tbg[2] as f32 + (tfg[2] as f32 - tbg[2] as f32) * t).round() as u8,
+        ]
+    };
+    // Panel surface: a slightly lifted shade of the theme bg, made nearly opaque.
+    let panel_bg3 = lerp(0.06);
+    let panel_bg: [u8; 4] = [panel_bg3[0], panel_bg3[1], panel_bg3[2], 242];
+    // Border: a lighter shade so the panel reads as a card on any theme.
+    let border3 = lerp(0.30);
+    let panel_border: [u8; 4] = [border3[0], border3[1], border3[2], 255];
+    // Button fills: a mid shade between bg and fg.
+    let btn3 = lerp(0.14);
+    let btn_fill: [u8; 4] = [btn3[0], btn3[1], btn3[2], 255];
+    // Slider track: dim shade.
+    let track3 = lerp(0.18);
+    let slider_track_col: [u8; 4] = [track3[0], track3[1], track3[2], 255];
+    // Accent for handles / selection highlights.
+    let accent_col: [u8; 4] = [accent[0], accent[1], accent[2], 255];
+    // Selected font-row background: a dim accent blend.
+    let row_sel: [u8; 4] = [
+        ((tbg[0] as u16 + accent[0] as u16 * 2) / 3) as u8,
+        ((tbg[1] as u16 + accent[1] as u16 * 2) / 3) as u8,
+        ((tbg[2] as u16 + accent[2] as u16 * 2) / 3) as u8,
+        255,
+    ];
+    // Unselected font-row background: a faint lift over the panel bg.
+    let row_unsel3 = lerp(0.10);
+    let row_unsel: [u8; 4] = [row_unsel3[0], row_unsel3[1], row_unsel3[2], 220];
+    // Text colors.
+    let text_main = tfg;
+    let text_dim = lerp(0.70);
+    let text_btn = lerp(0.78);
 
     // ── Vertical layout (non-overlapping bands, each ≥12px gap from prior) ──
     //
@@ -96,9 +142,7 @@ pub fn build_panel(
         y: 0.0,
         w: sw,
         h: sh,
-        color: [0, 0, 0, 140],
-        ..Default::default()
-    };
+        color: [0, 0, 0, 140], ..Default::default() };
 
     // --- Border + background ---
     let border_rect = Rect {
@@ -106,17 +150,13 @@ pub fn build_panel(
         y: py - 2.0,
         w: PANEL_W + 4.0,
         h: PANEL_H + 4.0,
-        color: [70, 70, 90, 255],
-        ..Default::default()
-    };
+        color: panel_border, ..Default::default() };
     let bg_rect = Rect {
         x: px,
         y: py,
         w: PANEL_W,
         h: PANEL_H,
-        color: [28, 28, 36, 240],
-        ..Default::default()
-    };
+        color: panel_bg, ..Default::default() };
 
     // --- Title bar (draggable handle: py+0 .. py+36) ---
     let title_bar = Rect {
@@ -124,7 +164,7 @@ pub fn build_panel(
         y: py,
         w: PANEL_W,
         h: 36.0,
-        color: [0, 0, 0, 0], // drawn via bg; color unused for hit-test,
+        color: [0, 0, 0, 0], // drawn via bg; color unused for hit-test
         ..Default::default()
     };
 
@@ -135,9 +175,7 @@ pub fn build_panel(
         y: py + 84.0,
         w: 348.0,
         h: 6.0,
-        color: [60, 60, 75, 255],
-        ..Default::default()
-    };
+        color: slider_track_col, ..Default::default() };
     let frac = ((opacity - 0.1) / 0.9).clamp(0.0, 1.0);
     let handle_x = px + 16.0 + frac * (348.0 - 14.0);
     let slider_handle = Rect {
@@ -145,9 +183,7 @@ pub fn build_panel(
         y: py + 78.0,
         w: 14.0,
         h: 18.0,
-        color: [185, 185, 205, 255],
-        ..Default::default()
-    };
+        color: accent_col, ..Default::default() };
 
     // --- Corner-radius band (py+108 .. py+156) ---
     // Label at py+108; track centred at py+144 (h=6); handle at py+138 (h=18).
@@ -158,9 +194,7 @@ pub fn build_panel(
         y: py + 144.0,
         w: 348.0,
         h: 6.0,
-        color: [60, 60, 75, 255],
-        ..Default::default()
-    };
+        color: slider_track_col, ..Default::default() };
     let r_frac = (corner_radius / RADIUS_MAX).clamp(0.0, 1.0);
     let radius_handle_x = px + 16.0 + r_frac * (348.0 - 14.0);
     let radius_handle = Rect {
@@ -168,7 +202,7 @@ pub fn build_panel(
         y: py + 138.0,
         w: 14.0,
         h: 18.0,
-        color: [185, 185, 205, 255],
+        color: accent_col,
         ..Default::default()
     };
 
@@ -184,25 +218,19 @@ pub fn build_panel(
         y: font_btn_y,
         w: 28.0,
         h: 28.0,
-        color: [55, 55, 72, 255],
-        ..Default::default()
-    };
+        color: btn_fill, ..Default::default() };
     let font_plus = Rect {
         x: font_plus_x,
         y: font_btn_y,
         w: 28.0,
         h: 28.0,
-        color: [55, 55, 72, 255],
-        ..Default::default()
-    };
+        color: btn_fill, ..Default::default() };
     let font_reset = Rect {
         x: font_reset_x,
         y: font_btn_y,
         w: 44.0,
         h: 28.0,
-        color: [55, 55, 72, 255],
-        ..Default::default()
-    };
+        color: btn_fill, ..Default::default() };
 
     // --- Font scroll buttons (▲ / ▼) in the "Font" header row at py+228 ---
     // Two 20×20 buttons placed at the right side of the header row.
@@ -214,17 +242,13 @@ pub fn build_panel(
         y: scroll_btn_y,
         w: 20.0,
         h: 20.0,
-        color: [55, 55, 72, 255],
-        ..Default::default()
-    };
+        color: btn_fill, ..Default::default() };
     let font_scroll_down = Rect {
         x: scroll_down_x,
         y: scroll_btn_y,
         w: 20.0,
         h: 20.0,
-        color: [55, 55, 72, 255],
-        ..Default::default()
-    };
+        color: btn_fill, ..Default::default() };
 
     // --- Font-family list (py+250 .. py+370) ---
     // "Font" header at py+228; list rows start at py+250.
@@ -244,19 +268,13 @@ pub fn build_panel(
         let row_y = list_top + i as f32 * (ROW_H + ROW_GAP);
         let family_idx = offset + i;
         let is_selected = families.get(family_idx).map(|n| n.as_str()) == Some(selected_family);
-        let row_color = if is_selected {
-            [60, 80, 110, 255]
-        } else {
-            [38, 38, 50, 220]
-        };
+        let row_color = if is_selected { row_sel } else { row_unsel };
         font_row_rects.push(Rect {
             x: list_x,
             y: row_y,
             w: list_w,
             h: ROW_H,
-            color: row_color,
-        ..Default::default()
-    });
+            color: row_color, ..Default::default() });
     }
 
     // --- Theme chips (py+402 .. py+438) ---
@@ -274,9 +292,7 @@ pub fn build_panel(
             y: chip_top,
             w: 80.0,
             h: 36.0,
-            color: [theme_bg[0], theme_bg[1], theme_bg[2], 255],
-        ..Default::default()
-    });
+            color: [theme_bg[0], theme_bg[1], theme_bg[2], 255], ..Default::default() });
     }
 
     // --- Build quads in draw order ---
@@ -307,9 +323,7 @@ pub fn build_panel(
             y: chip.y - 2.0,
             w: 84.0,
             h: 40.0,
-            color: [210, 210, 230, 255],
-        ..Default::default()
-    });
+            color: accent_col, ..Default::default() });
     }
 
     // Chip fills.
@@ -327,7 +341,7 @@ pub fn build_panel(
     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
 
     // Title.
-    labels.push(("Settings".to_string(), px + 16.0, py + 12.0, [230, 230, 240]));
+    labels.push(("Settings".to_string(), px + 16.0, py + 12.0, text_main));
 
     // Opacity label (band top at py+48).
     let pct = (opacity * 100.0).round() as i32;
@@ -335,7 +349,7 @@ pub fn build_panel(
         format!("Opacity  {}%", pct),
         px + 16.0,
         py + 48.0,
-        [200, 200, 210],
+        text_dim,
     ));
 
     // Corner-radius label (band top at py+108) with a px readout.
@@ -344,11 +358,11 @@ pub fn build_panel(
         format!("Corner radius  {}px", radius_px),
         px + 16.0,
         py + 108.0,
-        [200, 200, 210],
+        text_dim,
     ));
 
     // Font-size section header (band top at py+168).
-    labels.push(("Font size".to_string(), px + 16.0, py + 168.0, [200, 200, 210]));
+    labels.push(("Font size".to_string(), px + 16.0, py + 168.0, text_dim));
 
     // Current font-size readout aligned with buttons.
     let fs_display = font_size.round() as i32;
@@ -356,20 +370,20 @@ pub fn build_panel(
         format!("{}pt", fs_display),
         px + 140.0,
         py + 194.0,
-        [210, 210, 225],
+        text_main,
     ));
 
     // Font button labels.
-    labels.push(("-".to_string(),  font_minus_x + 9.0,  font_btn_y + 6.0,  [200, 200, 215]));
-    labels.push(("+".to_string(),  font_plus_x  + 8.0,  font_btn_y + 6.0,  [200, 200, 215]));
-    labels.push(("rst".to_string(), font_reset_x + 6.0, font_btn_y + 6.0,  [200, 200, 215]));
+    labels.push(("-".to_string(),  font_minus_x + 9.0,  font_btn_y + 6.0,  text_btn));
+    labels.push(("+".to_string(),  font_plus_x  + 8.0,  font_btn_y + 6.0,  text_btn));
+    labels.push(("rst".to_string(), font_reset_x + 6.0, font_btn_y + 6.0,  text_btn));
 
     // Font-family section header (at py+228; list starts at py+250).
-    labels.push(("Font".to_string(), px + 16.0, py + 228.0, [200, 200, 210]));
+    labels.push(("Font".to_string(), px + 16.0, py + 228.0, text_dim));
 
     // Scroll button labels (▲ / ▼).
-    labels.push(("^".to_string(), scroll_up_x   + 6.0, scroll_btn_y + 4.0, [200, 200, 215]));
-    labels.push(("v".to_string(), scroll_down_x + 6.0, scroll_btn_y + 4.0, [200, 200, 215]));
+    labels.push(("^".to_string(), scroll_up_x   + 6.0, scroll_btn_y + 4.0, text_btn));
+    labels.push(("v".to_string(), scroll_down_x + 6.0, scroll_btn_y + 4.0, text_btn));
 
     // Font-family row labels.
     for i in 0..visible_count {
@@ -378,9 +392,9 @@ pub fn build_panel(
             let row_y = list_top + i as f32 * (ROW_H + ROW_GAP) + 4.0;
             let is_selected = name.as_str() == selected_family;
             let text_color: [u8; 3] = if is_selected {
-                [220, 235, 255]
+                text_main
             } else {
-                [190, 190, 205]
+                text_dim
             };
             // Truncate long names to avoid overflowing the panel.
             // Use char-boundary-safe truncation to avoid panicking on
@@ -400,20 +414,20 @@ pub fn build_panel(
         // Place the "(shown/total)" hint to the LEFT of the ▲/▼ buttons
         // (which sit at px+PANEL_W-60..) so the count and the arrows never overlap.
         let hint = format!("({}/{})", offset + visible_count, families.len());
-        labels.push((hint, px + PANEL_W - 132.0, py + 228.0, [140, 140, 155]));
+        labels.push((hint, px + PANEL_W - 132.0, py + 228.0, text_dim));
     }
 
     // Theme section label (at py+382; 12px gap after list bottom py+370).
-    labels.push(("Theme".to_string(), px + 16.0, py + 382.0, [200, 200, 210]));
+    labels.push(("Theme".to_string(), px + 16.0, py + 382.0, text_dim));
 
     // Chip name labels.
     for i in 0..num_presets {
         let chip = &chip_rects[i];
-        let label_color: [u8; 3] = if presets[i] == "light" {
-            [20, 20, 20]
-        } else {
-            [235, 235, 240]
-        };
+        // Pick black or white text per chip based on its own bg luminance so the
+        // name stays legible on any theme swatch.
+        let cb = jetty_core::Theme::by_name(presets[i]).bg;
+        let lum = 0.299 * cb[0] as f32 + 0.587 * cb[1] as f32 + 0.114 * cb[2] as f32;
+        let label_color: [u8; 3] = if lum > 140.0 { [20, 20, 20] } else { [235, 235, 240] };
         labels.push((
             CHIP_NAMES[i].to_string(),
             chip.x + 8.0,
@@ -428,7 +442,7 @@ pub fn build_panel(
         y: py,
         w: PANEL_W,
         h: PANEL_H,
-        color: [0, 0, 0, 0], // color not used for hit-testing,
+        color: [0, 0, 0, 0], // color not used for hit-testing
         ..Default::default()
     };
     let geom = PanelGeom {
