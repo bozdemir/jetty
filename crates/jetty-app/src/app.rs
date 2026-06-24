@@ -141,6 +141,32 @@ pub struct App {
     /// the spot the user left it instead of always re-centering. `None` until the
     /// first hide; the first open is centered.
     last_pos: Option<winit::dpi::PhysicalPosition<i32>>,
+    /// In-flight center-summon (materialize) animation. `Some(SummonAnim)` while a
+    /// show/hide transition is animating; `None` when settled. While `Some`, the
+    /// RedrawRequested handler re-requests redraws so the frames self-sustain.
+    summon: Option<SummonAnim>,
+    /// Animated cursor pixel position (top-left of the block), eased toward the
+    /// snapshot's target cell each frame. `None` until the first frame seeds it.
+    cursor_anim: Option<CursorAnim>,
+}
+
+/// State for the center-summon materialization. `Show` scales up from ~0.94 with
+/// a gentle spring overshoot while fading in; `Hide` shrinks to ~0.97 and fades
+/// out (the window is hidden only AFTER the hide animation completes).
+#[derive(Debug, Clone, Copy)]
+struct SummonAnim {
+    anim: crate::anim::Animation,
+    showing: bool,
+}
+
+/// Animated block-cursor position. Tracks the current on-screen pixel position
+/// (top-left of the block) and the last frame's instant so the per-frame ease is
+/// frame-rate independent. The target is recomputed each frame from the snapshot.
+#[derive(Debug, Clone, Copy)]
+struct CursorAnim {
+    x: f32,
+    y: f32,
+    last: std::time::Instant,
 }
 
 /// Which resize zone (if any) the cursor is over on the borderless main window.
@@ -304,6 +330,8 @@ impl App {
             confirm_close: None,
             confirm_quit: false,
             last_pos: None,
+            summon: None,
+            cursor_anim: None,
         };
         // Persisted user settings override the env-derived defaults (but env
         // vars still seed the initial values above, so an explicit JETTY_* can
@@ -750,6 +778,14 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    /// Whether any UI animation is currently in-flight. When true, the
+    /// RedrawRequested handler re-requests a redraw so the frame loop self-sustains
+    /// until every animation settles; when false (the common idle case) the loop
+    /// stops requesting frames and the app returns to ~0 CPU.
+    fn animating(&self) -> bool {
+        self.summon.is_some() || self.cursor_anim.is_some()
     }
 
     /// Toggle window visibility (F9 / Yakuake-style summon).
@@ -2242,6 +2278,15 @@ impl ApplicationHandler<AppEvent> for App {
                         );
                     }
                     frame.present();
+                }
+                // Self-sustaining frame loop: while any animation is in-flight,
+                // request the next frame so the animation keeps advancing. When
+                // nothing is animating we request nothing here, so a damage-driven
+                // idle terminal stays at ~0 CPU (ControlFlow::Wait, unchanged).
+                if self.animating() {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             _ => {}
