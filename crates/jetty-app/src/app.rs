@@ -137,6 +137,10 @@ pub struct App {
     /// CloseRequested). Shows a "Quit JeTTY?" popup instead of exiting; Enter
     /// confirms, Esc / Cancel / click-outside dismisses.
     confirm_quit: bool,
+    /// Where the window was when last hidden, so re-summoning (F9) restores it to
+    /// the spot the user left it instead of always re-centering. `None` until the
+    /// first hide; the first open is centered.
+    last_pos: Option<winit::dpi::PhysicalPosition<i32>>,
 }
 
 /// Which resize zone (if any) the cursor is over on the borderless main window.
@@ -299,6 +303,7 @@ impl App {
             help_open: false,
             confirm_close: None,
             confirm_quit: false,
+            last_pos: None,
         };
         // Persisted user settings override the env-derived defaults (but env
         // vars still seed the initial values above, so an explicit JETTY_* can
@@ -755,11 +760,22 @@ impl App {
     fn toggle_visibility(&mut self, _event_loop: &ActiveEventLoop) {
         self.visible = !self.visible;
         if let Some(win) = &self.window {
-            win.set_visible(self.visible);
             if self.visible {
-                center_window(win);
+                win.set_visible(true);
+                // Re-summon at the spot the user left it; first time → center.
+                match self.last_pos {
+                    Some(pos) => {
+                        let _ = win.set_outer_position(pos);
+                    }
+                    None => center_window(win),
+                }
                 win.focus_window();
                 win.request_redraw();
+            } else {
+                // Remember the current spot before hiding so the next summon
+                // restores it (where the user closed it from).
+                self.last_pos = win.outer_position().ok();
+                win.set_visible(false);
             }
         }
     }
@@ -1104,6 +1120,9 @@ impl ApplicationHandler<AppEvent> for App {
         });
 
         let window = jetty_platform::build_window(event_loop, "JeTTY", (1000, 640));
+        // First open: center the window. Subsequent F9 summons restore the last
+        // position (see toggle_visibility).
+        center_window(&window);
         let size = window.inner_size();
         // HiDPI: the display's scale factor (>1.0 on HiDPI/Retina screens).
         // inner_size() already returns physical pixels; we multiply the logical
