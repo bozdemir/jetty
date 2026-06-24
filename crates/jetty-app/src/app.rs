@@ -2561,8 +2561,12 @@ fn selection_bg_for(theme: &jetty_core::Theme) -> [u8; 3] {
 
 /// Scrollbar thumb color derived from the active theme: theme fg at alpha 160.
 fn scrollbar_thumb_for(theme: &jetty_core::Theme) -> [u8; 4] {
+    // A DIM shade just above the background — subtle, not glaring. (fg/accent are
+    // too bright for a scrollbar.) Blend bg→fg ~35%.
+    let bg = theme.bg;
     let fg = theme.fg;
-    [fg[0], fg[1], fg[2], 160]
+    let mix = |i: usize| (bg[i] as f32 + (fg[i] as f32 - bg[i] as f32) * 0.35) as u8;
+    [mix(0), mix(1), mix(2), 210]
 }
 
 fn ctrl_hover_at(cx: f32, cy: f32, width: u32) -> jetty_render::CtrlHover {

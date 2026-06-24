@@ -227,8 +227,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Draw scrollbar quad (and optionally the settings panel) over the text ---
     {
         let mut rects: Vec<jetty_render::Rect> = Vec::new();
+        let sb_bg = terminal.theme().bg;
         let sb_fg = terminal.theme().fg;
-        let sb_thumb = [sb_fg[0], sb_fg[1], sb_fg[2], 160];
+        let sb_mix = |i: usize| (sb_bg[i] as f32 + (sb_fg[i] as f32 - sb_bg[i] as f32) * 0.35) as u8;
+        let sb_thumb = [sb_mix(0), sb_mix(1), sb_mix(2), 210];
         if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height, 0.0, sb_thumb) {
             rects.push(r);
         }
