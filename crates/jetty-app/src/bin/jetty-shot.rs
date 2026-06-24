@@ -315,6 +315,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             panel_labels.extend(popup.labels);
         }
 
+        // JETTY_SHOT_QUIT — render the whole-app "Quit JeTTY?" confirmation popup.
+        if std::env::var("JETTY_SHOT_QUIT").is_ok() {
+            let popup = jetty_render::build_confirm(
+                width, height, "Quit JeTTY? — all tabs will close", terminal.theme(),
+            );
+            rects.extend(popup.quads);
+            panel_labels.extend(popup.labels);
+        }
+
         quad.render(&device, &queue, &view, width, height, &rects);
 
         // Render panel text labels on top of the panel quads.

@@ -1,8 +1,8 @@
 use crate::Rect;
 
-/// Geometry + draw data for the "Close this tab?" confirmation popup. Reuses the
-/// overlay/panel visual style (full-screen dim + bordered rounded panel) and
-/// exposes clickable Close / Cancel button rects.
+/// Geometry + draw data for a confirmation popup. Reuses the overlay/panel
+/// visual style (full-screen dim + bordered rounded panel) and exposes clickable
+/// Close / Cancel button rects.
 pub struct ConfirmPopup {
     /// Quads in draw order: full-screen dim, border, background panel, buttons.
     pub quads: Vec<Rect>,
@@ -16,12 +16,12 @@ pub struct ConfirmPopup {
     pub cancel_rect: Rect,
 }
 
-/// Build a centered confirmation popup asking whether to close the tab titled
-/// `title`, for a window of `win_w`×`win_h` physical pixels.
-pub fn build_confirm_close(
+/// Build a centered confirmation popup with an arbitrary `prompt` line plus
+/// Enter—Close / Esc—Cancel buttons, for a `win_w`×`win_h` (physical px) window.
+pub fn build_confirm(
     win_w: u32,
     win_h: u32,
-    title: &str,
+    prompt: &str,
     theme: &jetty_core::Theme,
 ) -> ConfirmPopup {
     let sw = win_w as f32;
@@ -30,7 +30,7 @@ pub fn build_confirm_close(
     // --- Theme-derived popup colors (mirrors panel.rs::build_panel) ---
     let tbg = theme.bg;
     let tfg = theme.fg;
-    let green = theme.palette[2]; // confirm/close button = theme green
+    let green = theme.palette[2]; // confirm button = theme green
     let lerp = |t: f32| -> [u8; 3] {
         [
             (tbg[0] as f32 + (tfg[0] as f32 - tbg[0] as f32) * t).round() as u8,
@@ -53,18 +53,16 @@ pub fn build_confirm_close(
     const BTN_H: f32 = 30.0;
     const BTN_GAP: f32 = 16.0;
 
-    // The two button labels (kept for width sizing + drawing).
     let close_label = "Enter — Close";
     let cancel_label = "Esc — Cancel";
 
-    // Truncate the title for the prompt so it never overflows the popup.
-    let shown_title: String = if title.chars().count() > 28 {
-        let t: String = title.chars().take(27).collect();
+    // Truncate the prompt so it never overflows the popup.
+    let prompt: String = if prompt.chars().count() > 44 {
+        let t: String = prompt.chars().take(43).collect();
         format!("{t}…")
     } else {
-        title.to_string()
+        prompt.to_string()
     };
-    let prompt = format!("Close tab \"{shown_title}\"?");
 
     // Width fits the widest line (prompt, or the two buttons side by side).
     let btn_close_w = close_label.chars().count() as f32 * CHAR_W + 20.0;
@@ -113,6 +111,22 @@ pub fn build_confirm_close(
     ConfirmPopup { quads, labels, panel, close_rect, cancel_rect }
 }
 
+/// Confirmation popup asking whether to close the tab titled `title`.
+pub fn build_confirm_close(
+    win_w: u32,
+    win_h: u32,
+    title: &str,
+    theme: &jetty_core::Theme,
+) -> ConfirmPopup {
+    let shown_title: String = if title.chars().count() > 28 {
+        let t: String = title.chars().take(27).collect();
+        format!("{t}…")
+    } else {
+        title.to_string()
+    };
+    build_confirm(win_w, win_h, &format!("Close tab \"{shown_title}\"?"), theme)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,7 +152,12 @@ mod tests {
         let p = build_confirm_close(1000, 700, &long, &theme());
         let prompt = &p.labels[0].0;
         assert!(prompt.contains('…'), "long title should be truncated: {prompt}");
-        // Panel still fits the window width.
         assert!(p.panel.x + p.panel.w <= 1000.0 + 0.5);
+    }
+
+    #[test]
+    fn generic_confirm_shows_prompt() {
+        let p = build_confirm(1000, 700, "Quit JeTTY?", &theme());
+        assert!(p.labels.iter().any(|l| l.0.contains("Quit JeTTY?")));
     }
 }

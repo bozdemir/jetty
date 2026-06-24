@@ -133,6 +133,10 @@ pub struct App {
     /// The × click / Ctrl+Shift+W / Ctrl+D set this instead of closing immediately;
     /// Enter (or the Close button) confirms, Esc (or Cancel / click-outside) clears.
     confirm_close: Option<usize>,
+    /// Set when the user tries to close the whole app (window × button or the OS
+    /// CloseRequested). Shows a "Quit JeTTY?" popup instead of exiting; Enter
+    /// confirms, Esc / Cancel / click-outside dismisses.
+    confirm_quit: bool,
 }
 
 /// Which resize zone (if any) the cursor is over on the borderless main window.
@@ -294,6 +298,7 @@ impl App {
             resize_cursor: ResizeZone::None,
             help_open: false,
             confirm_close: None,
+            confirm_quit: false,
         };
         // Persisted user settings override the env-derived defaults (but env
         // vars still seed the initial values above, so an explicit JETTY_* can
@@ -1266,7 +1271,12 @@ impl ApplicationHandler<AppEvent> for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.confirm_quit = true;
+                if let Some(win) = &self.window {
+                    win.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size.width, size.height);
@@ -1379,7 +1389,28 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 };
 
-                // --- Close-tab confirmation popup is modal (highest priority) ---
+                // --- Quit confirmation popup is modal (highest priority) ---
+                if self.confirm_quit {
+                    let cx = self.cursor.0 as f32;
+                    let cy = self.cursor.1 as f32;
+                    let theme = self.current_theme();
+                    let popup =
+                        jetty_render::build_confirm(w, h, "Quit JeTTY? — all tabs will close", &theme);
+                    if input::point_in(&popup.close_rect, cx, cy) {
+                        event_loop.exit();
+                        return;
+                    } else if input::point_in(&popup.cancel_rect, cx, cy)
+                        || !input::point_in(&popup.panel, cx, cy)
+                    {
+                        self.confirm_quit = false;
+                    }
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
+                // --- Close-tab confirmation popup is modal ---
                 // Clicking Close confirms; Cancel or anywhere outside the panel
                 // cancels. Either way the click is fully consumed.
                 if let Some(i) = self.confirm_close {
@@ -1521,7 +1552,11 @@ impl ApplicationHandler<AppEvent> for App {
                         return;
                     }
                     if input::point_in(&bar.close_rect, cx, cy) {
-                        event_loop.exit();
+                        // Confirm before quitting the whole app (closes every tab).
+                        self.confirm_quit = true;
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
                         return;
                     }
                     if input::point_in(&bar.max_rect, cx, cy) {
@@ -1784,6 +1819,25 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                // --- Quit confirmation popup captures Enter / Esc (highest priority) ---
+                if self.confirm_quit {
+                    use winit::keyboard::{Key, NamedKey};
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => {
+                            event_loop.exit();
+                            return;
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.confirm_quit = false;
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        _ => return,
+                    }
+                }
+
                 // --- Close-tab confirmation popup captures Enter / Esc ---
                 // While the popup is open it is modal: Enter confirms the close,
                 // Esc cancels. Both are fully consumed so they never reach the
@@ -2030,6 +2084,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let context_menu = self.context_menu;
                 let menu_hover = self.menu_hover;
                 let help_open = self.help_open;
+                let confirm_quit = self.confirm_quit;
                 let confirm_close: Option<String> = self
                     .confirm_close
                     .and_then(|i| self.tabs.get(i).map(|t| t.title.clone()));
@@ -2131,7 +2186,17 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     // Draw the close-tab confirmation popup on top of everything
                     // (above the help overlay): dim + bordered panel + buttons.
-                    if let Some(title) = &confirm_close {
+                    if confirm_quit {
+                        let popup = jetty_render::build_confirm(
+                            width, height, "Quit JeTTY? — all tabs will close", &theme,
+                        );
+                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &popup.quads);
+                        if !popup.labels.is_empty() {
+                            let _ = text.render_overlays(
+                                &gpu.device, &gpu.queue, &view, width, height, &popup.labels,
+                            );
+                        }
+                    } else if let Some(title) = &confirm_close {
                         let popup = jetty_render::build_confirm_close(width, height, title, &theme);
                         quad.render(&gpu.device, &gpu.queue, &view, width, height, &popup.quads);
                         if !popup.labels.is_empty() {
