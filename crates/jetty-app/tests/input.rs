@@ -475,7 +475,7 @@ fn make_panel_geom() -> jetty_render::PanelGeom {
     let theme = jetty_core::Theme::by_name("catppuccin_mocha");
     jetty_render::build_panel(
         1000, 640, 0.7, 1, 16.0, &[], "", 0, 10.0, "Bayer",
-        "Center", 0.50, false, true, 0.0, 0.0, &theme,
+        "Center", 0.50, 1.0, false, true, 0.0, 0.0, &theme,
     )
     .geom
 }
@@ -506,6 +506,36 @@ fn click_slider_handle_starts_drag() {
     let cy = h.y + h.h / 2.0;
     let action = decide_mouse_press(Some(&geom), None, cx, cy);
     assert_eq!(action, MouseAction::StartSliderDrag);
+}
+
+#[test]
+fn click_dropdown_height_track_starts_drag() {
+    let geom = make_panel_geom();
+    let t = &geom.dropdown_track;
+    let cx = t.x + t.w / 2.0;
+    let cy = t.y + t.h / 2.0;
+    let action = decide_mouse_press(Some(&geom), None, cx, cy);
+    assert_eq!(action, MouseAction::StartDropdownDrag);
+}
+
+#[test]
+fn click_dropdown_width_track_starts_width_drag() {
+    let geom = make_panel_geom();
+    let t = &geom.dropdown_width_track;
+    let cx = t.x + t.w / 2.0;
+    let cy = t.y + t.h / 2.0;
+    let action = decide_mouse_press(Some(&geom), None, cx, cy);
+    assert_eq!(action, MouseAction::StartDropdownWidthDrag);
+}
+
+#[test]
+fn click_dropdown_width_handle_starts_width_drag() {
+    let geom = make_panel_geom();
+    let h = &geom.dropdown_width_handle;
+    let cx = h.x + h.w / 2.0;
+    let cy = h.y + h.h / 2.0;
+    let action = decide_mouse_press(Some(&geom), None, cx, cy);
+    assert_eq!(action, MouseAction::StartDropdownWidthDrag);
 }
 
 #[test]

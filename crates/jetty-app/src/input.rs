@@ -237,6 +237,8 @@ pub enum MouseAction {
     WinModeNext,
     /// User pressed on the Dropdown-height slider handle or track — start drag.
     StartDropdownDrag,
+    /// User pressed on the Dropdown-width slider handle or track — start drag.
+    StartDropdownWidthDrag,
     /// User clicked the "Auto-hide on focus loss" toggle pill.
     ToggleFocusAutoHide,
     /// User pressed on the title bar (not on any widget) — start dialog drag.
@@ -324,6 +326,10 @@ pub fn decide_mouse_press(
         // Dropdown-height slider handle or track.
         if point_in(&g.dropdown_handle, cx, cy) || point_in(&g.dropdown_track, cx, cy) {
             return MouseAction::StartDropdownDrag;
+        }
+        // Dropdown-width slider handle or track.
+        if point_in(&g.dropdown_width_handle, cx, cy) || point_in(&g.dropdown_width_track, cx, cy) {
+            return MouseAction::StartDropdownWidthDrag;
         }
         // Auto-hide toggle pill.
         if point_in(&g.autohide_toggle, cx, cy) {

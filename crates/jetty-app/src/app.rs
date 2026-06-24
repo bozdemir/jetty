@@ -237,6 +237,8 @@ pub struct App {
     last_focused_window: Option<WindowId>,
     /// Whether the user is dragging the Dropdown-height slider in Settings.
     dragging_dropdown: bool,
+    /// Whether the user is dragging the Dropdown-width slider in Settings.
+    dragging_dropdown_width: bool,
     /// One-time guard for the Wayland "positioning is a no-op" diagnostic.
     wayland_warned: bool,
     /// Start instant of the active summon (crystallize) animation, or None when
@@ -465,6 +467,7 @@ impl App {
             focus_autohide: true,
             last_focused_window: None,
             dragging_dropdown: false,
+            dragging_dropdown_width: false,
             wayland_warned: false,
             summon_anim: None,
             corner_radius,
@@ -793,6 +796,13 @@ impl App {
     fn dropdown_pct_from_cursor(&self, cx: f32, track: &jetty_render::Rect) -> f32 {
         let frac = ((cx - track.x) / track.w).clamp(0.0, 1.0);
         (0.25 + frac * 0.75).clamp(0.25, 1.0)
+    }
+
+    /// Compute the dropdown-width fraction ([0.2, 1.0]) from a cursor x relative
+    /// to the dropdown-width slider track rect.
+    fn dropdown_width_pct_from_cursor(&self, cx: f32, track: &jetty_render::Rect) -> f32 {
+        let frac = ((cx - track.x) / track.w).clamp(0.0, 1.0);
+        (0.2 + frac * 0.8).clamp(0.2, 1.0)
     }
 
     /// Select a new window mode: persist it, and apply it live. Switching to
@@ -1142,6 +1152,7 @@ impl App {
         self.dragging_slider = false;
         self.dragging_radius = false;
         self.dragging_dropdown = false;
+        self.dragging_dropdown_width = false;
         if self.debug {
             eprintln!("SETTINGS window closed");
         }
@@ -1156,6 +1167,7 @@ impl App {
             &self.font_families, &self.font_family, self.font_scroll_offset,
             self.corner_radius, self.summon_effect.display_name(),
             self.window_mode.display_name(), self.dropdown_height_pct,
+            self.dropdown_width_pct,
             self.window_mode == WindowMode::Dropdown, self.focus_autohide,
             0.0, 0.0, &theme,
         )
@@ -1171,6 +1183,7 @@ impl App {
         let summon_name = self.summon_effect.display_name();
         let window_mode_name = self.window_mode.display_name();
         let dropdown_height_pct = self.dropdown_height_pct;
+        let dropdown_width_pct = self.dropdown_width_pct;
         let is_dropdown = self.window_mode == WindowMode::Dropdown;
         let focus_autohide = self.focus_autohide;
         // Clone the small inputs build_panel needs so we can borrow the render
@@ -1188,7 +1201,7 @@ impl App {
         let pv = jetty_render::build_panel(
             width, height, opacity, theme_idx, font_logical,
             &families, &family, font_scroll_offset, corner_radius, summon_name,
-            window_mode_name, dropdown_height_pct, is_dropdown, focus_autohide,
+            window_mode_name, dropdown_height_pct, dropdown_width_pct, is_dropdown, focus_autohide,
             0.0, 0.0, &theme,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
@@ -1226,6 +1239,7 @@ impl App {
         track: Option<jetty_render::Rect>,
         radius_track: Option<jetty_render::Rect>,
         dropdown_track: Option<jetty_render::Rect>,
+        dropdown_width_track: Option<jetty_render::Rect>,
     ) {
         let cx = self.settings_cursor.0 as f32;
         match action {
@@ -1291,6 +1305,16 @@ impl App {
                     }
                 }
             }
+            input::MouseAction::StartDropdownWidthDrag => {
+                // No-op in Center mode (the slider is grayed/disabled there).
+                if self.window_mode == WindowMode::Dropdown {
+                    self.dragging_dropdown_width = true;
+                    if let Some(track_rect) = dropdown_width_track {
+                        self.dropdown_width_pct =
+                            self.dropdown_width_pct_from_cursor(cx, &track_rect);
+                    }
+                }
+            }
             input::MouseAction::ToggleFocusAutoHide => {
                 self.focus_autohide = !self.focus_autohide;
             }
@@ -1351,8 +1375,8 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.settings_cursor = (position.x, position.y);
-                // Continue an opacity-, radius-, or dropdown-height drag started here.
-                if self.dragging_slider || self.dragging_radius || self.dragging_dropdown {
+                // Continue an opacity-, radius-, dropdown-height- or -width drag started here.
+                if self.dragging_slider || self.dragging_radius || self.dragging_dropdown || self.dragging_dropdown_width {
                     if let Some(gpu) = &self.settings_gpu {
                         let (w, h) = (gpu.config.width, gpu.config.height);
                         let pv = self.settings_panel_view(w, h);
@@ -1368,6 +1392,10 @@ impl App {
                             self.dropdown_height_pct =
                                 self.dropdown_pct_from_cursor(cx, &pv.geom.dropdown_track);
                         }
+                        if self.dragging_dropdown_width {
+                            self.dropdown_width_pct =
+                                self.dropdown_width_pct_from_cursor(cx, &pv.geom.dropdown_width_track);
+                        }
                     }
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -1380,12 +1408,28 @@ impl App {
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
                 // Persist the final opacity/corner-radius after a drag settles
                 // (the drag itself only updates live state to keep writes cheap).
-                if self.dragging_slider || self.dragging_radius || self.dragging_dropdown {
+                if self.dragging_slider || self.dragging_radius || self.dragging_dropdown || self.dragging_dropdown_width {
                     self.persist();
+                }
+                // Live-apply a dropdown height/width change on RELEASE only (never
+                // on every mouse-move — that would trigger an X11 resize storm). If
+                // the main window is visible and in Dropdown mode, re-dock the top
+                // strip to the new size immediately (re-asserted post-map via
+                // pending_dock_frames) instead of waiting for the next F9.
+                if (self.dragging_dropdown || self.dragging_dropdown_width)
+                    && self.visible
+                    && self.window_mode == WindowMode::Dropdown
+                {
+                    if let Some(w) = &self.window {
+                        dock_window_top(w, self.dropdown_width_pct, self.dropdown_height_pct);
+                        self.pending_dock_frames = 5;
+                        w.request_redraw();
+                    }
                 }
                 self.dragging_slider = false;
                 self.dragging_radius = false;
                 self.dragging_dropdown = false;
+                self.dragging_dropdown_width = false;
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 let Some(gpu) = &self.settings_gpu else { return };
@@ -1394,11 +1438,12 @@ impl App {
                 let track = pv.geom.slider_track;
                 let radius_track = pv.geom.radius_track;
                 let dropdown_track = pv.geom.dropdown_track;
+                let dropdown_width_track = pv.geom.dropdown_width_track;
                 let cx = self.settings_cursor.0 as f32;
                 let cy = self.settings_cursor.1 as f32;
                 // Hit-test the panel only (no scrollbar in the settings window).
                 let action = input::decide_mouse_press(Some(&pv.geom), None, cx, cy);
-                self.handle_settings_action(action, Some(track), Some(radius_track), Some(dropdown_track));
+                self.handle_settings_action(action, Some(track), Some(radius_track), Some(dropdown_track), Some(dropdown_width_track));
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Wheel over the font-family list scrolls it (same as the old
@@ -2121,6 +2166,7 @@ impl ApplicationHandler<AppEvent> for App {
                     | input::MouseAction::WinModePrev
                     | input::MouseAction::WinModeNext
                     | input::MouseAction::StartDropdownDrag
+                    | input::MouseAction::StartDropdownWidthDrag
                     | input::MouseAction::ToggleFocusAutoHide
                     | input::MouseAction::StartDialogDrag
                     | input::MouseAction::ConsumePanel => {}

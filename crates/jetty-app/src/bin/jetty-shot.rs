@@ -275,6 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::env::var("JETTY_SHOT_PANEL_EFFECT").unwrap_or_else(|_| "Bayer".to_string()).as_str(),
                 std::env::var("JETTY_SHOT_PANEL_WINMODE").unwrap_or_else(|_| "Center".to_string()).as_str(),
                 std::env::var("JETTY_SHOT_PANEL_DH").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.50),
+                std::env::var("JETTY_SHOT_PANEL_DW").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0),
                 std::env::var("JETTY_SHOT_PANEL_WINMODE").map(|m| m == "Dropdown").unwrap_or(false),
                 std::env::var("JETTY_SHOT_PANEL_AUTOHIDE").map(|s| s != "0").unwrap_or(true),
                 panel_dx,
