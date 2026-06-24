@@ -31,6 +31,12 @@ const FONT_LOGICAL_DEFAULT: f32 = 16.0;
 const FALLBACK_COLS: usize = 80;
 const FALLBACK_ROWS: usize = 24;
 
+/// Logical size of the separate Settings window. Sized to exactly fit the panel
+/// (`build_panel` uses PANEL_W=380 × PANEL_H=396 plus a 2px border on each side)
+/// so the panel fills the window with no margin and the OS frame handles moving.
+const SETTINGS_WIN_W: u32 = 384;
+const SETTINGS_WIN_H: u32 = 400;
+
 pub struct App {
     proxy: EventLoopProxy<AppEvent>,
     window: Option<Arc<Window>>,
@@ -65,23 +71,23 @@ pub struct App {
     dragging_scrollbar: bool,
     /// Y offset from thumb top where the user grabbed, in px.
     drag_grab_dy: f32,
-    /// Whether the Settings panel popup is currently visible.
-    panel_open: bool,
+    /// The separate OS window hosting the Settings UI, when open. `None` when the
+    /// settings window is closed. The terminal lives in `window`; settings now
+    /// live entirely in this second, movable window.
+    settings_window: Option<Arc<Window>>,
+    /// GPU/render stack for the settings window (parallel to `gpu`/`text`/`quad`).
+    settings_gpu: Option<GpuContext>,
+    settings_text: Option<TextLayer>,
+    settings_quad: Option<QuadLayer>,
+    /// Last known cursor position inside the settings window (physical px), used
+    /// for hit-testing the panel in the settings window's own coordinate space.
+    settings_cursor: (f64, f64),
     /// Whether the user is currently dragging the opacity slider in the Settings panel.
     dragging_slider: bool,
     /// Whether the user is currently dragging a text selection with the mouse.
     selecting: bool,
     /// Whether JETTY_DEBUG is set — enables input/panel state logging to stderr.
     debug: bool,
-    /// Accumulated drag offset for the settings dialog (physical pixels).
-    panel_dx: f32,
-    panel_dy: f32,
-    /// Whether the user is currently dragging the settings dialog by its title bar.
-    dragging_dialog: bool,
-    /// Cursor position (physical px) where the dialog drag started.
-    drag_dialog_anchor: (f32, f32),
-    /// panel_dx / panel_dy at the moment the dialog drag started.
-    drag_dialog_start: (f32, f32),
     /// When Some, the right-click context menu is open at this physical-pixel position.
     context_menu: Option<(f32, f32)>,
     /// Index of the menu item currently under the cursor (for hover highlight).
@@ -131,15 +137,14 @@ impl App {
             cursor: (0.0, 0.0),
             dragging_scrollbar: false,
             drag_grab_dy: 0.0,
-            panel_open: false,
+            settings_window: None,
+            settings_gpu: None,
+            settings_text: None,
+            settings_quad: None,
+            settings_cursor: (0.0, 0.0),
             dragging_slider: false,
             selecting: false,
             debug,
-            panel_dx: 0.0,
-            panel_dy: 0.0,
-            dragging_dialog: false,
-            drag_dialog_anchor: (0.0, 0.0),
-            drag_dialog_start: (0.0, 0.0),
             context_menu: None,
             menu_hover: None,
         };
@@ -185,9 +190,9 @@ impl App {
         let _ = w;
     }
 
-    /// Compute opacity from the current cursor x relative to a slider track rect.
-    fn opacity_from_cursor(&self, track: &jetty_render::Rect) -> f32 {
-        let frac = ((self.cursor.0 as f32 - track.x) / track.w).clamp(0.0, 1.0);
+    /// Compute opacity from a cursor x relative to a slider track rect.
+    fn opacity_from_cursor(&self, cx: f32, track: &jetty_render::Rect) -> f32 {
+        let frac = ((cx - track.x) / track.w).clamp(0.0, 1.0);
         (0.1 + frac * 0.9).clamp(0.1, 1.0)
     }
 
@@ -358,6 +363,291 @@ impl App {
             }
         }
     }
+
+    /// Toggle the separate Settings window. If it is closed, create it (window +
+    /// its own GPU/text/quad stack) and show it. If it is already open, close it
+    /// by dropping the window and its render stack so it disappears. The terminal
+    /// and PTY are never affected either way.
+    fn toggle_settings_window(&mut self, event_loop: &ActiveEventLoop) {
+        if self.settings_window.is_some() {
+            self.close_settings_window();
+            // Repaint the main window (nothing visual changed there now, but keep
+            // it responsive/consistent).
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
+        let window = jetty_platform::build_fixed_window(
+            event_loop,
+            "JeTTY — Settings",
+            (SETTINGS_WIN_W, SETTINGS_WIN_H),
+        );
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let gpu = GpuContext::new(window.clone(), size.width, size.height);
+        if let Some(ref g) = gpu {
+            let text = TextLayer::new_with_family(
+                &g.device, &g.queue, g.format, self.font_logical * scale, &self.font_family,
+            );
+            let quad = QuadLayer::new(&g.device, g.format);
+            self.settings_text = Some(text);
+            self.settings_quad = Some(quad);
+        }
+        self.settings_gpu = gpu;
+        window.focus_window();
+        window.request_redraw();
+        self.settings_window = Some(window);
+        if self.debug {
+            eprintln!("SETTINGS window opened");
+        }
+    }
+
+    /// Drop the settings window and its render stack (closes/hides the OS window).
+    fn close_settings_window(&mut self) {
+        self.settings_window = None;
+        self.settings_gpu = None;
+        self.settings_text = None;
+        self.settings_quad = None;
+        self.dragging_slider = false;
+        if self.debug {
+            eprintln!("SETTINGS window closed");
+        }
+    }
+
+    /// Build the panel view for the settings window in its own coordinate space
+    /// (the panel is centred to fill the fixed-size window; no drag offset).
+    fn settings_panel_view(&self, w: u32, h: u32) -> jetty_render::PanelView {
+        jetty_render::build_panel(
+            w, h, self.opacity, self.theme_idx, self.font_logical,
+            &self.font_families, &self.font_family, self.font_scroll_offset,
+            0.0, 0.0,
+        )
+    }
+
+    /// Render the settings panel into the settings window's surface.
+    fn render_settings_window(&mut self) {
+        let opacity = self.opacity;
+        let theme_idx = self.theme_idx;
+        let font_logical = self.font_logical;
+        let font_scroll_offset = self.font_scroll_offset;
+        // Clone the small inputs build_panel needs so we can borrow the render
+        // stack mutably below without overlapping the immutable self borrows.
+        let families = self.font_families.clone();
+        let family = self.font_family.clone();
+        let (Some(gpu), Some(text), Some(quad)) =
+            (&mut self.settings_gpu, &mut self.settings_text, &mut self.settings_quad)
+        else {
+            return;
+        };
+        let width = gpu.config.width;
+        let height = gpu.config.height;
+        let pv = jetty_render::build_panel(
+            width, height, opacity, theme_idx, font_logical,
+            &families, &family, font_scroll_offset, 0.0, 0.0,
+        );
+        if let Some((frame, view)) = gpu.acquire_frame() {
+            // Clear the window background to the panel border color, then paint the
+            // panel quads (the panel fills the window, so margins are ~none).
+            quad.render_clear(
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                width,
+                height,
+                &pv.quads,
+                wgpu::Color { r: 0.02, g: 0.02, b: 0.03, a: 1.0 },
+            );
+            if !pv.labels.is_empty() {
+                let _ = text.render_overlays(
+                    &gpu.device,
+                    &gpu.queue,
+                    &view,
+                    width,
+                    height,
+                    &pv.labels,
+                );
+            }
+            frame.present();
+        }
+    }
+
+    /// Apply a panel `MouseAction` decoded in the settings window. Updates shared
+    /// state AND the live main terminal (theme/font/opacity), then requests a
+    /// redraw of BOTH windows so each reflects the change immediately.
+    fn handle_settings_action(&mut self, action: input::MouseAction, track: Option<jetty_render::Rect>) {
+        let cx = self.settings_cursor.0 as f32;
+        match action {
+            input::MouseAction::StartSliderDrag => {
+                self.dragging_slider = true;
+                if let Some(track_rect) = track {
+                    self.opacity = self.opacity_from_cursor(cx, &track_rect);
+                    self.apply_theme();
+                }
+            }
+            input::MouseAction::SetTheme(i) => {
+                self.theme_idx = i;
+                self.apply_theme();
+            }
+            input::MouseAction::FontMinus => {
+                self.set_font_size(self.font_logical - 1.0);
+            }
+            input::MouseAction::FontPlus => {
+                self.set_font_size(self.font_logical + 1.0);
+            }
+            input::MouseAction::FontReset => {
+                self.set_font_size(FONT_LOGICAL_DEFAULT);
+            }
+            input::MouseAction::SetFont(idx) => {
+                if let Some(name) = self.font_families.get(idx) {
+                    let name = name.clone();
+                    self.set_font_family(name);
+                }
+            }
+            input::MouseAction::FontScrollUp => {
+                self.font_scroll_offset = self.font_scroll_offset.saturating_sub(1);
+            }
+            input::MouseAction::FontScrollDown => {
+                const MAX_FONT_ROWS: usize = 5;
+                let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
+                self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
+            }
+            // The OS title bar moves the window now; in-panel drag/consume are no-ops.
+            input::MouseAction::StartDialogDrag
+            | input::MouseAction::ConsumePanel
+            | input::MouseAction::StartScrollbarDrag { .. }
+            | input::MouseAction::ScrollbarTrackJump
+            | input::MouseAction::None => {}
+        }
+        // Redraw both windows: settings shows the updated control, main shows the
+        // new theme/font/opacity live. set_font_size/set_font_family already redraw
+        // the main window, but an extra request is harmless and keeps this simple.
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        if let Some(w) = &self.settings_window {
+            w.request_redraw();
+        }
+    }
+
+    /// Handle a `WindowEvent` that belongs to the settings window. Hit-testing
+    /// uses the settings window's own coordinate space (`settings_cursor`).
+    fn settings_window_event(&mut self, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                self.close_settings_window();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(gpu) = &mut self.settings_gpu {
+                    gpu.resize(size.width, size.height);
+                }
+                if let (Some(gpu), Some(text)) = (&self.settings_gpu, &mut self.settings_text) {
+                    text.resize(gpu);
+                }
+                if let Some(w) = &self.settings_window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let scale = scale_factor as f32;
+                if let Some(ref g) = self.settings_gpu {
+                    let new_text = TextLayer::new_with_family(
+                        &g.device, &g.queue, g.format, self.font_logical * scale, &self.font_family,
+                    );
+                    self.settings_text = Some(new_text);
+                }
+                if let Some(w) = &self.settings_window {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.settings_cursor = (position.x, position.y);
+                // Continue an opacity-slider drag started in this window.
+                if self.dragging_slider {
+                    if let Some(gpu) = &self.settings_gpu {
+                        let (w, h) = (gpu.config.width, gpu.config.height);
+                        let pv = self.settings_panel_view(w, h);
+                        let cx = self.settings_cursor.0 as f32;
+                        self.opacity = self.opacity_from_cursor(cx, &pv.geom.slider_track);
+                        self.apply_theme();
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    if let Some(w) = &self.settings_window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                self.dragging_slider = false;
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                let Some(gpu) = &self.settings_gpu else { return };
+                let (w, h) = (gpu.config.width, gpu.config.height);
+                let pv = self.settings_panel_view(w, h);
+                let track = pv.geom.slider_track;
+                let cx = self.settings_cursor.0 as f32;
+                let cy = self.settings_cursor.1 as f32;
+                // Hit-test the panel only (no scrollbar in the settings window).
+                let action = input::decide_mouse_press(Some(&pv.geom), None, cx, cy);
+                self.handle_settings_action(action, Some(track));
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Wheel over the font-family list scrolls it (same as the old
+                // in-app panel behaviour), now in the settings window.
+                if self.font_families.is_empty() {
+                    return;
+                }
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (y.round() as i32) * 3,
+                    MouseScrollDelta::PixelDelta(p) => (p.y / 20.0).round() as i32,
+                };
+                if lines == 0 {
+                    return;
+                }
+                let Some(gpu) = &self.settings_gpu else { return };
+                let (w, h) = (gpu.config.width, gpu.config.height);
+                let pv = self.settings_panel_view(w, h);
+                let cx = self.settings_cursor.0 as f32;
+                let cy = self.settings_cursor.1 as f32;
+                let over_list = pv.geom.font_rows.iter().any(|r| {
+                    cx >= r.x && cx <= r.x + r.w
+                        && cy >= pv.geom.font_rows.first().map(|r| r.y).unwrap_or(0.0)
+                        && cy <= pv.geom.font_rows.last().map(|r| r.y + r.h).unwrap_or(0.0)
+                });
+                if over_list {
+                    const MAX_FONT_ROWS: usize = 5;
+                    let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
+                    if lines > 0 {
+                        self.font_scroll_offset = self.font_scroll_offset.saturating_sub(1);
+                    } else {
+                        self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
+                    }
+                    if let Some(w) = &self.settings_window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                // Escape closes the settings window.
+                if matches!(event.logical_key, winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)) {
+                    self.close_settings_window();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                self.render_settings_window();
+            }
+            _ => {}
+        }
+    }
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -489,7 +779,13 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Route events to the settings window when they belong to it. Everything
+        // else falls through to the main-terminal handling below.
+        if self.settings_window.as_ref().is_some_and(|w| w.id() == id) {
+            self.settings_window_event(event);
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -528,30 +824,6 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
-                // --- Dialog drag continuation ---
-                if self.dragging_dialog {
-                    let cx = self.cursor.0 as f32;
-                    let cy = self.cursor.1 as f32;
-                    self.panel_dx = self.drag_dialog_start.0 + (cx - self.drag_dialog_anchor.0);
-                    self.panel_dy = self.drag_dialog_start.1 + (cy - self.drag_dialog_anchor.1);
-                    if let Some(w_) = &self.window {
-                        w_.request_redraw();
-                    }
-                    return;
-                }
-                // --- Slider drag continuation ---
-                if self.dragging_slider {
-                    if let Some(gpu) = &self.gpu {
-                        let (w, h) = (gpu.config.width, gpu.config.height);
-                        let pv = jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset, self.panel_dx, self.panel_dy);
-                        self.opacity = self.opacity_from_cursor(&pv.geom.slider_track);
-                        self.apply_theme();
-                    }
-                    if let Some(w_) = &self.window {
-                        w_.request_redraw();
-                    }
-                    return; // don't also drag the scrollbar
-                }
                 if self.dragging_scrollbar {
                     // Copy width/height to avoid borrow conflicts.
                     let (w, h) = if let Some(gpu) = &self.gpu {
@@ -639,12 +911,6 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
 
-                let panel_geom = if self.panel_open {
-                    Some(jetty_render::build_panel(w, h, self.opacity, self.theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset, self.panel_dx, self.panel_dy).geom)
-                } else {
-                    None
-                };
-
                 let rows = self.terminal.rows();
                 let scroll_offset = self.terminal.scroll_offset();
                 let scroll_max = self.terminal.scroll_max();
@@ -653,67 +919,25 @@ impl ApplicationHandler<AppEvent> for App {
                 let cx = self.cursor.0 as f32;
                 let cy = self.cursor.1 as f32;
 
+                // The settings panel no longer lives in this window, so pass no
+                // panel geometry — only the scrollbar and terminal area are hit.
                 match input::decide_mouse_press(
-                    panel_geom.as_ref(),
+                    None,
                     scrollbar.as_ref(),
                     cx,
                     cy,
                 ) {
-                    input::MouseAction::StartSliderDrag => {
-                        let track = panel_geom.as_ref().map(|g| g.slider_track);
-                        self.dragging_slider = true;
-                        if let Some(track_rect) = track {
-                            self.opacity = self.opacity_from_cursor(&track_rect);
-                            self.apply_theme();
-                        }
-                        if let Some(w_) = &self.window {
-                            w_.request_redraw();
-                        }
-                    }
-                    input::MouseAction::SetTheme(i) => {
-                        self.theme_idx = i;
-                        self.apply_theme();
-                        if let Some(w_) = &self.window {
-                            w_.request_redraw();
-                        }
-                    }
-                    input::MouseAction::FontMinus => {
-                        self.set_font_size(self.font_logical - 1.0);
-                    }
-                    input::MouseAction::FontPlus => {
-                        self.set_font_size(self.font_logical + 1.0);
-                    }
-                    input::MouseAction::FontReset => {
-                        self.set_font_size(FONT_LOGICAL_DEFAULT);
-                    }
-                    input::MouseAction::SetFont(idx) => {
-                        if let Some(name) = self.font_families.get(idx) {
-                            let name = name.clone();
-                            self.set_font_family(name);
-                        }
-                    }
-                    input::MouseAction::FontScrollUp => {
-                        self.font_scroll_offset = self.font_scroll_offset.saturating_sub(1);
-                        if let Some(w_) = &self.window {
-                            w_.request_redraw();
-                        }
-                    }
-                    input::MouseAction::FontScrollDown => {
-                        const MAX_FONT_ROWS: usize = 5;
-                        let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
-                        self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
-                        if let Some(w_) = &self.window {
-                            w_.request_redraw();
-                        }
-                    }
-                    input::MouseAction::StartDialogDrag => {
-                        self.dragging_dialog = true;
-                        self.drag_dialog_anchor = (self.cursor.0 as f32, self.cursor.1 as f32);
-                        self.drag_dialog_start = (self.panel_dx, self.panel_dy);
-                    }
-                    input::MouseAction::ConsumePanel => {
-                        // Swallow the click; no state change needed.
-                    }
+                    // Panel actions cannot occur here (panel == None above).
+                    input::MouseAction::StartSliderDrag
+                    | input::MouseAction::SetTheme(_)
+                    | input::MouseAction::FontMinus
+                    | input::MouseAction::FontPlus
+                    | input::MouseAction::FontReset
+                    | input::MouseAction::SetFont(_)
+                    | input::MouseAction::FontScrollUp
+                    | input::MouseAction::FontScrollDown
+                    | input::MouseAction::StartDialogDrag
+                    | input::MouseAction::ConsumePanel => {}
                     input::MouseAction::StartScrollbarDrag { grab_dy } => {
                         self.dragging_scrollbar = true;
                         self.drag_grab_dy = grab_dy;
@@ -748,25 +972,22 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
                 // Right-click: open the context menu (Copy / Paste / Select All).
-                // If the settings panel is open, ignore — the panel captures all
-                // interaction while it is visible.
-                if !self.panel_open {
-                    let cx = self.cursor.0 as f32;
-                    let cy = self.cursor.1 as f32;
-                    self.context_menu = Some((cx, cy));
-                    self.menu_hover = None;
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+                // Settings now live in a separate window, so the main terminal is
+                // always free to show its context menu.
+                let cx = self.cursor.0 as f32;
+                let cy = self.cursor.1 as f32;
+                self.context_menu = Some((cx, cy));
+                self.menu_hover = None;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                // If we were dragging a host widget (scrollbar/slider/dialog), the
-                // release just ends that drag and is never forwarded to the app.
-                let was_dragging = self.dragging_scrollbar || self.dragging_slider || self.dragging_dialog;
+                // If we were dragging the scrollbar, the release just ends that
+                // drag and is never forwarded to the app. (Slider drags happen in
+                // the settings window now.)
+                let was_dragging = self.dragging_scrollbar;
                 self.dragging_scrollbar = false;
-                self.dragging_slider = false;
-                self.dragging_dialog = false;
 
                 // End text selection and copy-on-select.
                 if self.selecting {
@@ -814,40 +1035,6 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 };
                 if lines != 0 {
-                    // When the panel is open and the cursor is over the font-family
-                    // list, wheel-scroll the list instead of the terminal scrollback.
-                    if self.panel_open && !self.font_families.is_empty() {
-                        if let Some(gpu) = &self.gpu {
-                            let (w, h) = (gpu.config.width, gpu.config.height);
-                            let pv = jetty_render::build_panel(
-                                w, h, self.opacity, self.theme_idx, self.font_logical,
-                                &self.font_families, &self.font_family, self.font_scroll_offset,
-                                self.panel_dx, self.panel_dy,
-                            );
-                            let cx = self.cursor.0 as f32;
-                            let cy = self.cursor.1 as f32;
-                            let over_list = pv.geom.font_rows.iter()
-                                .any(|r| cx >= r.x && cx <= r.x + r.w
-                                         && cy >= pv.geom.font_rows.first().map(|r| r.y).unwrap_or(0.0)
-                                         && cy <= pv.geom.font_rows.last().map(|r| r.y + r.h).unwrap_or(0.0));
-                            if over_list {
-                                // lines > 0 = wheel up = scroll list up (decrement offset).
-                                // max_offset: last window that still shows MAX_FONT_ROWS entries.
-                                const MAX_FONT_ROWS: usize = 5;
-                                let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
-                                if lines > 0 {
-                                    self.font_scroll_offset = self.font_scroll_offset.saturating_sub(1);
-                                } else {
-                                    self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
-                                }
-                                if let Some(win) = &self.window {
-                                    win.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-                    }
-
                     // When the app enabled mouse reporting, forward wheel events
                     // as SGR button 64 (up) / 65 (down) — but only over the
                     // terminal area, so wheeling over the scrollbar still scrolls
@@ -896,7 +1083,10 @@ impl ApplicationHandler<AppEvent> for App {
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
                 let app_cursor = self.terminal.app_cursor_keys();
-                let action = input::decide_key(ctrl, shift, alt, event.physical_key.clone(), &event.logical_key, self.panel_open, app_cursor);
+                // Escape in the main window never closes the settings window
+                // (that window handles its own Escape), so panel_open is always
+                // false here — Escape forwards an ESC byte to the PTY as normal.
+                let action = input::decide_key(ctrl, shift, alt, event.physical_key.clone(), &event.logical_key, false, app_cursor);
                 if self.debug {
                     let action_name = match &action {
                         input::KeyAction::TogglePanel => "TogglePanel",
@@ -919,18 +1109,18 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 match action {
                     input::KeyAction::TogglePanel => {
-                        self.panel_open = !self.panel_open;
-                        if self.debug {
-                            eprintln!("PANEL toggled via key -> open={}", self.panel_open);
-                        }
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
+                        // Open or close the separate Settings OS window.
+                        self.toggle_settings_window(event_loop);
                     }
                     input::KeyAction::ClosePanel => {
-                        self.panel_open = false;
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
+                        // Escape never reaches here from the main window
+                        // (panel_open is false), but keep the arm consistent:
+                        // ensure the settings window is closed.
+                        if self.settings_window.is_some() {
+                            self.close_settings_window();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
                         }
                     }
                     input::KeyAction::CycleTheme => {
@@ -1020,9 +1210,6 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
                 let snap = self.terminal.snapshot();
-                let panel_open = self.panel_open;
-                let opacity = self.opacity;
-                let theme_idx = self.theme_idx;
                 let (Some(gpu), Some(text), Some(quad)) =
                     (&mut self.gpu, &mut self.text, &mut self.quad)
                 else {
@@ -1060,23 +1247,7 @@ impl ApplicationHandler<AppEvent> for App {
                     {
                         rects.push(r);
                     }
-                    let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
-                    if panel_open {
-                        let pv = jetty_render::build_panel(width, height, opacity, theme_idx, self.font_logical, &self.font_families, &self.font_family, self.font_scroll_offset, self.panel_dx, self.panel_dy);
-                        rects.extend(pv.quads);
-                        labels = pv.labels;
-                    }
                     quad.render(&gpu.device, &gpu.queue, &view, width, height, &rects);
-                    if !labels.is_empty() {
-                        let _ = text.render_overlays(
-                            &gpu.device,
-                            &gpu.queue,
-                            &view,
-                            width,
-                            height,
-                            &labels,
-                        );
-                    }
                     // Draw the right-click context menu on top of everything.
                     if let Some((mx, my)) = self.context_menu {
                         let menu = jetty_render::build_context_menu(mx, my, width, height, self.menu_hover);
