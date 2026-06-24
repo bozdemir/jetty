@@ -1,4 +1,3 @@
-mod anim;
 mod app;
 mod config;
 pub mod clipboard;

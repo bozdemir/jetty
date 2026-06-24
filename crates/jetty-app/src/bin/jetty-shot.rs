@@ -206,37 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ((terminal.theme().bg[1] as u16 + sel_accent[1] as u16 * 2) / 3) as u8,
         ((terminal.theme().bg[2] as u16 + sel_accent[2] as u16 * 2) / 3) as u8,
     ];
-    let mut bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, 0.0, sel_bg);
-
-    // --- Cursor mid-glide keyframe (JETTY_SHOT_CURSOR_FRAC=0..1) ---
-    // Interpolate the block cursor between two sample cells and draw the soft glow
-    // under it, so the gliding-cursor look is inspectable headlessly. The cursor
-    // starts at the snapshot cell and glides `frac` of the way toward a sample
-    // target a few cells to the right and one row down. With frac unset, the
-    // cursor renders at its snapshot cell (no override) exactly as before.
-    let cursor_override: Option<(f32, f32)> = std::env::var("JETTY_SHOT_CURSOR_FRAC")
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .map(|frac| {
-            let frac = frac.clamp(0.0, 1.0);
-            // From the snapshot cell to a target +6 cols, +1 row (clamped to grid).
-            let from_x = snap.cursor_col as f32 * cell_w;
-            let from_y = snap.cursor_row as f32 * cell_h;
-            let to_col = (snap.cursor_col + 6).min(snap.cols.saturating_sub(1));
-            let to_row = (snap.cursor_row + 1).min(snap.rows.saturating_sub(1));
-            let to_x = to_col as f32 * cell_w;
-            let to_y = to_row as f32 * cell_h;
-            let x = from_x + (to_x - from_x) * frac;
-            let y = from_y + (to_y - from_y) * frac;
-            eprintln!("jetty-shot: cursor mid-glide frac={frac:.2} -> ({x:.1},{y:.1})");
-            (x, y)
-        });
-    if let Some((gx, gy)) = cursor_override {
-        bg_rects.extend(jetty_render::cursor_glow_rects(
-            gx, gy, cell_w, cell_h, snap.cursor_rgb,
-        ));
-    }
-
+    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, 0.0, sel_bg);
     quad.render_clear(
         &device,
         &queue,
@@ -248,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // --- Pass 2: render the grid text on top of the painted background (load) ---
-    text.render_to_ex(&device, &queue, &view, width, height, &snap, false, 0.0, cursor_override)?;
+    text.render_to(&device, &queue, &view, width, height, &snap, false, 0.0)?;
 
     // --- Draw scrollbar quad (and optionally the settings panel) over the text ---
     {
@@ -416,36 +386,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(padded_data);
     readback_buffer.unmap();
 
-    // --- Center-summon keyframe (JETTY_SHOT_SUMMON_T=0..1) ---
-    // Apply the SAME center scale + fade the live summon composite pass uses, so
-    // a summon keyframe is inspectable headlessly. Mirrors SummonAnim::transform's
-    // SHOW variant: scale eases 0.94 → 1.0 (ease_out_back), alpha 0 → 1
-    // (ease_out_cubic). Runs on the premultiplied `tight` buffer BEFORE the
-    // corner mask + checkerboard composite, matching the live ordering.
-    if let Ok(t_str) = std::env::var("JETTY_SHOT_SUMMON_T") {
-        if let Ok(t) = t_str.parse::<f32>() {
-            let t = t.clamp(0.0, 1.0);
-            // ease_out_back with a gentle 1.2 overshoot (matches anim.rs).
-            let ease_out_back = |t: f32| -> f32 {
-                let c1 = 1.2_f32;
-                let c3 = c1 + 1.0;
-                let inv = t - 1.0;
-                1.0 + c3 * inv * inv * inv + c1 * inv * inv
-            };
-            let ease_out_cubic = |t: f32| -> f32 {
-                let inv = 1.0 - t;
-                1.0 - inv * inv * inv
-            };
-            const FROM: f32 = 0.94;
-            let scale = FROM + (1.0 - FROM) * ease_out_back(t);
-            let alpha = ease_out_cubic(t);
-            eprintln!(
-                "jetty-shot: summon keyframe t={t:.2} -> scale={scale:.4} alpha={alpha:.4}"
-            );
-            tight = jetty_render::composite_cpu(&tight, width, height, scale, alpha);
-        }
-    }
-
     // --- Rounded-corner alpha mask (JETTY_CORNER_RADIUS) ---
     // Apply the SAME antialiased rounded-rect SDF mask the live GPU pass uses, so
     // the shot shows transparent (rounded) corners over the checkerboard while the
@@ -479,10 +419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The rendered texture uses premultiplied alpha (the clear color is already
     // premultiplied in text.rs).  We un-premultiply before blending onto the
     // checkerboard, then output an opaque RGBA PNG.
-    // A summon keyframe fades/shrinks the frame, leaving transparent edges, so
-    // composite over the checkerboard to make the scale + fade visible.
-    let summon_active = std::env::var("JETTY_SHOT_SUMMON_T").is_ok();
-    let composited = if bg_alpha < 255 || corner_radius > 0.0 || summon_active {
+    let composited = if bg_alpha < 255 || corner_radius > 0.0 {
         eprintln!("jetty-shot: compositing over checkerboard (bg alpha={})", bg_alpha);
         const TILE: u32 = 16;
         const DARK: [u8; 3] = [40, 40, 40];
