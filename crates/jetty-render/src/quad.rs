@@ -9,7 +9,7 @@ struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) local: vec2<f32>,   // pixel offset from the rect center
-    @location(2) half: vec2<f32>,    // rect half-size in pixels
+    @location(2) hsize: vec2<f32>,   // rect half-size in pixels (NOT `half` — a Metal reserved type)
     @location(3) radius: f32,        // corner radius in pixels
 };
 @vertex
@@ -26,9 +26,9 @@ fn vs(
     var o: VsOut;
     o.pos = vec4(ndc, 0.0, 1.0);
     o.color = color;
-    let half = rect.zw * 0.5;
+    let hsize = rect.zw * 0.5;
     o.local = (c - vec2(0.5, 0.5)) * rect.zw; // center-relative pixel coord
-    o.half = half;
+    o.hsize = hsize;
     o.radius = round.z;
     return o;
 }
@@ -42,8 +42,8 @@ fn sd_round_rect(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var cov = 1.0;
     if (in.radius > 0.0) {
-        let r = min(in.radius, min(in.half.x, in.half.y));
-        let d = sd_round_rect(in.local, in.half, r);
+        let r = min(in.radius, min(in.hsize.x, in.hsize.y));
+        let d = sd_round_rect(in.local, in.hsize, r);
         cov = 1.0 - smoothstep(-0.75, 0.75, d);
     }
     return vec4(s2l(in.color.r), s2l(in.color.g), s2l(in.color.b), in.color.a * cov);

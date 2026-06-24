@@ -55,9 +55,9 @@ fn fs_reveal(in: VsOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
     let t = clamp(p.t, 0.0, 1.0);
-    let half = vec2<f32>(p.w, p.h) * 0.5;
-    let pos = vec2<f32>(in.uv.x * p.w, in.uv.y * p.h) - half;
-    let d = sd_round_rect(pos, half, p.radius);
+    let hsize = vec2<f32>(p.w, p.h) * 0.5;
+    let pos = vec2<f32>(in.uv.x * p.w, in.uv.y * p.h) - hsize;
+    let d = sd_round_rect(pos, hsize, p.radius);
     // Thin band just inside the edge.
     let rim = smoothstep(-5.0, -2.0, d) * smoothstep(0.5, -2.0, d);
     // Corner-stagger: corners light first as t rises.

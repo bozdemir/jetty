@@ -49,9 +49,9 @@ fn sd_round_rect_per(p: vec2<f32>, b: vec2<f32>, r_tl: f32, r_tr: f32, r_bl: f32
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Center-relative pixel coordinate.
-    let half = params.size * 0.5;
-    let p = in.uv - half;
-    let d = sd_round_rect_per(p, half, params.r_tl, params.r_tr, params.r_bl, params.r_br);
+    let hsize = params.size * 0.5;
+    let p = in.uv - hsize;
+    let d = sd_round_rect_per(p, hsize, params.r_tl, params.r_tr, params.r_bl, params.r_br);
     // ~1px antialiased edge: coverage 1 inside, 0 outside, smooth across the seam.
     let cov = 1.0 - smoothstep(-0.75, 0.75, d);
     // Output coverage in all channels; the blend pipeline multiplies the
