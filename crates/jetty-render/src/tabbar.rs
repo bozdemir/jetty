@@ -163,7 +163,7 @@ pub fn build_tab_bar_ex(
     // Characters that fit in a tab body, derived from its width (~9.6px advance).
     // Reserve room for the close "×" + left padding. Floors at 3 so a min-width
     // tab still shows a couple of chars + the ellipsis.
-    let max_chars = (((tab_w - CLOSE_W - 16.0) / 9.6).floor() as usize).max(3);
+    let max_chars = (((tab_w - CLOSE_W - 32.0) / 9.6).floor() as usize).max(2);
 
     let mut x = left;
     for (i, (title, active)) in tabs.iter().take(drawn).enumerate() {
@@ -195,21 +195,15 @@ pub fn build_tab_bar_ex(
         // Fill: the rounded tab body on top of the border.
         quads.push(Rect::rounded(body_x, body_y, body_w, body_h, bg_color, TAB_RADIUS));
 
-        // Active tab: a bright accent indicator bar along the bottom edge — the
-        // modern "selected" marker, so the active tab pops without a bright slab.
-        if *active && !being_renamed {
-            let bar_h = 2.5;
-            quads.push(Rect::rounded(
-                body_x + 6.0,
-                body_y + body_h - bar_h - 1.0,
-                body_w - 12.0,
-                bar_h,
-                active_border,
-                bar_h / 2.0,
-            ));
-        }
-
         let label_color = if *active || being_renamed { fg } else { dim_fg };
+        // Leading oh-my-zsh-style prompt marker (❯): bright accent on the active
+        // tab, dim otherwise — the active indicator (in place of an underline).
+        let marker_color = if *active || being_renamed {
+            [active_border[0], active_border[1], active_border[2]]
+        } else {
+            dim_fg
+        };
+        labels.push(("❯".to_string(), x + 10.0, 13.0, marker_color));
         if being_renamed {
             // Show the live edit buffer plus a trailing caret. Truncate from the
             // FRONT so the caret/most-recent text stays visible while typing.
@@ -221,7 +215,7 @@ pub fn build_tab_bar_ex(
                 buf.to_string()
             };
             shown.push('▏');
-            labels.push((shown, x + 10.0, 13.0, label_color));
+            labels.push((shown, x + 26.0, 13.0, label_color));
         } else {
             // Truncated title label.
             let shown: String = if title.chars().count() > max_chars {
@@ -231,7 +225,7 @@ pub fn build_tab_bar_ex(
             } else {
                 title.clone()
             };
-            labels.push((shown, x + 10.0, 13.0, label_color));
+            labels.push((shown, x + 26.0, 13.0, label_color));
 
             // Close "×" at the tab's right (hidden while renaming this tab).
             let close_x = x + tab_w - CLOSE_W - 4.0;
@@ -384,9 +378,11 @@ mod tests {
     fn rename_shows_caret() {
         let tabs = [("Old".to_string(), true)];
         let bar = build_tab_bar_ex(800, &tabs, &theme(), Some((0, "New")), CtrlHover::None);
-        // The first label is the tab text; renaming shows the buffer + caret.
-        assert!(bar.labels[0].0.contains('▏'));
-        assert!(bar.labels[0].0.starts_with("New"));
+        // Renaming shows the edit buffer + caret (a "❯" marker label precedes it,
+        // so check across labels rather than a fixed index).
+        let buf = bar.labels.iter().find(|l| l.0.contains('▏'));
+        assert!(buf.is_some(), "no caret label found");
+        assert!(buf.unwrap().0.starts_with("New"));
     }
 
     #[test]
