@@ -191,7 +191,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        // TEXTURE_BINDING so the Tier-B summon effects (Liquid/Focus) can SAMPLE
+        // this rendered frame as their input texture.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -361,6 +365,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         phosphor.apply(&device, &queue, &view, width, height, radius, t, accent);
     }
 
+    // --- Tier-B summon effects (LiquidDrop / FocusPull) ---
+    // These SAMPLE the rendered scene (the `texture` above, now also
+    // TEXTURE_BINDING-capable) and write the displaced/blurred result into a
+    // SECOND output texture (a texture can't be sampled and rendered to in the
+    // same pass). When one runs, we read back from `tex_b` instead of `texture`.
+    // This runs the REAL GPU pass so the harness validates the actual pipeline +
+    // texture/sampler binding headlessly, mirroring the SUMMON/PHOSPHOR hooks.
+    let liquid_t = std::env::var("JETTY_SHOT_LIQUID_T").ok().and_then(|s| s.parse::<f32>().ok());
+    let focus_t = std::env::var("JETTY_SHOT_FOCUS_T").ok().and_then(|s| s.parse::<f32>().ok());
+    let tier_b_tex = if liquid_t.is_some() || focus_t.is_some() {
+        let tex_b = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("jetty-shot-tex-b"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view_b = tex_b.create_view(&wgpu::TextureViewDescriptor::default());
+        if let Some(t) = liquid_t {
+            eprintln!("jetty-shot: applying LiquidDrop reveal (GPU pass, t={t}, samples frame)");
+            let liquid = jetty_render::LiquidDrop::new(&device, format);
+            liquid.apply(&device, &queue, &view_b, &view, width, height, t);
+        } else if let Some(t) = focus_t {
+            eprintln!("jetty-shot: applying FocusPull reveal (GPU pass, t={t}, samples frame)");
+            let focus = jetty_render::FocusPull::new(&device, format);
+            focus.apply(&device, &queue, &view_b, &view, width, height, t);
+        }
+        Some(tex_b)
+    } else {
+        None
+    };
+
     // --- Read back to CPU ---
     // wgpu requires bytes_per_row to be a multiple of 256.
     let unpadded = width * 4;
@@ -377,9 +416,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
+    // Read back the Tier-B effect output when one ran (it sampled `texture` and
+    // wrote the displaced/blurred result into its own texture); otherwise the
+    // scene texture itself.
+    let readback_tex = tier_b_tex.as_ref().unwrap_or(&texture);
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &texture,
+            texture: readback_tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -452,7 +495,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // premultiplied in text.rs).  We un-premultiply before blending onto the
     // checkerboard, then output an opaque RGBA PNG.
     let summon_active = std::env::var("JETTY_SHOT_SUMMON_T").is_ok()
-        || std::env::var("JETTY_SHOT_PHOSPHOR_T").is_ok();
+        || std::env::var("JETTY_SHOT_PHOSPHOR_T").is_ok()
+        || std::env::var("JETTY_SHOT_LIQUID_T").is_ok()
+        || std::env::var("JETTY_SHOT_FOCUS_T").is_ok();
     let composited = if bg_alpha < 255 || corner_radius > 0.0 || summon_active {
         eprintln!("jetty-shot: compositing over checkerboard (bg alpha={})", bg_alpha);
         const TILE: u32 = 16;
