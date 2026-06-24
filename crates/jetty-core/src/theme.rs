@@ -3,7 +3,7 @@
 ///
 /// These are widely-loved community terminal palettes used verbatim (exact
 /// hex), not hand-tuned approximations.
-pub const PRESETS: [&str; 4] = ["catppuccin_mocha", "tokyo_night", "gruvbox_dark", "dracula"];
+pub const PRESETS: [&str; 5] = ["catppuccin_mocha", "tokyo_night", "gruvbox_dark", "dracula", "onyx"];
 
 /// Terminal color theme: background, foreground, cursor, and the 16-color ANSI palette.
 #[derive(Clone, Debug)]
@@ -23,6 +23,7 @@ impl Theme {
             "tokyo_night" => tokyo_night(),
             "gruvbox_dark" => gruvbox_dark(),
             "dracula" => dracula(),
+            "onyx" => onyx(),
             "solarized_dark" => solarized_dark(),
             "default_dark" => default_dark(),
             "light" => light(),
@@ -139,6 +140,35 @@ pub fn dracula() -> Theme {
             [255, 146, 223], // 13 #ff92df
             [164, 255, 255], // 14 #a4ffff
             [255, 255, 255], // 15 #ffffff
+        ],
+    }
+}
+
+/// Onyx — a clean near-black theme (One Dark-inspired accents on a deep neutral
+/// background), matching the soft dark terminal look.
+pub fn onyx() -> Theme {
+    Theme {
+        name: "onyx",
+        bg: [22, 22, 26, 255],   // #16161a
+        fg: [200, 200, 205],     // #c8c8cd
+        cursor: [97, 175, 239],  // #61afef
+        palette: [
+            [58, 60, 66],    // 0  #3a3c42
+            [224, 108, 117], // 1  red     #e06c75
+            [152, 195, 121], // 2  green   #98c379
+            [229, 192, 123], // 3  yellow  #e5c07b
+            [97, 175, 239],  // 4  blue    #61afef
+            [198, 120, 221], // 5  magenta #c678dd
+            [86, 182, 194],  // 6  cyan    #56b6c2
+            [171, 178, 191], // 7  white   #abb2bf
+            [92, 99, 112],   // 8  br blk  #5c6370
+            [224, 108, 117], // 9  #e06c75
+            [152, 195, 121], // 10 #98c379
+            [229, 192, 123], // 11 #e5c07b
+            [97, 175, 239],  // 12 #61afef
+            [198, 120, 221], // 13 #c678dd
+            [86, 182, 194],  // 14 #56b6c2
+            [220, 223, 228], // 15 br wht  #dcdfe4
         ],
     }
 }

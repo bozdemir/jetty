@@ -59,7 +59,7 @@ pub struct PanelView {
 }
 
 /// Short display names for each preset, in PRESETS order.
-const CHIP_NAMES: [&str; 4] = ["Mocha", "Tokyo", "Gruvbox", "Dracula"];
+const CHIP_NAMES: [&str; 5] = ["Mocha", "Tokyo", "Gruv", "Drac", "Onyx"];
 
 /// Maximum number of font-family rows displayed in the panel at once.
 /// If more families exist, the list scrolls via `font_scroll_offset`.
@@ -291,12 +291,16 @@ pub fn build_panel(
     let num_presets = presets.len(); // should be 4
 
     let chip_top = py + 654.0;
+    // Chips fill the row evenly for however many presets exist, so adding a theme
+    // never overflows the panel (348px usable = PANEL_W - 2*16 margin).
+    let chip_gap = 8.0;
+    let chip_w = (348.0 - (num_presets as f32 - 1.0) * chip_gap) / num_presets as f32;
     let mut chip_rects: Vec<Rect> = Vec::with_capacity(num_presets);
     for i in 0..num_presets {
-        let chip_x = px + 16.0 + i as f32 * 88.0;
+        let chip_x = px + 16.0 + i as f32 * (chip_w + chip_gap);
         let theme_bg = jetty_core::Theme::by_name(presets[i]).bg;
         chip_rects.push(Rect::rounded(
-            chip_x, chip_top, 80.0, 36.0,
+            chip_x, chip_top, chip_w, 36.0,
             [theme_bg[0], theme_bg[1], theme_bg[2], 255], 4.0,
         ));
     }
@@ -352,7 +356,7 @@ pub fn build_panel(
     if theme_idx < num_presets {
         let chip = &chip_rects[theme_idx];
         quads.push(Rect::rounded(
-            chip.x - 2.0, chip.y - 2.0, 84.0, 40.0, accent_col, 5.0,
+            chip.x - 2.0, chip.y - 2.0, chip.w + 4.0, chip.h + 4.0, accent_col, 5.0,
         ));
     }
 
