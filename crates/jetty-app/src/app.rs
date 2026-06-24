@@ -1154,6 +1154,9 @@ impl App {
         // macOS: force Poll until the first paint lands (a request_redraw alone is
         // dropped under Wait until a click), so the window opens already drawn.
         self.settings_needs_paint = true;
+        // …and draw the first frame SYNCHRONOUSLY now, before returning to the
+        // event loop, so the window is never shown blank even for a frame.
+        self.render_settings_window();
         if self.debug {
             eprintln!("SETTINGS window opened");
         }

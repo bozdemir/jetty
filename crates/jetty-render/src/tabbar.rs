@@ -3,7 +3,7 @@ use jetty_core::Theme;
 
 /// Height of the tab bar in physical pixels. The terminal grid is offset down by
 /// this amount; pixel↔cell math for the main grid subtracts it.
-pub const TABBAR_H: f32 = 42.0;
+pub const TABBAR_H: f32 = 36.0;
 
 /// Width of a single tab in physical pixels.
 const TAB_W: f32 = 140.0;
@@ -144,7 +144,7 @@ pub fn build_tab_bar_ex(
     // dim border) so the tabs match the rounded window frame.
     const TAB_RADIUS: f32 = 6.0;
     const TAB_INSET: f32 = 3.0; // horizontal gap between adjacent tabs
-    const TAB_VPAD: f32 = 8.0; // top/bottom margin so tabs don't touch the window edge
+    const TAB_VPAD: f32 = 6.0; // top/bottom margin so tabs don't touch the window edge
     const TAB_BORDER: f32 = 1.0;
     // Active tab border = accent; inactive = a dim blend toward the accent.
     let active_border = [accent[0], accent[1], accent[2], 255];

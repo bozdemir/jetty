@@ -436,10 +436,11 @@ pub fn scrollbar_rect_geom(
     let thumb_h = (track_h * rows as f32 / total as f32).max(24.0);
     let frac = (scroll_max - scroll_offset) as f32 / scroll_max as f32;
     let thumb_y = top_offset + frac * (track_h - thumb_h);
+    let thumb_w = 14.0; // wide enough to grab comfortably
     Some(Rect {
-        x: screen_w as f32 - 8.0,
+        x: screen_w as f32 - thumb_w,
         y: thumb_y,
-        w: 8.0,
+        w: thumb_w,
         h: thumb_h,
         color: thumb,
         ..Default::default()

@@ -47,11 +47,17 @@ impl GpuContext {
             },
         };
         let _ = &instance;
-        eprintln!(
-            "jetty: GPU adapter = {} ({:?})",
-            adapter.get_info().name,
-            adapter.get_info().backend
-        );
+        // Log the adapter ONCE per process (the settings window builds its own
+        // GpuContext each time it opens — no need to reprint on every open).
+        use std::sync::Once;
+        static LOG_ADAPTER: Once = Once::new();
+        LOG_ADAPTER.call_once(|| {
+            eprintln!(
+                "jetty: GPU adapter = {} ({:?})",
+                adapter.get_info().name,
+                adapter.get_info().backend
+            );
+        });
         let (device, queue) = match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("jetty-device"),
             required_features: wgpu::Features::empty(),
