@@ -101,7 +101,7 @@ pub fn build_tab_bar_ex(
     let mut close_rects: Vec<Rect> = Vec::new();
 
     // Bar background spanning the full width.
-    quads.push(Rect { x: 0.0, y: 0.0, w: sw, h, color: bg });
+    quads.push(Rect { x: 0.0, y: 0.0, w: sw, h, color: bg, ..Default::default() });
 
     // Tabs are laid out from the left and must never overlap the window
     // controls parked at the right; cap the usable area accordingly.
@@ -109,6 +109,21 @@ pub fn build_tab_bar_ex(
     // Background for a tab currently being renamed: a brighter accent so the
     // editing target stands out.
     let rename_bg = active_bg;
+
+    // Rounded-tab geometry. Each tab is a rounded rect with a 1px border drawn as
+    // a slightly larger rounded rect behind it (active = accent border, inactive =
+    // dim border) so the tabs match the rounded window frame.
+    const TAB_RADIUS: f32 = 6.0;
+    const TAB_INSET: f32 = 3.0; // gap around each tab so borders read as separate
+    const TAB_BORDER: f32 = 1.0;
+    // Active tab border = accent; inactive = a dim blend toward the accent.
+    let active_border = [accent[0], accent[1], accent[2], 255];
+    let inactive_border = [
+        ((bg[0] as u16 + accent[0] as u16 * 2) / 3) as u8,
+        ((bg[1] as u16 + accent[1] as u16 * 2) / 3) as u8,
+        ((bg[2] as u16 + accent[2] as u16 * 2) / 3) as u8,
+        255,
+    ];
 
     let mut x = 0.0_f32;
     for (i, (title, active)) in tabs.iter().enumerate() {
@@ -120,9 +135,25 @@ pub fn build_tab_bar_ex(
         } else {
             inactive_bg
         };
-        let tab_rect = Rect { x, y: 0.0, w: TAB_W, h, color: bg_color };
-        // Tab background (inset by 1px at the bottom to leave a separator line look).
-        quads.push(Rect { x: x + 1.0, y: 2.0, w: TAB_W - 2.0, h: h - 2.0, color: bg_color });
+        let tab_rect = Rect { x, y: 0.0, w: TAB_W, h, color: bg_color, ..Default::default() };
+
+        // Inner tab body geometry (inset on all sides for the gap + border).
+        let body_x = x + TAB_INSET;
+        let body_y = TAB_INSET;
+        let body_w = TAB_W - TAB_INSET * 2.0;
+        let body_h = h - TAB_INSET * 2.0;
+        let border_color = if *active || being_renamed { active_border } else { inactive_border };
+        // Border: a rounded rect 1px larger than the body on every side.
+        quads.push(Rect::rounded(
+            body_x - TAB_BORDER,
+            body_y - TAB_BORDER,
+            body_w + TAB_BORDER * 2.0,
+            body_h + TAB_BORDER * 2.0,
+            border_color,
+            TAB_RADIUS + TAB_BORDER,
+        ));
+        // Fill: the rounded tab body on top of the border.
+        quads.push(Rect::rounded(body_x, body_y, body_w, body_h, bg_color, TAB_RADIUS));
 
         let max_chars = 14usize;
         let label_color = if *active || being_renamed { fg } else { dim_fg };
@@ -156,16 +187,16 @@ pub fn build_tab_bar_ex(
 
         // Close hit-box (kept even while renaming so indices stay aligned).
         let close_x = x + TAB_W - CLOSE_W - 4.0;
-        close_rects.push(Rect { x: close_x, y: 0.0, w: CLOSE_W, h, color: bg_color });
+        close_rects.push(Rect { x: close_x, y: 0.0, w: CLOSE_W, h, color: bg_color, ..Default::default() });
 
         tab_rects.push(tab_rect);
         x += TAB_W;
     }
 
     // "+" new-tab button after the last tab (clamped within the tab area).
-    let plus_rect = Rect { x, y: 0.0, w: PLUS_W, h, color: inactive_bg };
+    let plus_rect = Rect { x, y: 0.0, w: PLUS_W, h, color: inactive_bg, ..Default::default() };
     if x + PLUS_W <= tab_area_w {
-        quads.push(Rect { x: x + 1.0, y: 2.0, w: PLUS_W - 2.0, h: h - 2.0, color: inactive_bg });
+        quads.push(Rect::rounded(x + 3.0, 3.0, PLUS_W - 6.0, h - 6.0, inactive_bg, 5.0));
         labels.push(("+".to_string(), x + 11.0, 7.0, fg));
     }
 
@@ -182,27 +213,27 @@ pub fn build_tab_bar_ex(
     let max_x = sw - CTRL_W * 2.0;
     let close_x = sw - CTRL_W;
 
-    let help_rect = Rect { x: help_x, y: ctrl_y, w: CTRL_W, h, color: bg };
-    let settings_rect = Rect { x: settings_x, y: ctrl_y, w: CTRL_W, h, color: bg };
-    let min_rect = Rect { x: min_x, y: ctrl_y, w: CTRL_W, h, color: bg };
-    let max_rect = Rect { x: max_x, y: ctrl_y, w: CTRL_W, h, color: bg };
-    let close_rect = Rect { x: close_x, y: ctrl_y, w: CTRL_W, h, color: bg };
+    let help_rect = Rect { x: help_x, y: ctrl_y, w: CTRL_W, h, color: bg, ..Default::default() };
+    let settings_rect = Rect { x: settings_x, y: ctrl_y, w: CTRL_W, h, color: bg, ..Default::default() };
+    let min_rect = Rect { x: min_x, y: ctrl_y, w: CTRL_W, h, color: bg, ..Default::default() };
+    let max_rect = Rect { x: max_x, y: ctrl_y, w: CTRL_W, h, color: bg, ..Default::default() };
+    let close_rect = Rect { x: close_x, y: ctrl_y, w: CTRL_W, h, color: bg, ..Default::default() };
 
     // Hover highlight quads.
     if ctrl_hover == CtrlHover::Help {
-        quads.push(Rect { x: help_x, y: 0.0, w: CTRL_W, h, color: hover_bg });
+        quads.push(Rect { x: help_x, y: 0.0, w: CTRL_W, h, color: hover_bg, ..Default::default() });
     }
     if ctrl_hover == CtrlHover::Settings {
-        quads.push(Rect { x: settings_x, y: 0.0, w: CTRL_W, h, color: hover_bg });
+        quads.push(Rect { x: settings_x, y: 0.0, w: CTRL_W, h, color: hover_bg, ..Default::default() });
     }
     if ctrl_hover == CtrlHover::Min {
-        quads.push(Rect { x: min_x, y: 0.0, w: CTRL_W, h, color: hover_bg });
+        quads.push(Rect { x: min_x, y: 0.0, w: CTRL_W, h, color: hover_bg, ..Default::default() });
     }
     if ctrl_hover == CtrlHover::Max {
-        quads.push(Rect { x: max_x, y: 0.0, w: CTRL_W, h, color: hover_bg });
+        quads.push(Rect { x: max_x, y: 0.0, w: CTRL_W, h, color: hover_bg, ..Default::default() });
     }
     if ctrl_hover == CtrlHover::Close {
-        quads.push(Rect { x: close_x, y: 0.0, w: CTRL_W, h, color: close_hover_bg });
+        quads.push(Rect { x: close_x, y: 0.0, w: CTRL_W, h, color: close_hover_bg, ..Default::default() });
     }
 
     // Glyphs centred-ish in each control cell. "⚙" may be missing in some

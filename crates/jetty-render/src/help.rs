@@ -50,7 +50,9 @@ pub fn build_help_overlay(win_w: u32, win_h: u32) -> HelpOverlay {
     let mut quads: Vec<Rect> = Vec::new();
 
     // Full-screen dim.
-    quads.push(Rect { x: 0.0, y: 0.0, w: sw, h: sh, color: [0, 0, 0, 150] });
+    quads.push(Rect { x: 0.0, y: 0.0, w: sw, h: sh, color: [0, 0, 0, 150],
+        ..Default::default()
+    });
     // Border.
     quads.push(Rect {
         x: px - 2.0,
@@ -58,9 +60,12 @@ pub fn build_help_overlay(win_w: u32, win_h: u32) -> HelpOverlay {
         w: panel_w + 4.0,
         h: panel_h + 4.0,
         color: [80, 80, 110, 255],
+        ..Default::default()
     });
     // Background panel.
-    let panel = Rect { x: px, y: py, w: panel_w, h: panel_h, color: [26, 26, 34, 245] };
+    let panel = Rect { x: px, y: py, w: panel_w, h: panel_h, color: [26, 26, 34, 245],
+        ..Default::default()
+    };
     quads.push(panel);
 
     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();

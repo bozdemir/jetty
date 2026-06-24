@@ -97,6 +97,7 @@ pub fn build_panel(
         w: sw,
         h: sh,
         color: [0, 0, 0, 140],
+        ..Default::default()
     };
 
     // --- Border + background ---
@@ -106,6 +107,7 @@ pub fn build_panel(
         w: PANEL_W + 4.0,
         h: PANEL_H + 4.0,
         color: [70, 70, 90, 255],
+        ..Default::default()
     };
     let bg_rect = Rect {
         x: px,
@@ -113,6 +115,7 @@ pub fn build_panel(
         w: PANEL_W,
         h: PANEL_H,
         color: [28, 28, 36, 240],
+        ..Default::default()
     };
 
     // --- Title bar (draggable handle: py+0 .. py+36) ---
@@ -121,7 +124,8 @@ pub fn build_panel(
         y: py,
         w: PANEL_W,
         h: 36.0,
-        color: [0, 0, 0, 0], // drawn via bg; color unused for hit-test
+        color: [0, 0, 0, 0], // drawn via bg; color unused for hit-test,
+        ..Default::default()
     };
 
     // --- Opacity band (py+48 .. py+96) ---
@@ -132,6 +136,7 @@ pub fn build_panel(
         w: 348.0,
         h: 6.0,
         color: [60, 60, 75, 255],
+        ..Default::default()
     };
     let frac = ((opacity - 0.1) / 0.9).clamp(0.0, 1.0);
     let handle_x = px + 16.0 + frac * (348.0 - 14.0);
@@ -141,6 +146,7 @@ pub fn build_panel(
         w: 14.0,
         h: 18.0,
         color: [185, 185, 205, 255],
+        ..Default::default()
     };
 
     // --- Corner-radius band (py+108 .. py+156) ---
@@ -153,6 +159,7 @@ pub fn build_panel(
         w: 348.0,
         h: 6.0,
         color: [60, 60, 75, 255],
+        ..Default::default()
     };
     let r_frac = (corner_radius / RADIUS_MAX).clamp(0.0, 1.0);
     let radius_handle_x = px + 16.0 + r_frac * (348.0 - 14.0);
@@ -162,6 +169,7 @@ pub fn build_panel(
         w: 14.0,
         h: 18.0,
         color: [185, 185, 205, 255],
+        ..Default::default()
     };
 
     // --- Font-size band (py+168 .. py+216) ---
@@ -177,6 +185,7 @@ pub fn build_panel(
         w: 28.0,
         h: 28.0,
         color: [55, 55, 72, 255],
+        ..Default::default()
     };
     let font_plus = Rect {
         x: font_plus_x,
@@ -184,6 +193,7 @@ pub fn build_panel(
         w: 28.0,
         h: 28.0,
         color: [55, 55, 72, 255],
+        ..Default::default()
     };
     let font_reset = Rect {
         x: font_reset_x,
@@ -191,6 +201,7 @@ pub fn build_panel(
         w: 44.0,
         h: 28.0,
         color: [55, 55, 72, 255],
+        ..Default::default()
     };
 
     // --- Font scroll buttons (▲ / ▼) in the "Font" header row at py+228 ---
@@ -204,6 +215,7 @@ pub fn build_panel(
         w: 20.0,
         h: 20.0,
         color: [55, 55, 72, 255],
+        ..Default::default()
     };
     let font_scroll_down = Rect {
         x: scroll_down_x,
@@ -211,6 +223,7 @@ pub fn build_panel(
         w: 20.0,
         h: 20.0,
         color: [55, 55, 72, 255],
+        ..Default::default()
     };
 
     // --- Font-family list (py+250 .. py+370) ---
@@ -242,7 +255,8 @@ pub fn build_panel(
             w: list_w,
             h: ROW_H,
             color: row_color,
-        });
+        ..Default::default()
+    });
     }
 
     // --- Theme chips (py+402 .. py+438) ---
@@ -261,7 +275,8 @@ pub fn build_panel(
             w: 80.0,
             h: 36.0,
             color: [theme_bg[0], theme_bg[1], theme_bg[2], 255],
-        });
+        ..Default::default()
+    });
     }
 
     // --- Build quads in draw order ---
@@ -293,7 +308,8 @@ pub fn build_panel(
             w: 84.0,
             h: 40.0,
             color: [210, 210, 230, 255],
-        });
+        ..Default::default()
+    });
     }
 
     // Chip fills.
@@ -412,7 +428,8 @@ pub fn build_panel(
         y: py,
         w: PANEL_W,
         h: PANEL_H,
-        color: [0, 0, 0, 0], // color not used for hit-testing
+        color: [0, 0, 0, 0], // color not used for hit-testing,
+        ..Default::default()
     };
     let geom = PanelGeom {
         panel: panel_rect,

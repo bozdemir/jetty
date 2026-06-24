@@ -1,18 +1,53 @@
+// Per-instance data: rect (xywh), color (rgba), and rounded-rect params
+// (half-size xy, corner radius, _pad). The fragment computes an antialiased
+// rounded-rect SDF coverage; radius == 0 yields full coverage everywhere, so
+// every existing (sharp) quad is byte-identical to before.
 const QUAD_SHADER: &str = r#"
 struct Screen { size: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> screen: Screen;
-struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> };
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) local: vec2<f32>,   // pixel offset from the rect center
+    @location(2) half: vec2<f32>,    // rect half-size in pixels
+    @location(3) radius: f32,        // corner radius in pixels
+};
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, @location(0) rect: vec4<f32>, @location(1) color: vec4<f32>) -> VsOut {
+fn vs(
+    @builtin(vertex_index) vi: u32,
+    @location(0) rect: vec4<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) round: vec4<f32>,   // half.xy, radius, _pad
+) -> VsOut {
     var corners = array<vec2<f32>, 6>(vec2(0.,0.), vec2(1.,0.), vec2(0.,1.), vec2(0.,1.), vec2(1.,0.), vec2(1.,1.));
     let c = corners[vi];
     let px = rect.xy + c * rect.zw;
     let ndc = vec2(px.x / screen.size.x * 2.0 - 1.0, 1.0 - px.y / screen.size.y * 2.0);
-    var o: VsOut; o.pos = vec4(ndc, 0.0, 1.0); o.color = color; return o;
+    var o: VsOut;
+    o.pos = vec4(ndc, 0.0, 1.0);
+    o.color = color;
+    let half = rect.zw * 0.5;
+    o.local = (c - vec2(0.5, 0.5)) * rect.zw; // center-relative pixel coord
+    o.half = half;
+    o.radius = round.z;
+    return o;
 }
 fn s2l(c: f32) -> f32 { if (c <= 0.04045) { return c / 12.92; } return pow((c + 0.055) / 1.055, 2.4); }
+// Signed distance to a rounded rect (negative inside).
+fn sd_round_rect(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - b + vec2(r, r);
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - r;
+}
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> { return vec4(s2l(in.color.r), s2l(in.color.g), s2l(in.color.b), in.color.a); }
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    var cov = 1.0;
+    if (in.radius > 0.0) {
+        let r = min(in.radius, min(in.half.x, in.half.y));
+        let d = sd_round_rect(in.local, in.half, r);
+        cov = 1.0 - smoothstep(-0.75, 0.75, d);
+    }
+    return vec4(s2l(in.color.r), s2l(in.color.g), s2l(in.color.b), in.color.a * cov);
+}
 "#;
 
 #[derive(Clone, Copy)]
@@ -22,6 +57,28 @@ pub struct Rect {
     pub w: f32,
     pub h: f32,
     pub color: [u8; 4],
+    /// Corner radius in pixels. `0.0` = sharp rectangle (the default), so all
+    /// existing quads render unchanged. A positive value rounds the corners via
+    /// an antialiased rounded-rect SDF in the shader.
+    pub radius: f32,
+}
+
+impl Default for Rect {
+    fn default() -> Self {
+        Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0, color: [0, 0, 0, 0], radius: 0.0 }
+    }
+}
+
+impl Rect {
+    /// A sharp (radius 0) rect — convenience matching the old field-only literal.
+    pub fn new(x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) -> Self {
+        Rect { x, y, w, h, color, radius: 0.0 }
+    }
+
+    /// A rounded rect with the given corner `radius` in pixels.
+    pub fn rounded(x: f32, y: f32, w: f32, h: f32, color: [u8; 4], radius: f32) -> Self {
+        Rect { x, y, w, h, color, radius }
+    }
 }
 
 pub struct QuadLayer {
@@ -87,7 +144,7 @@ impl QuadLayer {
                 module: &shader,
                 entry_point: Some("vs"),
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 32,
+                    array_stride: 48,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &[
                         wgpu::VertexAttribute {
@@ -98,6 +155,11 @@ impl QuadLayer {
                         wgpu::VertexAttribute {
                             shader_location: 1,
                             offset: 16,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                        wgpu::VertexAttribute {
+                            shader_location: 2,
+                            offset: 32,
                             format: wgpu::VertexFormat::Float32x4,
                         },
                     ],
@@ -141,7 +203,7 @@ impl QuadLayer {
         rects: &[Rect],
     ) -> u64 {
         self.instance_scratch.clear();
-        self.instance_scratch.reserve(rects.len() * 8);
+        self.instance_scratch.reserve(rects.len() * 12);
         for r in rects {
             self.instance_scratch.push(r.x);
             self.instance_scratch.push(r.y);
@@ -151,6 +213,12 @@ impl QuadLayer {
             self.instance_scratch.push(r.color[1] as f32 / 255.0);
             self.instance_scratch.push(r.color[2] as f32 / 255.0);
             self.instance_scratch.push(r.color[3] as f32 / 255.0);
+            // Round params: half-size xy (unused by the shader; derived from
+            // rect there too), corner radius, _pad.
+            self.instance_scratch.push(r.w * 0.5);
+            self.instance_scratch.push(r.h * 0.5);
+            self.instance_scratch.push(r.radius);
+            self.instance_scratch.push(0.0);
         }
         let bytes = bytemuck::cast_slice::<f32, u8>(&self.instance_scratch);
         let needed = bytes.len() as u64;
@@ -341,6 +409,7 @@ pub fn cell_bg_rects(
                 w: run * cell_w,
                 h: cell_h,
                 color: [effective_bg[0], effective_bg[1], effective_bg[2], 255],
+                ..Default::default()
             });
         }
     }
@@ -374,6 +443,7 @@ pub fn scrollbar_rect_geom(
         w: 8.0,
         h: thumb_h,
         color: [150, 150, 165, 220],
+        ..Default::default()
     })
 }
 

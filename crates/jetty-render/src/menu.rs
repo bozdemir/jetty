@@ -51,6 +51,7 @@ pub fn build_context_menu(
             w: MENU_W,
             h: ROW_H,
             color: [38, 38, 50, 255], // default row bg
+            ..Default::default()
         });
     }
 
@@ -62,8 +63,7 @@ pub fn build_context_menu(
         y: my,
         w: total_w,
         h: total_h,
-        color: [90, 90, 110, 255],
-    });
+        color: [90, 90, 110, 255], ..Default::default() });
 
     // Background panel.
     quads.push(Rect {
@@ -71,8 +71,7 @@ pub fn build_context_menu(
         y: cy,
         w: MENU_W,
         h: MENU_H,
-        color: [30, 30, 40, 245],
-    });
+        color: [30, 30, 40, 245], ..Default::default() });
 
     // Hover highlight quad (drawn on top of background, under labels).
     if let Some(idx) = hovered {
@@ -82,8 +81,7 @@ pub fn build_context_menu(
                 y: cy + idx as f32 * ROW_H,
                 w: MENU_W,
                 h: ROW_H,
-                color: [60, 80, 120, 255],
-            });
+                color: [60, 80, 120, 255], ..Default::default() });
         }
     }
 
