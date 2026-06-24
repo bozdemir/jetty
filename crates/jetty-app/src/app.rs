@@ -9,6 +9,15 @@ use winit::event::MouseScrollDelta;
 use winit::window::{Window, WindowId};
 use crate::{clipboard, input};
 
+/// Events sent through the winit user-event channel.
+#[derive(Debug, Clone, Copy)]
+pub enum AppEvent {
+    /// PTY data is ready — drain and redraw.
+    Wake,
+    /// F9 global hotkey was pressed — toggle window visibility.
+    ToggleVisibility,
+}
+
 /// Default logical (device-independent) font size in points. This is the value
 /// used when the user resets the font size with Ctrl+0 and on first launch.
 /// Scaled by the display's scale_factor before being passed to TextLayer so
@@ -23,8 +32,12 @@ const FALLBACK_COLS: usize = 80;
 const FALLBACK_ROWS: usize = 24;
 
 pub struct App {
-    proxy: EventLoopProxy<()>,
+    proxy: EventLoopProxy<AppEvent>,
     window: Option<Arc<Window>>,
+    /// Whether the window is currently visible (toggled by F9).
+    visible: bool,
+    /// Global hotkey manager — kept alive so the hotkey stays registered.
+    hotkey_manager: Option<global_hotkey::GlobalHotKeyManager>,
     gpu: Option<GpuContext>,
     text: Option<TextLayer>,
     quad: Option<QuadLayer>,
@@ -76,7 +89,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(proxy: EventLoopProxy<()>) -> Self {
+    pub fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
         // Resolve initial theme index from JETTY_THEME env var.
         let theme_name = std::env::var("JETTY_THEME").unwrap_or_default();
         let theme_idx = jetty_core::theme::PRESETS
@@ -100,6 +113,8 @@ impl App {
         let mut app = App {
             proxy,
             window: None,
+            visible: true,
+            hotkey_manager: None,
             gpu: None,
             text: None,
             quad: None,
@@ -326,9 +341,26 @@ impl App {
             w.request_redraw();
         }
     }
+
+    /// Toggle window visibility (F9 / Yakuake-style summon).
+    ///
+    /// When summoning (making visible), the window is re-centred on its
+    /// current monitor, focused, and redrawn. The PTY keeps running while the
+    /// window is hidden — nothing is killed or suspended.
+    fn toggle_visibility(&mut self, _event_loop: &ActiveEventLoop) {
+        self.visible = !self.visible;
+        if let Some(win) = &self.window {
+            win.set_visible(self.visible);
+            if self.visible {
+                center_window(win);
+                win.focus_window();
+                win.request_redraw();
+            }
+        }
+    }
 }
 
-impl ApplicationHandler<()> for App {
+impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -371,7 +403,7 @@ impl ApplicationHandler<()> for App {
         // cursor-position / capability queries which have tight timeouts.
         let proxy_wake = self.proxy.clone();
         let pty = PtySession::spawn(cols as u16, rows as u16, move || {
-            let _ = proxy_wake.send_event(());
+            let _ = proxy_wake.send_event(AppEvent::Wake);
         }).expect("pty");
         let writer = pty.writer();
 
@@ -382,6 +414,44 @@ impl ApplicationHandler<()> for App {
         self.pty = Some(pty);
         self.writer = Some(writer);
 
+        // Register the F9 global hotkey (Yakuake-style toggle). This only works
+        // on X11; on Wayland registration will fail and we log a warning without
+        // crashing. The manager must be kept alive (stored in self.hotkey_manager)
+        // or the hotkey is automatically unregistered when it drops.
+        if self.hotkey_manager.is_none() {
+            match global_hotkey::GlobalHotKeyManager::new() {
+                Ok(manager) => {
+                    let hotkey = global_hotkey::hotkey::HotKey::new(
+                        None,
+                        global_hotkey::hotkey::Code::F9,
+                    );
+                    if let Err(e) = manager.register(hotkey) {
+                        eprintln!("global hotkey F9 unavailable (Wayland? already grabbed?) — {e}");
+                    } else {
+                        // Spawn a thread that forwards F9-pressed events to the winit loop.
+                        let proxy_hotkey = self.proxy.clone();
+                        std::thread::spawn(move || {
+                            let rx = global_hotkey::GlobalHotKeyEvent::receiver();
+                            loop {
+                                match rx.recv() {
+                                    Ok(ev) => {
+                                        if ev.state == global_hotkey::HotKeyState::Pressed {
+                                            let _ = proxy_hotkey.send_event(AppEvent::ToggleVisibility);
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                        self.hotkey_manager = Some(manager);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("global hotkey F9 unavailable (Wayland? already grabbed?) — {e}");
+                }
+            }
+        }
+
         // Slow safety heartbeat — 100ms is enough for any future time-based UI
         // while virtually eliminating idle CPU waste. Real responsiveness now
         // comes from the on_data wake above, not from this tick.
@@ -391,23 +461,30 @@ impl ApplicationHandler<()> for App {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, _ev: ()) {
-        let had_data = self.drain_pty();
-        // If the shell child exited while we were draining its last output,
-        // close the window. The waker fires this ~10x/s, so we react within a
-        // frame of the shell exiting. `event_loop.exit()` is safe to call here.
-        if self.terminal.child_exited() || self.pty.as_ref().is_some_and(|p| p.child_exited()) {
-            event_loop.exit();
-            return;
-        }
-        // Damage-driven: only request a redraw when PTY data actually arrived
-        // (or query replies were sent). When the terminal is idle, the 100ms
-        // heartbeat drains nothing and we skip the redraw — no Vec allocation,
-        // no GPU work. Any state change that affects rendering still calls
-        // request_redraw directly in the relevant window_event arm.
-        if had_data {
-            if let Some(w) = &self.window {
-                w.request_redraw();
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, ev: AppEvent) {
+        match ev {
+            AppEvent::Wake => {
+                let had_data = self.drain_pty();
+                // If the shell child exited while we were draining its last output,
+                // close the window. The waker fires this ~10x/s, so we react within a
+                // frame of the shell exiting. `event_loop.exit()` is safe to call here.
+                if self.terminal.child_exited() || self.pty.as_ref().is_some_and(|p| p.child_exited()) {
+                    event_loop.exit();
+                    return;
+                }
+                // Damage-driven: only request a redraw when PTY data actually arrived
+                // (or query replies were sent). When the terminal is idle, the 100ms
+                // heartbeat drains nothing and we skip the redraw — no Vec allocation,
+                // no GPU work. Any state change that affects rendering still calls
+                // request_redraw directly in the relevant window_event arm.
+                if had_data {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            AppEvent::ToggleVisibility => {
+                self.toggle_visibility(event_loop);
             }
         }
     }
@@ -1024,15 +1101,32 @@ impl ApplicationHandler<()> for App {
 }
 
 
-fn spawn_waker(proxy: EventLoopProxy<()>) {
+fn spawn_waker(proxy: EventLoopProxy<AppEvent>) {
     // Slow safety heartbeat: 100ms is sufficient for any time-based UI ticking.
     // Responsiveness for PTY data (including p10k query replies) is now driven
     // by the on_data callback in PtySession::spawn, which wakes the loop
     // immediately on every chunk — so this tick no longer sets the latency floor.
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if proxy.send_event(()).is_err() {
+        if proxy.send_event(AppEvent::Wake).is_err() {
             break;
         }
     });
+}
+
+/// Centre `win` on its current monitor (or the first available monitor if the
+/// current one cannot be determined). No-ops gracefully if no monitor info is
+/// available.
+fn center_window(win: &Arc<Window>) {
+    let mon_size = win
+        .current_monitor()
+        .or_else(|| win.available_monitors().next())
+        .map(|m| m.size());
+
+    if let Some(mon) = mon_size {
+        let win_size = win.outer_size();
+        let x = (mon.width.saturating_sub(win_size.width) / 2) as i32;
+        let y = (mon.height.saturating_sub(win_size.height) / 2) as i32;
+        win.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+    }
 }
