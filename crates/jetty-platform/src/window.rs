@@ -9,7 +9,7 @@ use winit::window::{Icon, Window};
 /// in which case the window simply has no custom icon.
 fn app_icon() -> Option<Icon> {
     let bytes: &[u8] = include_bytes!("../../../assets/icons/jetty-256.png");
-    let decoder = png::Decoder::new(bytes);
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).ok()?;
