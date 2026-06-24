@@ -78,21 +78,11 @@ pub fn build_context_menu(
 
     let mut quads: Vec<Rect> = Vec::new();
 
-    // Outer border quad (slightly larger than content).
-    quads.push(Rect {
-        x: mx,
-        y: my,
-        w: total_w,
-        h: total_h,
-        color: border_col, ..Default::default() });
+    // Outer border quad (slightly larger than content), rounded to match frame.
+    quads.push(Rect::rounded(mx, my, total_w, total_h, border_col, 7.0));
 
-    // Background panel.
-    quads.push(Rect {
-        x: cx,
-        y: cy,
-        w: MENU_W,
-        h: MENU_H,
-        color: menu_bg, ..Default::default() });
+    // Background panel (rounded; hover rows stay sharp inside).
+    quads.push(Rect::rounded(cx, cy, MENU_W, MENU_H, menu_bg, 6.0));
 
     // Hover highlight quad (drawn on top of background, under labels).
     if let Some(idx) = hovered {

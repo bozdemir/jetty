@@ -145,18 +145,10 @@ pub fn build_panel(
         color: [0, 0, 0, 140], ..Default::default() };
 
     // --- Border + background ---
-    let border_rect = Rect {
-        x: px - 2.0,
-        y: py - 2.0,
-        w: PANEL_W + 4.0,
-        h: PANEL_H + 4.0,
-        color: panel_border, ..Default::default() };
-    let bg_rect = Rect {
-        x: px,
-        y: py,
-        w: PANEL_W,
-        h: PANEL_H,
-        color: panel_bg, ..Default::default() };
+    let border_rect = Rect::rounded(
+        px - 2.0, py - 2.0, PANEL_W + 4.0, PANEL_H + 4.0, panel_border, 10.0,
+    );
+    let bg_rect = Rect::rounded(px, py, PANEL_W, PANEL_H, panel_bg, 8.0);
 
     // --- Title bar (draggable handle: py+0 .. py+36) ---
     let title_bar = Rect {
@@ -170,41 +162,19 @@ pub fn build_panel(
 
     // --- Opacity band (py+48 .. py+96) ---
     // Label at py+48; track centred at py+84 (h=6); handle at py+78 (h=18).
-    let slider_track = Rect {
-        x: px + 16.0,
-        y: py + 84.0,
-        w: 348.0,
-        h: 6.0,
-        color: slider_track_col, ..Default::default() };
+    let slider_track = Rect::rounded(px + 16.0, py + 84.0, 348.0, 6.0, slider_track_col, 3.0);
     let frac = ((opacity - 0.1) / 0.9).clamp(0.0, 1.0);
     let handle_x = px + 16.0 + frac * (348.0 - 14.0);
-    let slider_handle = Rect {
-        x: handle_x,
-        y: py + 78.0,
-        w: 14.0,
-        h: 18.0,
-        color: accent_col, ..Default::default() };
+    let slider_handle = Rect::rounded(handle_x, py + 78.0, 14.0, 18.0, accent_col, 4.0);
 
     // --- Corner-radius band (py+108 .. py+156) ---
     // Label at py+108; track centred at py+144 (h=6); handle at py+138 (h=18).
     // Radius range is [0, 24] px.
     const RADIUS_MAX: f32 = 24.0;
-    let radius_track = Rect {
-        x: px + 16.0,
-        y: py + 144.0,
-        w: 348.0,
-        h: 6.0,
-        color: slider_track_col, ..Default::default() };
+    let radius_track = Rect::rounded(px + 16.0, py + 144.0, 348.0, 6.0, slider_track_col, 3.0);
     let r_frac = (corner_radius / RADIUS_MAX).clamp(0.0, 1.0);
     let radius_handle_x = px + 16.0 + r_frac * (348.0 - 14.0);
-    let radius_handle = Rect {
-        x: radius_handle_x,
-        y: py + 138.0,
-        w: 14.0,
-        h: 18.0,
-        color: accent_col,
-        ..Default::default()
-    };
+    let radius_handle = Rect::rounded(radius_handle_x, py + 138.0, 14.0, 18.0, accent_col, 4.0);
 
     // --- Font-size band (py+168 .. py+216) ---
     // Label at py+168; "Npt" readout at py+194; buttons at py+188 (h=28 → bottom py+216).
@@ -213,42 +183,17 @@ pub fn build_panel(
     let font_plus_x  = font_minus_x + 36.0;
     let font_reset_x = font_plus_x  + 36.0;
 
-    let font_minus = Rect {
-        x: font_minus_x,
-        y: font_btn_y,
-        w: 28.0,
-        h: 28.0,
-        color: btn_fill, ..Default::default() };
-    let font_plus = Rect {
-        x: font_plus_x,
-        y: font_btn_y,
-        w: 28.0,
-        h: 28.0,
-        color: btn_fill, ..Default::default() };
-    let font_reset = Rect {
-        x: font_reset_x,
-        y: font_btn_y,
-        w: 44.0,
-        h: 28.0,
-        color: btn_fill, ..Default::default() };
+    let font_minus = Rect::rounded(font_minus_x, font_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let font_plus = Rect::rounded(font_plus_x, font_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let font_reset = Rect::rounded(font_reset_x, font_btn_y, 44.0, 28.0, btn_fill, 4.0);
 
     // --- Font scroll buttons (▲ / ▼) in the "Font" header row at py+228 ---
     // Two 20×20 buttons placed at the right side of the header row.
     let scroll_btn_y = py + 226.0;
     let scroll_down_x = px + PANEL_W - 16.0 - 20.0;        // ▼ rightmost
     let scroll_up_x   = scroll_down_x - 24.0;               // ▲ left of ▼
-    let font_scroll_up = Rect {
-        x: scroll_up_x,
-        y: scroll_btn_y,
-        w: 20.0,
-        h: 20.0,
-        color: btn_fill, ..Default::default() };
-    let font_scroll_down = Rect {
-        x: scroll_down_x,
-        y: scroll_btn_y,
-        w: 20.0,
-        h: 20.0,
-        color: btn_fill, ..Default::default() };
+    let font_scroll_up = Rect::rounded(scroll_up_x, scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
+    let font_scroll_down = Rect::rounded(scroll_down_x, scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
 
     // --- Font-family list (py+250 .. py+370) ---
     // "Font" header at py+228; list rows start at py+250.
@@ -269,12 +214,7 @@ pub fn build_panel(
         let family_idx = offset + i;
         let is_selected = families.get(family_idx).map(|n| n.as_str()) == Some(selected_family);
         let row_color = if is_selected { row_sel } else { row_unsel };
-        font_row_rects.push(Rect {
-            x: list_x,
-            y: row_y,
-            w: list_w,
-            h: ROW_H,
-            color: row_color, ..Default::default() });
+        font_row_rects.push(Rect::rounded(list_x, row_y, list_w, ROW_H, row_color, 3.0));
     }
 
     // --- Theme chips (py+402 .. py+438) ---
@@ -287,12 +227,10 @@ pub fn build_panel(
     for i in 0..num_presets {
         let chip_x = px + 16.0 + i as f32 * 88.0;
         let theme_bg = jetty_core::Theme::by_name(presets[i]).bg;
-        chip_rects.push(Rect {
-            x: chip_x,
-            y: chip_top,
-            w: 80.0,
-            h: 36.0,
-            color: [theme_bg[0], theme_bg[1], theme_bg[2], 255], ..Default::default() });
+        chip_rects.push(Rect::rounded(
+            chip_x, chip_top, 80.0, 36.0,
+            [theme_bg[0], theme_bg[1], theme_bg[2], 255], 4.0,
+        ));
     }
 
     // --- Build quads in draw order ---
@@ -318,12 +256,9 @@ pub fn build_panel(
     // Selected-chip border highlight (pushed before chip fills so chip fill sits inside).
     if theme_idx < num_presets {
         let chip = &chip_rects[theme_idx];
-        quads.push(Rect {
-            x: chip.x - 2.0,
-            y: chip.y - 2.0,
-            w: 84.0,
-            h: 40.0,
-            color: accent_col, ..Default::default() });
+        quads.push(Rect::rounded(
+            chip.x - 2.0, chip.y - 2.0, 84.0, 40.0, accent_col, 5.0,
+        ));
     }
 
     // Chip fills.

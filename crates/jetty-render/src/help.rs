@@ -107,15 +107,12 @@ pub fn build_help_overlay(win_w: u32, win_h: u32, theme: &jetty_core::Theme) -> 
 
     // Full-screen dim.
     quads.push(Rect { x: 0.0, y: 0.0, w: sw, h: sh, color: [0, 0, 0, 150], ..Default::default() });
-    // Border.
-    quads.push(Rect {
-        x: px - 2.0,
-        y: py - 2.0,
-        w: panel_w + 4.0,
-        h: panel_h + 4.0,
-        color: border_col, ..Default::default() });
-    // Background panel.
-    let panel = Rect { x: px, y: py, w: panel_w, h: panel_h, color: panel_bg, ..Default::default() };
+    // Border (rounded to match the window/tab frame).
+    quads.push(Rect::rounded(
+        px - 2.0, py - 2.0, panel_w + 4.0, panel_h + 4.0, border_col, 10.0,
+    ));
+    // Background panel (rounded).
+    let panel = Rect::rounded(px, py, panel_w, panel_h, panel_bg, 8.0);
     quads.push(panel);
 
     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
