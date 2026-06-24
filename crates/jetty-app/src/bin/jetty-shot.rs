@@ -386,6 +386,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(padded_data);
     readback_buffer.unmap();
 
+    // --- Center-summon keyframe (JETTY_SHOT_SUMMON_T=0..1) ---
+    // Apply the SAME center scale + fade the live summon composite pass uses, so
+    // a summon keyframe is inspectable headlessly. Mirrors SummonAnim::transform's
+    // SHOW variant: scale eases 0.94 → 1.0 (ease_out_back), alpha 0 → 1
+    // (ease_out_cubic). Runs on the premultiplied `tight` buffer BEFORE the
+    // corner mask + checkerboard composite, matching the live ordering.
+    if let Ok(t_str) = std::env::var("JETTY_SHOT_SUMMON_T") {
+        if let Ok(t) = t_str.parse::<f32>() {
+            let t = t.clamp(0.0, 1.0);
+            // ease_out_back with a gentle 1.2 overshoot (matches anim.rs).
+            let ease_out_back = |t: f32| -> f32 {
+                let c1 = 1.2_f32;
+                let c3 = c1 + 1.0;
+                let inv = t - 1.0;
+                1.0 + c3 * inv * inv * inv + c1 * inv * inv
+            };
+            let ease_out_cubic = |t: f32| -> f32 {
+                let inv = 1.0 - t;
+                1.0 - inv * inv * inv
+            };
+            const FROM: f32 = 0.94;
+            let scale = FROM + (1.0 - FROM) * ease_out_back(t);
+            let alpha = ease_out_cubic(t);
+            eprintln!(
+                "jetty-shot: summon keyframe t={t:.2} -> scale={scale:.4} alpha={alpha:.4}"
+            );
+            tight = jetty_render::composite_cpu(&tight, width, height, scale, alpha);
+        }
+    }
+
     // --- Rounded-corner alpha mask (JETTY_CORNER_RADIUS) ---
     // Apply the SAME antialiased rounded-rect SDF mask the live GPU pass uses, so
     // the shot shows transparent (rounded) corners over the checkerboard while the
@@ -419,7 +449,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The rendered texture uses premultiplied alpha (the clear color is already
     // premultiplied in text.rs).  We un-premultiply before blending onto the
     // checkerboard, then output an opaque RGBA PNG.
-    let composited = if bg_alpha < 255 || corner_radius > 0.0 {
+    // A summon keyframe fades/shrinks the frame, leaving transparent edges, so
+    // composite over the checkerboard to make the scale + fade visible.
+    let summon_active = std::env::var("JETTY_SHOT_SUMMON_T").is_ok();
+    let composited = if bg_alpha < 255 || corner_radius > 0.0 || summon_active {
         eprintln!("jetty-shot: compositing over checkerboard (bg alpha={})", bg_alpha);
         const TILE: u32 = 16;
         const DARK: [u8; 3] = [40, 40, 40];

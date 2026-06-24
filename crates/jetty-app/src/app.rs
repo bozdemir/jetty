@@ -34,6 +34,18 @@ const FALLBACK_ROWS: usize = 24;
 /// Height of the tab bar (re-exported from the renderer so app.rs has one name).
 const TABBAR_H: f32 = jetty_render::TABBAR_H;
 
+/// Center-summon (materialize) timing. Show: a gentle spring up over ~160ms.
+/// Hide: a quicker fade + slight shrink over ~110ms before the window is hidden.
+const SUMMON_SHOW_MS: u64 = 160;
+const SUMMON_HIDE_MS: u64 = 110;
+/// The scale the frame starts at when summoning (grows to 1.0).
+const SUMMON_SHOW_FROM: f32 = 0.94;
+/// The scale the frame shrinks to when hiding (from 1.0).
+const SUMMON_HIDE_TO: f32 = 0.97;
+/// Cursor glide time constant (e-folding time, seconds). ~90ms reads as smooth
+/// but never laggy. Larger jumps snap (see SUMMON cursor snap threshold).
+const CURSOR_GLIDE_TAU: f32 = 0.09;
+
 /// A single terminal session: its grid model, PTY, writer, and tab title. One
 /// `Tab` per visible tab. Per-tab scroll/selection live inside `terminal`.
 struct Tab {
@@ -63,6 +75,10 @@ pub struct App {
     quad: Option<QuadLayer>,
     /// Final-pass rounded-corner mask for the borderless main window.
     corner_mask: Option<jetty_render::CornerMask>,
+    /// Offscreen scene target + composite pass, used only while a center-summon
+    /// animation is in-flight (scale + fade the whole frame). Normal frames render
+    /// straight to the surface and never touch this.
+    scene_composite: Option<jetty_render::SceneComposite>,
     /// Window corner radius in logical px, clamped [0, 24]. 0 = square corners.
     corner_radius: f32,
     /// All open terminal sessions, one per tab. Always non-empty once `resumed`
@@ -157,6 +173,27 @@ pub struct App {
 struct SummonAnim {
     anim: crate::anim::Animation,
     showing: bool,
+}
+
+impl SummonAnim {
+    /// The (scale, alpha) to composite this frame at. Show eases from
+    /// `SUMMON_SHOW_FROM` → 1.0 with a spring overshoot and fades 0 → 1; hide eases
+    /// 1.0 → `SUMMON_HIDE_TO` with a soft cubic and fades 1 → 0.
+    fn transform(&self) -> (f32, f32) {
+        let p = self.anim.progress();
+        if self.showing {
+            let e = crate::anim::ease_out_back(p);
+            let scale = SUMMON_SHOW_FROM + (1.0 - SUMMON_SHOW_FROM) * e;
+            // Fade in a touch faster than the spring so it's never a "pop".
+            let alpha = crate::anim::ease_out_cubic(p);
+            (scale, alpha)
+        } else {
+            let e = crate::anim::ease_out_cubic(p);
+            let scale = 1.0 + (SUMMON_HIDE_TO - 1.0) * e;
+            let alpha = 1.0 - e;
+            (scale, alpha)
+        }
+    }
 }
 
 /// Animated block-cursor position. Tracks the current on-screen pixel position
@@ -298,6 +335,7 @@ impl App {
             text: None,
             quad: None,
             corner_mask: None,
+            scene_composite: None,
             corner_radius,
             tabs: Vec::new(),
             active: 0,
@@ -806,12 +844,26 @@ impl App {
                     None => center_window(win),
                 }
                 win.focus_window();
+                // Start the center-summon materialization: a gentle spring scale
+                // up + fade in (~160ms ease_out_back). The frame loop self-sustains
+                // until it settles.
+                self.summon = Some(SummonAnim {
+                    anim: crate::anim::Animation::ms(SUMMON_SHOW_MS),
+                    showing: true,
+                });
                 win.request_redraw();
             } else {
                 // Remember the current spot before hiding so the next summon
-                // restores it (where the user closed it from).
+                // restores it (where the user closed it from). Don't hide the OS
+                // window yet — run the reverse animation (fade + slight shrink)
+                // while still visible; RedrawRequested calls set_visible(false)
+                // only AFTER the hide animation completes.
                 self.last_pos = win.outer_position().ok();
-                win.set_visible(false);
+                self.summon = Some(SummonAnim {
+                    anim: crate::anim::Animation::ms(SUMMON_HIDE_MS),
+                    showing: false,
+                });
+                win.request_redraw();
             }
         }
     }
@@ -1213,6 +1265,7 @@ impl ApplicationHandler<AppEvent> for App {
         // main window, using the same surface format as the rest of the pipeline.
         if let Some(ref g) = gpu {
             self.corner_mask = Some(jetty_render::CornerMask::new(&g.device, g.format));
+            self.scene_composite = Some(jetty_render::SceneComposite::new(&g.device, g.format));
         }
 
         self.window = Some(window);
@@ -2150,7 +2203,13 @@ impl ApplicationHandler<AppEvent> for App {
                 // physical-pixel surface (HiDPI-correct rounding).
                 let scale = self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
                 let corner_radius_px = self.corner_radius * scale;
+                // Center-summon transform for this frame, if a summon is in-flight.
+                // When `Some`, the scene is rendered offscreen and composited with
+                // this (scale, alpha) + corner rounding; when `None` the frame goes
+                // straight to the surface (byte-identical to the pre-animation path).
+                let summon_xform: Option<(f32, f32)> = self.summon.as_ref().map(|s| s.transform());
                 let corner_mask = self.corner_mask.as_ref();
+                let mut scene_composite = self.scene_composite.as_mut();
                 let (Some(gpu), Some(text), Some(quad)) =
                     (&mut self.gpu, &mut self.text, &mut self.quad)
                 else {
@@ -2165,6 +2224,27 @@ impl ApplicationHandler<AppEvent> for App {
                     width, &tabs_meta, &theme, rename_ref, ctrl_hover,
                 );
                 if let Some((frame, view)) = gpu.acquire_frame() {
+                    // Choose the render target. Normally the scene paints straight
+                    // to the swap-chain `view` (byte-identical to the old path).
+                    // While a center-summon is animating, paint into the offscreen
+                    // scene texture instead so the final composite pass can scale +
+                    // fade the whole frame. `scene_composite` is only consulted when
+                    // a summon transform is present, so ordinary frames never pay
+                    // for the offscreen texture.
+                    let summoning = summon_xform.is_some();
+                    if summoning {
+                        if let Some(sc) = scene_composite.as_deref_mut() {
+                            sc.ensure(&gpu.device, width, height);
+                        }
+                    }
+                    let target: &wgpu::TextureView = if summoning {
+                        scene_composite
+                            .as_deref()
+                            .and_then(|sc| sc.scene_view())
+                            .unwrap_or(&view)
+                    } else {
+                        &view
+                    };
                     // Pass 1: clear to the theme bg and paint per-cell background
                     // quads (reverse-video / colored backgrounds) UNDER the text.
                     // The grid's bg quads are offset down by the tab bar.
@@ -2175,7 +2255,7 @@ impl ApplicationHandler<AppEvent> for App {
                     quad.render_clear(
                         &gpu.device,
                         &gpu.queue,
-                        &view,
+                        target,
                         width,
                         height,
                         &bg_rects,
@@ -2186,7 +2266,7 @@ impl ApplicationHandler<AppEvent> for App {
                     let _ = text.render_to(
                         &gpu.device,
                         &gpu.queue,
-                        &view,
+                        target,
                         width,
                         height,
                         &snap,
@@ -2194,10 +2274,10 @@ impl ApplicationHandler<AppEvent> for App {
                         TABBAR_H,
                     );
                     // Pass 3: the tab bar (y 0..TABBAR_H) over the grid.
-                    quad.render(&gpu.device, &gpu.queue, &view, width, height, &bar.quads);
+                    quad.render(&gpu.device, &gpu.queue, target, width, height, &bar.quads);
                     if !bar.labels.is_empty() {
                         let _ = text.render_overlays(
-                            &gpu.device, &gpu.queue, &view, width, height, &bar.labels,
+                            &gpu.device, &gpu.queue, target, width, height, &bar.labels,
                         );
                     }
                     // Pass 4: scrollbar (spans the grid area below the bar).
@@ -2207,16 +2287,16 @@ impl ApplicationHandler<AppEvent> for App {
                     {
                         rects.push(r);
                     }
-                    quad.render(&gpu.device, &gpu.queue, &view, width, height, &rects);
+                    quad.render(&gpu.device, &gpu.queue, target, width, height, &rects);
                     // Draw the right-click context menu on top of everything.
                     if let Some((mx, my)) = context_menu {
                         let menu = jetty_render::build_context_menu(mx, my, width, height, menu_hover, &theme);
-                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &menu.quads);
+                        quad.render(&gpu.device, &gpu.queue, target, width, height, &menu.quads);
                         if !menu.labels.is_empty() {
                             let _ = text.render_overlays(
                                 &gpu.device,
                                 &gpu.queue,
-                                &view,
+                                target,
                                 width,
                                 height,
                                 &menu.labels,
@@ -2227,12 +2307,12 @@ impl ApplicationHandler<AppEvent> for App {
                     // else — a dim layer, a bordered panel, and the binding rows.
                     if help_open {
                         let help = jetty_render::build_help_overlay(width, height, &theme);
-                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &help.quads);
+                        quad.render(&gpu.device, &gpu.queue, target, width, height, &help.quads);
                         if !help.labels.is_empty() {
                             let _ = text.render_overlays(
                                 &gpu.device,
                                 &gpu.queue,
-                                &view,
+                                target,
                                 width,
                                 height,
                                 &help.labels,
@@ -2245,29 +2325,47 @@ impl ApplicationHandler<AppEvent> for App {
                         let popup = jetty_render::build_confirm(
                             width, height, "Quit JeTTY? — all tabs will close", &theme,
                         );
-                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &popup.quads);
+                        quad.render(&gpu.device, &gpu.queue, target, width, height, &popup.quads);
                         if !popup.labels.is_empty() {
                             let _ = text.render_overlays(
-                                &gpu.device, &gpu.queue, &view, width, height, &popup.labels,
+                                &gpu.device, &gpu.queue, target, width, height, &popup.labels,
                             );
                         }
                     } else if let Some(title) = &confirm_close {
                         let popup = jetty_render::build_confirm_close(width, height, title, &theme);
-                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &popup.quads);
+                        quad.render(&gpu.device, &gpu.queue, target, width, height, &popup.quads);
                         if !popup.labels.is_empty() {
                             let _ = text.render_overlays(
                                 &gpu.device,
                                 &gpu.queue,
-                                &view,
+                                target,
                                 width,
                                 height,
                                 &popup.labels,
                             );
                         }
                     }
-                    // Final pass: round the window corners by zeroing alpha
-                    // outside a rounded rect. No-op when radius == 0 (square).
-                    if let Some(mask) = corner_mask {
+                    // Final composition:
+                    //  - Summoning: composite the offscreen scene onto the surface
+                    //    with the (scale, alpha) transform AND corner rounding in one
+                    //    pass (so the rounded mask tracks the window, not the scaled
+                    //    content).
+                    //  - Otherwise: the scene is already on the surface; round the
+                    //    corners directly (no-op at radius 0, byte-identical path).
+                    if let (Some((scale_f, alpha_f)), Some(sc)) =
+                        (summon_xform, scene_composite.as_deref())
+                    {
+                        sc.composite(
+                            &gpu.device,
+                            &gpu.queue,
+                            &view,
+                            width,
+                            height,
+                            scale_f,
+                            alpha_f,
+                            corner_radius_px,
+                        );
+                    } else if let Some(mask) = corner_mask {
                         mask.apply(
                             &gpu.device,
                             &gpu.queue,
@@ -2278,6 +2376,20 @@ impl ApplicationHandler<AppEvent> for App {
                         );
                     }
                     frame.present();
+                }
+                // Retire a finished center-summon. For a HIDE, the OS window stays
+                // up through the whole reverse animation (so the fade/shrink is
+                // visible); only now — after the last hide frame — do we actually
+                // hide it. For a SHOW, just clear the animation and settle.
+                if let Some(s) = self.summon {
+                    if s.anim.done() {
+                        if !s.showing {
+                            if let Some(win) = &self.window {
+                                win.set_visible(false);
+                            }
+                        }
+                        self.summon = None;
+                    }
                 }
                 // Self-sustaining frame loop: while any animation is in-flight,
                 // request the next frame so the animation keeps advancing. When
