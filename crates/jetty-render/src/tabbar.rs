@@ -16,6 +16,9 @@ const CTRL_W: f32 = 28.0;
 /// Total width reserved on the right of the strip for the controls. Left→right:
 /// Help "?", Settings "⚙", minimize "─", maximize "▢", close "✕" — five cells.
 pub const CONTROLS_W: f32 = CTRL_W * 5.0;
+/// Inset of the whole tab strip from the window's left/right edges, so tabs and
+/// the window controls don't sit flush against the rounded window corners.
+const STRIP_PAD: f32 = 8.0;
 
 /// Which window-control button (if any) is hovered, for the highlight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,12 +106,15 @@ pub fn build_tab_bar_ex(
     // Bar background spanning the full width.
     quads.push(Rect { x: 0.0, y: 0.0, w: sw, h, color: bg, ..Default::default() });
 
-    // Tabs are laid out from the left and must never overlap the window
-    // controls parked at the right; cap the usable area accordingly.
-    let tab_area_w = (sw - CONTROLS_W).max(0.0);
-    // The "+" button sits after the last tab and must also stay left of the
-    // controls, so the tabs themselves get `tab_area_w - PLUS_W`.
-    let tabs_avail_w = (tab_area_w - PLUS_W).max(0.0);
+    // Tabs are laid out from `left` (inset from the window edge) and must never
+    // overlap the window controls parked at the right (also inset by STRIP_PAD).
+    // `tab_area_x` is the absolute x where the controls begin — the right
+    // boundary for the tabs and the "+" button.
+    let left = STRIP_PAD;
+    let tab_area_x = (sw - STRIP_PAD - CONTROLS_W).max(left);
+    // The "+" button sits after the last tab and must stay left of the controls,
+    // so the tabs themselves get the area from `left` to `tab_area_x - PLUS_W`.
+    let tabs_avail_w = (tab_area_x - left - PLUS_W).max(0.0);
 
     // --- Dynamic tab width: shrink tabs to fit the available area so they never
     // overflow under the window controls. With many tabs we shrink down to a
@@ -153,7 +159,7 @@ pub fn build_tab_bar_ex(
     // tab still shows a couple of chars + the ellipsis.
     let max_chars = (((tab_w - CLOSE_W - 16.0) / 9.6).floor() as usize).max(3);
 
-    let mut x = 0.0_f32;
+    let mut x = left;
     for (i, (title, active)) in tabs.iter().take(drawn).enumerate() {
         let being_renamed = matches!(renaming, Some((ri, _)) if ri == i);
         let bg_color = if being_renamed {
@@ -222,7 +228,7 @@ pub fn build_tab_bar_ex(
 
     // "+" new-tab button after the last tab (clamped within the tab area).
     let plus_rect = Rect { x, y: 0.0, w: PLUS_W, h, color: inactive_bg, ..Default::default() };
-    if x + PLUS_W <= tab_area_w {
+    if x + PLUS_W <= tab_area_x {
         quads.push(Rect::rounded(x + 3.0, 3.0, PLUS_W - 6.0, h - 6.0, inactive_bg, 5.0));
         labels.push(("+".to_string(), x + 11.0, 7.0, fg));
     }
@@ -230,7 +236,7 @@ pub fn build_tab_bar_ex(
     // A small "+N" hint when some tabs couldn't be drawn (too many to fit even at
     // the minimum width). Placed just left of the controls so it never overlaps.
     if overflow > 0 {
-        let hint_x = (tab_area_w - 34.0).max(x + PLUS_W + 4.0);
+        let hint_x = (tab_area_x - 34.0).max(x + PLUS_W + 4.0);
         labels.push((format!("+{overflow}"), hint_x, 8.0, dim_fg));
     }
 
@@ -242,11 +248,11 @@ pub fn build_tab_bar_ex(
     let close_hover_bg = [red[0], red[1], red[2], 255];
     let ctrl_y = 0.0;
 
-    let help_x = sw - CONTROLS_W;        // sw - 5*CTRL_W
-    let settings_x = sw - CTRL_W * 4.0;
-    let min_x = sw - CTRL_W * 3.0;
-    let max_x = sw - CTRL_W * 2.0;
-    let close_x = sw - CTRL_W;
+    let help_x = sw - STRIP_PAD - CONTROLS_W; // = tab_area_x
+    let settings_x = sw - STRIP_PAD - CTRL_W * 4.0;
+    let min_x = sw - STRIP_PAD - CTRL_W * 3.0;
+    let max_x = sw - STRIP_PAD - CTRL_W * 2.0;
+    let close_x = sw - STRIP_PAD - CTRL_W;
 
     let help_rect = Rect { x: help_x, y: ctrl_y, w: CTRL_W, h, color: bg, ..Default::default() };
     let settings_rect = Rect { x: settings_x, y: ctrl_y, w: CTRL_W, h, color: bg, ..Default::default() };
@@ -302,8 +308,8 @@ mod tests {
         assert!(bar.settings_rect.x < bar.min_rect.x);
         assert!(bar.min_rect.x < bar.max_rect.x);
         assert!(bar.max_rect.x < bar.close_rect.x);
-        // The close button's right edge reaches the surface edge.
-        assert!((bar.close_rect.x + bar.close_rect.w - 1000.0).abs() < 0.01);
+        // The close button's right edge sits STRIP_PAD in from the surface edge.
+        assert!((bar.close_rect.x + bar.close_rect.w - (1000.0 - STRIP_PAD)).abs() < 0.01);
         // Each control is one cell wide (CONTROLS_W spans five cells).
         assert!((bar.close_rect.w - CONTROLS_W / 5.0).abs() < 0.01);
     }
@@ -314,7 +320,7 @@ mod tests {
         let tabs: Vec<(String, bool)> =
             (0..20).map(|i| (format!("Tab {i}"), i == 0)).collect();
         let bar = build_tab_bar(800, &tabs, &theme());
-        let controls_left = 800.0 - CONTROLS_W;
+        let controls_left = 800.0 - STRIP_PAD - CONTROLS_W;
         // No tab's switch rect should start at/after the controls region edge
         // beyond what fits; the plus rect (when shown) stays left of controls.
         if bar.plus_rect.x + bar.plus_rect.w <= controls_left {
@@ -332,7 +338,7 @@ mod tests {
             ("Tab 3".to_string(), false),
         ];
         let bar = build_tab_bar(560, &tabs, &theme());
-        let controls_left = 560.0 - CONTROLS_W;
+        let controls_left = 560.0 - STRIP_PAD - CONTROLS_W;
         assert_eq!(bar.tab_rects.len(), 3, "all 3 tabs should be drawn");
         for r in &bar.tab_rects {
             assert!(
