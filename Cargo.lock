@@ -993,6 +993,7 @@ dependencies = [
  "png 0.18.1",
  "raw-window-handle",
  "winit",
+ "x11rb",
 ]
 
 [[package]]
