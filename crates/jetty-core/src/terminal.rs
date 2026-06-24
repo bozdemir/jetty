@@ -243,16 +243,22 @@ impl Terminal {
             }
         }
 
-        // Apps hide the cursor with DECTCEM (`\e[?25l`); alacritty then reports
-        // the renderable cursor shape as `CursorShape::Hidden`. Treat that as not
-        // visible so the renderer skips the block cursor.
-        let cursor_visible = content.cursor.shape != CursorShape::Hidden;
-
-        // Cursor point is in terminal coordinates; convert to viewport (display) row.
+        // Cursor point is in terminal coordinates; convert to viewport (display)
+        // row using the SAME display-offset mapping as the cells above. When the
+        // user scrolls up into history the cursor's grid point maps OUTSIDE the
+        // visible viewport (point_to_viewport → None, or a row past the last
+        // visible line); in that case the cursor has scrolled off-screen and must
+        // be hidden so it does not paint over scrollback content.
         let cursor_vp = point_to_viewport(display_offset, content.cursor.point);
+        let cursor_in_view = cursor_vp.map(|p| p.line < self.rows).unwrap_or(false);
         let (cursor_row, cursor_col) = cursor_vp
             .map(|p| (p.line.min(self.rows.saturating_sub(1)), p.column.0.min(self.cols.saturating_sub(1))))
             .unwrap_or((0, 0));
+
+        // Apps hide the cursor with DECTCEM (`\e[?25l`); alacritty then reports
+        // the renderable cursor shape as `CursorShape::Hidden`. Treat that as not
+        // visible. Also hide the cursor when it has scrolled out of the viewport.
+        let cursor_visible = content.cursor.shape != CursorShape::Hidden && cursor_in_view;
 
         // Scrollbar data: display_offset is how many lines we're scrolled up
         // (0 = at bottom). history_size() is the number of lines in the scrollback
@@ -611,6 +617,34 @@ mod tests {
     fn child_exited_false_by_default() {
         let t = Terminal::new(20, 5);
         assert!(!t.child_exited(), "child should not be flagged exited at start");
+    }
+
+    #[test]
+    fn cursor_hidden_when_scrolled_into_history() {
+        // Build scrollback: feed more lines than the 5-row screen so history exists.
+        let mut t = Terminal::new(20, 5);
+        for i in 0..50 {
+            t.feed(format!("line {i}\r\n").as_bytes());
+        }
+        // At the bottom (live view), the cursor is on-screen and visible.
+        let snap = t.snapshot();
+        assert!(snap.scroll_max > 0, "expected scrollback to have built up");
+        assert!(snap.cursor_visible, "cursor should be visible at the bottom");
+
+        // Scroll up into history; the cursor scrolls off the viewport and must hide.
+        t.scroll_lines(10);
+        let snap = t.snapshot();
+        assert!(snap.scroll_offset > 0, "should be scrolled up into history");
+        assert!(
+            !snap.cursor_visible,
+            "cursor must be hidden once scrolled out of the viewport"
+        );
+
+        // Scroll back to the bottom; the cursor becomes visible again.
+        t.scroll_to_bottom();
+        let snap = t.snapshot();
+        assert_eq!(snap.scroll_offset, 0, "back at the live bottom");
+        assert!(snap.cursor_visible, "cursor visible again at the bottom");
     }
 
     #[test]

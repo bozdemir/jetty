@@ -87,13 +87,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     // warm up (shader/pipeline compile, atlas upload)
-    text.render_to(&device, &queue, &view, width, height, &snap, true)?;
+    text.render_to(&device, &queue, &view, width, height, &snap, true, 0.0)?;
     device.poll(wgpu::PollType::wait_indefinitely())?;
 
     let n_frames = 200;
     let t4 = Instant::now();
     for _ in 0..n_frames {
-        text.render_to(&device, &queue, &view, width, height, &snap, true)?;
+        text.render_to(&device, &queue, &view, width, height, &snap, true, 0.0)?;
         device.poll(wgpu::PollType::wait_indefinitely())?;
     }
     let frame_ms = t4.elapsed().as_secs_f64() * 1000.0 / n_frames as f64;

@@ -5,7 +5,16 @@ use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 pub enum KeyAction {
     TogglePanel,
     ClosePanel,
-    CycleTheme,
+    /// Open a new terminal tab (Ctrl+Shift+T).
+    NewTab,
+    /// Close the active tab (Ctrl+Shift+W).
+    CloseTab,
+    /// Switch to the next tab, wrapping (Ctrl+Tab).
+    NextTab,
+    /// Switch to the previous tab, wrapping (Ctrl+Shift+Tab).
+    PrevTab,
+    /// Jump to tab `n` (0-based; Ctrl+1..Ctrl+9 → 0..8), clamped to range.
+    SelectTab(usize),
     OpacityUp,
     OpacityDown,
     ScrollPageUp,
@@ -87,11 +96,35 @@ pub fn decide_key(
             // KeyO is kept as an alias for backwards compatibility.
             PhysicalKey::Code(KeyCode::KeyP) => return KeyAction::TogglePanel,
             PhysicalKey::Code(KeyCode::KeyO) => return KeyAction::TogglePanel,
-            PhysicalKey::Code(KeyCode::KeyT) => return KeyAction::CycleTheme,
+            // Tabs: Ctrl+Shift+T opens a new tab; Ctrl+Shift+W closes the active
+            // one. Theme switching moved to the Settings window. Ctrl+Shift+Tab
+            // cycles to the previous tab (must be intercepted before ctrl_byte).
+            PhysicalKey::Code(KeyCode::KeyT) => return KeyAction::NewTab,
+            PhysicalKey::Code(KeyCode::KeyW) => return KeyAction::CloseTab,
+            PhysicalKey::Code(KeyCode::Tab) => return KeyAction::PrevTab,
             PhysicalKey::Code(KeyCode::Equal) => return KeyAction::OpacityUp,
             PhysicalKey::Code(KeyCode::Minus) => return KeyAction::OpacityDown,
             PhysicalKey::Code(KeyCode::KeyC) => return KeyAction::Copy,
             PhysicalKey::Code(KeyCode::KeyV) => return KeyAction::Paste,
+            _ => {}
+        }
+    }
+
+    // Tab navigation with Ctrl (no shift): Ctrl+Tab → next tab, Ctrl+1..9 → jump
+    // to that tab. These MUST be intercepted before the ctrl_byte fallback so
+    // they never send a control byte (Ctrl+I / Ctrl+digit) to the PTY.
+    if ctrl && !shift {
+        match physical {
+            PhysicalKey::Code(KeyCode::Tab) => return KeyAction::NextTab,
+            PhysicalKey::Code(KeyCode::Digit1) => return KeyAction::SelectTab(0),
+            PhysicalKey::Code(KeyCode::Digit2) => return KeyAction::SelectTab(1),
+            PhysicalKey::Code(KeyCode::Digit3) => return KeyAction::SelectTab(2),
+            PhysicalKey::Code(KeyCode::Digit4) => return KeyAction::SelectTab(3),
+            PhysicalKey::Code(KeyCode::Digit5) => return KeyAction::SelectTab(4),
+            PhysicalKey::Code(KeyCode::Digit6) => return KeyAction::SelectTab(5),
+            PhysicalKey::Code(KeyCode::Digit7) => return KeyAction::SelectTab(6),
+            PhysicalKey::Code(KeyCode::Digit8) => return KeyAction::SelectTab(7),
+            PhysicalKey::Code(KeyCode::Digit9) => return KeyAction::SelectTab(8),
             _ => {}
         }
     }
@@ -504,6 +537,73 @@ mod tests {
             false, false,
         );
         assert_eq!(action, KeyAction::OpacityUp);
+    }
+
+    #[test]
+    fn ctrl_shift_t_maps_to_new_tab() {
+        let action = decide_key(
+            true, true, false,
+            make_physical(KeyCode::KeyT),
+            &make_logical_char("T"),
+            false, false,
+        );
+        assert_eq!(action, KeyAction::NewTab);
+    }
+
+    #[test]
+    fn ctrl_shift_w_maps_to_close_tab() {
+        let action = decide_key(
+            true, true, false,
+            make_physical(KeyCode::KeyW),
+            &make_logical_char("W"),
+            false, false,
+        );
+        assert_eq!(action, KeyAction::CloseTab);
+    }
+
+    #[test]
+    fn ctrl_tab_maps_to_next_tab() {
+        let action = decide_key(
+            true, false, false,
+            make_physical(KeyCode::Tab),
+            &Key::Named(NamedKey::Tab),
+            false, false,
+        );
+        assert_eq!(action, KeyAction::NextTab);
+    }
+
+    #[test]
+    fn ctrl_shift_tab_maps_to_prev_tab() {
+        let action = decide_key(
+            true, true, false,
+            make_physical(KeyCode::Tab),
+            &Key::Named(NamedKey::Tab),
+            false, false,
+        );
+        assert_eq!(action, KeyAction::PrevTab);
+    }
+
+    #[test]
+    fn ctrl_digit_maps_to_select_tab() {
+        let action = decide_key(
+            true, false, false,
+            make_physical(KeyCode::Digit3),
+            &make_logical_char("3"),
+            false, false,
+        );
+        assert_eq!(action, KeyAction::SelectTab(2));
+    }
+
+    #[test]
+    fn ctrl_digit0_still_font_reset() {
+        // Ctrl+0 must remain FontReset, not a tab jump.
+        let action = decide_key(
+            true, false, false,
+            make_physical(KeyCode::Digit0),
+            &make_logical_char("0"),
+            false, false,
+        );
+        assert_eq!(action, KeyAction::FontReset);
     }
 
     #[test]

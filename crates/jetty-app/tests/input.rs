@@ -128,7 +128,8 @@ fn escape_sends_esc_byte_when_panel_closed() {
 }
 
 #[test]
-fn ctrl_shift_t_cycles_theme() {
+fn ctrl_shift_t_opens_new_tab() {
+    // Ctrl+Shift+T now opens a new tab (theme switching moved to Settings).
     let action = decide_key(
         true,
         true,
@@ -138,7 +139,7 @@ fn ctrl_shift_t_cycles_theme() {
         false,
         false,
     );
-    assert_eq!(action, KeyAction::CycleTheme);
+    assert_eq!(action, KeyAction::NewTab);
 }
 
 #[test]
@@ -477,7 +478,7 @@ fn make_panel_geom() -> jetty_render::PanelGeom {
 /// Build a scrollbar rect that is non-None (requires scroll_max > 0).
 fn make_scrollbar_rect() -> jetty_render::Rect {
     // 30 rows visible, 10 lines of history, scroll_offset=5, 1000×640.
-    jetty_render::scrollbar_rect_geom(30, 5, 10, 1000, 640)
+    jetty_render::scrollbar_rect_geom(30, 5, 10, 1000, 640, 0.0)
         .expect("scrollbar should be Some when scroll_max > 0")
 }
 

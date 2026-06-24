@@ -308,6 +308,7 @@ pub fn cell_bg_rects(
     snapshot: &jetty_core::GridSnapshot,
     cell_w: f32,
     cell_h: f32,
+    y_offset: f32,
 ) -> Vec<Rect> {
     let default_bg = [snapshot.bg_rgba[0], snapshot.bg_rgba[1], snapshot.bg_rgba[2]];
     let mut rects: Vec<Rect> = Vec::new();
@@ -336,7 +337,7 @@ pub fn cell_bg_rects(
             let run = (col - start) as f32;
             rects.push(Rect {
                 x: start as f32 * cell_w,
-                y: row as f32 * cell_h,
+                y: row as f32 * cell_h + y_offset,
                 w: run * cell_w,
                 h: cell_h,
                 color: [effective_bg[0], effective_bg[1], effective_bg[2], 255],
@@ -356,14 +357,17 @@ pub fn scrollbar_rect_geom(
     scroll_max: usize,
     screen_w: u32,
     screen_h: u32,
+    top_offset: f32,
 ) -> Option<Rect> {
     if scroll_max == 0 {
         return None;
     }
+    // The scrollbar spans the grid area below the tab bar (screen_h - top_offset).
+    let track_h = (screen_h as f32 - top_offset).max(0.0);
     let total = rows + scroll_max;
-    let thumb_h = (screen_h as f32 * rows as f32 / total as f32).max(24.0);
+    let thumb_h = (track_h * rows as f32 / total as f32).max(24.0);
     let frac = (scroll_max - scroll_offset) as f32 / scroll_max as f32;
-    let thumb_y = frac * (screen_h as f32 - thumb_h);
+    let thumb_y = top_offset + frac * (track_h - thumb_h);
     Some(Rect {
         x: screen_w as f32 - 8.0,
         y: thumb_y,
@@ -377,6 +381,7 @@ pub fn scrollbar_rect(
     snapshot: &jetty_core::GridSnapshot,
     screen_w: u32,
     screen_h: u32,
+    top_offset: f32,
 ) -> Option<Rect> {
     scrollbar_rect_geom(
         snapshot.rows,
@@ -384,5 +389,6 @@ pub fn scrollbar_rect(
         snapshot.scroll_max,
         screen_w,
         screen_h,
+        top_offset,
     )
 }

@@ -183,7 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Pass 1: clear to theme bg + paint per-cell background quads UNDER text ---
     let (cell_w, cell_h) = text.cell_size();
-    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h);
+    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, 0.0);
     quad.render_clear(
         &device,
         &queue,
@@ -195,12 +195,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // --- Pass 2: render the grid text on top of the painted background (load) ---
-    text.render_to(&device, &queue, &view, width, height, &snap, false)?;
+    text.render_to(&device, &queue, &view, width, height, &snap, false, 0.0)?;
 
     // --- Draw scrollbar quad (and optionally the settings panel) over the text ---
     {
         let mut rects: Vec<jetty_render::Rect> = Vec::new();
-        if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height) {
+        if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height, 0.0) {
             rects.push(r);
         }
 

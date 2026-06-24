@@ -180,6 +180,7 @@ impl TextLayer {
         height: u32,
         snapshot: &GridSnapshot,
         clear: bool,
+        top_offset: f32,
     ) -> Result<(), PrepareError> {
         // Build per-cell color spans: one (&str slice, Attrs) pair per cell.
         // We build a single String containing all text, then collect borrowed slices from it.
@@ -250,7 +251,7 @@ impl TextLayer {
         let text_area = TextArea {
             buffer: &self.buffer,
             left: 0.0,
-            top: 0.0,
+            top: top_offset,
             scale: 1.0,
             bounds: win_bounds,
             default_color: Color::rgb(220, 220, 220),
@@ -269,7 +270,7 @@ impl TextLayer {
             areas.push(TextArea {
                 buffer: &self.cursor_buffer,
                 left: snapshot.cursor_col as f32 * self.cell_w,
-                top: snapshot.cursor_row as f32 * self.cell_h,
+                top: snapshot.cursor_row as f32 * self.cell_h + top_offset,
                 scale: 1.0,
                 bounds: win_bounds,
                 // Color::rgba is not available in this glyphon version; use rgb.
@@ -437,7 +438,7 @@ impl TextLayer {
             return Ok(());
         };
         // Self-contained path: this pass owns the frame clear.
-        self.render_to(&gpu.device, &gpu.queue, &view, gpu.config.width, gpu.config.height, snapshot, true)?;
+        self.render_to(&gpu.device, &gpu.queue, &view, gpu.config.width, gpu.config.height, snapshot, true, 0.0)?;
         frame.present();
         Ok(())
     }

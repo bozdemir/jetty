@@ -31,6 +31,18 @@ const FONT_LOGICAL_DEFAULT: f32 = 16.0;
 const FALLBACK_COLS: usize = 80;
 const FALLBACK_ROWS: usize = 24;
 
+/// Height of the tab bar (re-exported from the renderer so app.rs has one name).
+const TABBAR_H: f32 = jetty_render::TABBAR_H;
+
+/// A single terminal session: its grid model, PTY, writer, and tab title. One
+/// `Tab` per visible tab. Per-tab scroll/selection live inside `terminal`.
+struct Tab {
+    terminal: Terminal,
+    pty: PtySession,
+    writer: Box<dyn Write + Send>,
+    title: String,
+}
+
 /// Logical size of the separate Settings window. Sized to exactly fit the panel
 /// (`build_panel` uses PANEL_W=380 × PANEL_H=396 plus a 2px border on each side)
 /// so the panel fills the window with no margin and the OS frame handles moving.
@@ -47,9 +59,11 @@ pub struct App {
     gpu: Option<GpuContext>,
     text: Option<TextLayer>,
     quad: Option<QuadLayer>,
-    terminal: Terminal,
-    pty: Option<PtySession>,
-    writer: Option<Box<dyn Write + Send>>,
+    /// All open terminal sessions, one per tab. Always non-empty once `resumed`
+    /// has run; when it becomes empty the event loop exits.
+    tabs: Vec<Tab>,
+    /// Index of the active tab into `tabs`.
+    active: usize,
     /// Index into jetty_core::theme::PRESETS for the current theme.
     theme_idx: usize,
     /// Background opacity (0.0..=1.0); modifies theme bg alpha at runtime.
@@ -124,9 +138,8 @@ impl App {
             gpu: None,
             text: None,
             quad: None,
-            terminal: Terminal::new(FALLBACK_COLS, FALLBACK_ROWS),
-            pty: None,
-            writer: None,
+            tabs: Vec::new(),
+            active: 0,
             theme_idx,
             opacity,
             font_logical: FONT_LOGICAL_DEFAULT,
@@ -154,38 +167,150 @@ impl App {
         app
     }
 
-    /// Build the current theme from `theme_idx`, apply `opacity` to its bg
-    /// alpha, and push it into the terminal.
-    fn apply_theme(&mut self) {
+    /// The active tab. Panics if `tabs` is empty, which only happens before
+    /// `resumed` has run or after the last tab closed (we exit then).
+    fn active_tab(&self) -> &Tab {
+        &self.tabs[self.active]
+    }
+
+    /// Mutable access to the active tab. Same non-empty invariant as `active_tab`.
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active]
+    }
+
+    /// Build the current theme from `theme_idx` with `opacity` applied to its bg
+    /// alpha. Shared by `apply_theme` and the tab bar.
+    fn current_theme(&self) -> jetty_core::Theme {
         let mut t = jetty_core::Theme::by_name(jetty_core::theme::PRESETS[self.theme_idx]);
         t.bg[3] = (self.opacity.clamp(0.0, 1.0) * 255.0) as u8;
-        self.terminal.set_theme(t);
+        t
+    }
+
+    /// Build the current theme from `theme_idx`, apply `opacity` to its bg
+    /// alpha, and push it into EVERY tab's terminal.
+    fn apply_theme(&mut self) {
+        let t = self.current_theme();
+        for tab in &mut self.tabs {
+            tab.terminal.set_theme(t.clone());
+        }
+    }
+
+    /// Compute the current grid (cols, rows) from the GPU surface size and cell
+    /// metrics, accounting for the tab bar. Falls back to the constants when the
+    /// renderer is not yet available.
+    fn grid_dims(&self) -> (usize, usize) {
+        let (Some(gpu), Some(text)) = (&self.gpu, &self.text) else {
+            return (FALLBACK_COLS, FALLBACK_ROWS);
+        };
+        let (cw, ch) = text.cell_size();
+        if cw <= 0.0 || ch <= 0.0 {
+            return (FALLBACK_COLS, FALLBACK_ROWS);
+        }
+        let cols = (gpu.config.width as f32 / cw).floor().max(1.0) as usize;
+        let rows = ((gpu.config.height as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
+        (cols, rows)
+    }
+
+    /// Spawn a new tab sized to the current grid, themed like the others, make it
+    /// active, and redraw. The new PTY shares the same wake proxy so one
+    /// `AppEvent::Wake` drains every tab.
+    fn new_tab(&mut self) {
+        let (cols, rows) = self.grid_dims();
+        let proxy_wake = self.proxy.clone();
+        let pty = match PtySession::spawn(cols as u16, rows as u16, move || {
+            let _ = proxy_wake.send_event(AppEvent::Wake);
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("jetty: failed to spawn tab PTY: {e}");
+                return;
+            }
+        };
+        let writer = pty.writer();
+        let mut terminal = Terminal::new(cols, rows);
+        terminal.set_theme(self.current_theme());
+        let title = format!("Tab {}", self.tabs.len() + 1);
+        self.tabs.push(Tab { terminal, pty, writer, title });
+        self.active = self.tabs.len() - 1;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Close tab `i` (its PtySession Drop kills the child). Fix up `active`. If no
+    /// tabs remain, exit the event loop.
+    fn close_tab(&mut self, i: usize, event_loop: &ActiveEventLoop) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(i);
+        if self.tabs.is_empty() {
+            event_loop.exit();
+            return;
+        }
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        } else if self.active > i {
+            self.active -= 1;
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Switch to the next (`+1`) or previous (`-1`) tab, wrapping around.
+    fn switch_tab(&mut self, forward: bool) {
+        let n = self.tabs.len();
+        if n <= 1 {
+            return;
+        }
+        self.active = if forward {
+            (self.active + 1) % n
+        } else {
+            (self.active + n - 1) % n
+        };
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Jump to tab `n` (0-based), clamped to the valid range.
+    fn select_tab(&mut self, n: usize) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.active = n.min(self.tabs.len() - 1);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     /// Compute the scroll offset from the current cursor position during a drag.
     /// `w` and `h` are the current surface dimensions in physical pixels.
     fn apply_scroll_from_cursor(&mut self, w: u32, h: u32) {
-        let max = self.terminal.scroll_max();
+        let max = self.active_tab().terminal.scroll_max();
         if max == 0 {
             return;
         }
-        let screen_h = h as f32;
+        // The scrollbar track lives below the tab bar.
+        let track_h = (h as f32 - TABBAR_H).max(0.0);
         // Recompute thumb height the same way as the geometry function.
-        let rows = self.terminal.rows();
+        let rows = self.active_tab().terminal.rows();
         let total = rows + max;
-        let thumb_h = (screen_h * rows as f32 / total as f32).max(24.0);
+        let thumb_h = (track_h * rows as f32 / total as f32).max(24.0);
 
-        let travel = screen_h - thumb_h;
+        let travel = track_h - thumb_h;
         if travel <= 0.0 {
             return;
         }
 
-        let thumb_top = (self.cursor.1 as f32 - self.drag_grab_dy).clamp(0.0, travel);
+        // Cursor y is absolute; subtract the bar offset so 0 == track top.
+        let thumb_top = ((self.cursor.1 as f32 - TABBAR_H) - self.drag_grab_dy).clamp(0.0, travel);
         // frac=0 → thumb at top → scroll_offset=max (oldest history)
         // frac=1 → thumb at bottom → scroll_offset=0 (live bottom)
         let frac = thumb_top / travel;
         let offset = ((1.0 - frac) * max as f32).round() as usize;
-        self.terminal.scroll_to_offset(offset);
+        self.active_tab_mut().terminal.scroll_to_offset(offset);
         // suppress unused warning on w
         let _ = w;
     }
@@ -205,7 +330,9 @@ impl App {
             return None;
         }
         let col = (self.cursor.0 as f32 / cell_w).floor() as i64 + 1;
-        let row = (self.cursor.1 as f32 / cell_h).floor() as i64 + 1;
+        // The grid starts below the tab bar; subtract TABBAR_H before dividing.
+        let y = (self.cursor.1 as f32 - TABBAR_H).max(0.0);
+        let row = (y / cell_h).floor() as i64 + 1;
         Some((col.max(1) as usize, row.max(1) as usize))
     }
 
@@ -217,10 +344,12 @@ impl App {
         if cell_w <= 0.0 || cell_h <= 0.0 {
             return None;
         }
-        let cols = self.terminal.cols().saturating_sub(1);
-        let rows = self.terminal.rows().saturating_sub(1);
+        let cols = self.active_tab().terminal.cols().saturating_sub(1);
+        let rows = self.active_tab().terminal.rows().saturating_sub(1);
+        // The grid is offset down by the tab bar; subtract it (clamped ≥0).
+        let y = (self.cursor.1 as f32 - TABBAR_H).max(0.0);
         let col = ((self.cursor.0 as f32 / cell_w).floor() as i64).clamp(0, cols as i64) as usize;
-        let line = ((self.cursor.1 as f32 / cell_h).floor() as i64).clamp(0, rows as i64) as usize;
+        let line = ((y / cell_h).floor() as i64).clamp(0, rows as i64) as usize;
         Some((line, col))
     }
 
@@ -230,16 +359,19 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if let Some(w) = &mut self.writer {
-            if self.terminal.bracketed_paste() {
-                let _ = w.write_all(b"\x1b[200~");
-            }
-            let _ = w.write_all(text.as_bytes());
-            if self.terminal.bracketed_paste() {
-                let _ = w.write_all(b"\x1b[201~");
-            }
-            let _ = w.flush();
+        if self.tabs.is_empty() {
+            return;
         }
+        let bracketed = self.active_tab().terminal.bracketed_paste();
+        let w = &mut self.tabs[self.active].writer;
+        if bracketed {
+            let _ = w.write_all(b"\x1b[200~");
+        }
+        let _ = w.write_all(text.as_bytes());
+        if bracketed {
+            let _ = w.write_all(b"\x1b[201~");
+        }
+        let _ = w.flush();
     }
 
     /// Encode a mouse event and write it to the PTY. Used only when the running
@@ -248,12 +380,14 @@ impl App {
     /// true (`\e[?1006h`), otherwise the legacy X10 encoding.
     fn send_mouse_report(&mut self, event: input::MouseEvent) {
         let Some((col, row)) = self.cursor_cell() else { return };
-        let sgr = self.terminal.mouse_sgr();
-        let bytes = input::encode_mouse(event, col, row, sgr);
-        if let Some(w) = &mut self.writer {
-            let _ = w.write_all(&bytes);
-            let _ = w.flush();
+        if self.tabs.is_empty() {
+            return;
         }
+        let sgr = self.active_tab().terminal.mouse_sgr();
+        let bytes = input::encode_mouse(event, col, row, sgr);
+        let w = &mut self.tabs[self.active].writer;
+        let _ = w.write_all(&bytes);
+        let _ = w.flush();
     }
 
     /// Drain pending PTY output into the terminal and flush any query replies.
@@ -261,33 +395,66 @@ impl App {
     /// Returns `true` if any bytes were consumed (PTY data or reply writes),
     /// so the caller can skip `request_redraw()` when nothing changed — making
     /// the 100ms heartbeat essentially free when the terminal is idle.
-    fn drain_pty(&mut self) -> bool {
-        let mut had_data = false;
-        if let Some(pty) = &self.pty {
-            while let Ok(chunk) = pty.output().try_recv() {
-                self.terminal.feed(&chunk);
-                had_data = true;
+    /// Drain pending PTY output for EVERY tab into its terminal and flush each
+    /// tab's query replies back to its own PTY. Background tabs must keep draining
+    /// so their shells never block on a full pipe.
+    ///
+    /// Returns `(active_had_data, exited)` where `active_had_data` is true if the
+    /// ACTIVE tab consumed bytes (so the caller redraws), and `exited` is the list
+    /// of tab indices whose child exited this tick (caller closes them after, to
+    /// avoid mutating `tabs` while iterating).
+    fn drain_pty(&mut self) -> (bool, Vec<usize>) {
+        let mut active_had_data = false;
+        let mut exited: Vec<usize> = Vec::new();
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            let mut had = false;
+            while let Ok(chunk) = tab.pty.output().try_recv() {
+                tab.terminal.feed(&chunk);
+                had = true;
+            }
+            // Flush any query replies (DSR/DA, etc.) this tab produced back to its
+            // own PTY so the shell's startup probes succeed.
+            let replies = tab.terminal.drain_pty_writes();
+            if !replies.is_empty() {
+                let _ = tab.writer.write_all(&replies);
+                let _ = tab.writer.flush();
+                had = true;
+            }
+            if i == self.active && had {
+                active_had_data = true;
+            }
+            if tab.terminal.child_exited() || tab.pty.child_exited() {
+                exited.push(i);
             }
         }
-        // The terminal may have produced replies to host queries (DSR/DA, etc.)
-        // while feeding output. Send those back to the PTY so the shell's
-        // startup queries succeed (fixes the red "x" at the first prompt).
-        //
-        // Ordering: we drain *after* feeding all pending output above, so every
-        // query parsed this tick has already enqueued its reply before we write
-        // here, and we flush immediately — the shell sees the answers before the
-        // next batch of PTY output is produced. Keystroke writes go through a
-        // separate path (KeyAction::Send), so query replies never interleave
-        // with, or get delayed behind, user input.
-        let replies = self.terminal.drain_pty_writes();
-        if !replies.is_empty() {
-            if let Some(w) = &mut self.writer {
-                let _ = w.write_all(&replies);
-                let _ = w.flush();
-            }
-            had_data = true;
+        (active_had_data, exited)
+    }
+
+    /// Close every tab index in `exited` (descending so earlier indices stay
+    /// valid), fixing up `active`. If no tabs remain, exit the event loop.
+    /// Returns true if the app should keep running.
+    fn close_exited_tabs(&mut self, mut exited: Vec<usize>, event_loop: &ActiveEventLoop) -> bool {
+        if exited.is_empty() {
+            return true;
         }
-        had_data
+        exited.sort_unstable();
+        exited.dedup();
+        for &i in exited.iter().rev() {
+            if i < self.tabs.len() {
+                self.tabs.remove(i);
+            }
+        }
+        if self.tabs.is_empty() {
+            event_loop.exit();
+            return false;
+        }
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        true
     }
 
     /// Shared reflow path: compute cols/rows from the current GPU surface size
@@ -304,10 +471,12 @@ impl App {
         let w = gpu.config.width;
         let h = gpu.config.height;
         let cols = (w as f32 / cw).floor().max(1.0) as usize;
-        let rows = (h as f32 / ch).floor().max(1.0) as usize;
-        self.terminal.resize(cols, rows);
-        if let Some(pty) = &self.pty {
-            pty.resize(cols as u16, rows as u16);
+        // The grid occupies the area below the tab bar.
+        let rows = ((h as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
+        // Reflow every tab so background sessions stay in sync with the window.
+        for tab in &mut self.tabs {
+            tab.terminal.resize(cols, rows);
+            tab.pty.resize(cols as u16, rows as u16);
         }
     }
 
@@ -681,28 +850,24 @@ impl ApplicationHandler<AppEvent> for App {
             eprintln!("jetty: found {} monospace families", self.font_families.len());
         }
 
-        // Re-build the terminal with the derived grid size so the PTY and
-        // terminal agree with the actual window layout.
-        self.terminal = Terminal::new(cols, rows);
-        self.apply_theme();
+        self.window = Some(window);
+        self.gpu = gpu;
+        self.text = text;
+        self.quad = quad;
 
-        // Pass an `on_data` callback that wakes the winit event loop the
-        // instant bytes arrive from the PTY. This means drain_pty (and thus
-        // the query-reply write) runs within ~1ms of any PTY output rather
-        // than waiting up to 16ms for a polling tick — critical for p10k's
-        // cursor-position / capability queries which have tight timeouts.
+        // Build the first tab with the derived grid size so the PTY and terminal
+        // agree with the actual window layout. The on_data callback wakes the
+        // winit event loop the instant bytes arrive (within ~1ms) — critical for
+        // p10k's cursor-position / capability queries which have tight timeouts.
+        let mut terminal = Terminal::new(cols, rows);
+        terminal.set_theme(self.current_theme());
         let proxy_wake = self.proxy.clone();
         let pty = PtySession::spawn(cols as u16, rows as u16, move || {
             let _ = proxy_wake.send_event(AppEvent::Wake);
         }).expect("pty");
         let writer = pty.writer();
-
-        self.window = Some(window);
-        self.gpu = gpu;
-        self.text = text;
-        self.quad = quad;
-        self.pty = Some(pty);
-        self.writer = Some(writer);
+        self.tabs.push(Tab { terminal, pty, writer, title: "Tab 1".to_string() });
+        self.active = 0;
 
         // Register the F9 global hotkey (Yakuake-style toggle). This only works
         // on X11; on Wayland registration will fail and we log a warning without
@@ -754,19 +919,17 @@ impl ApplicationHandler<AppEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, ev: AppEvent) {
         match ev {
             AppEvent::Wake => {
-                let had_data = self.drain_pty();
-                // If the shell child exited while we were draining its last output,
-                // close the window. The waker fires this ~10x/s, so we react within a
-                // frame of the shell exiting. `event_loop.exit()` is safe to call here.
-                if self.terminal.child_exited() || self.pty.as_ref().is_some_and(|p| p.child_exited()) {
-                    event_loop.exit();
+                let (had_data, exited) = self.drain_pty();
+                // A tab whose shell exited (Ctrl+D / `exit`) closes THAT tab,
+                // Yakuake-style; if it was the last tab, close_exited_tabs exits
+                // the loop. The waker fires ~10x/s, so we react within a frame.
+                if !self.close_exited_tabs(exited, event_loop) {
                     return;
                 }
-                // Damage-driven: only request a redraw when PTY data actually arrived
-                // (or query replies were sent). When the terminal is idle, the 100ms
-                // heartbeat drains nothing and we skip the redraw — no Vec allocation,
-                // no GPU work. Any state change that affects rendering still calls
-                // request_redraw directly in the relevant window_event arm.
+                // Damage-driven: only request a redraw when the active tab's PTY
+                // produced data (or query replies were sent). Background tabs still
+                // drained above but don't trigger a repaint. When idle, the 100ms
+                // heartbeat drains nothing and we skip the redraw entirely.
                 if had_data {
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -837,9 +1000,9 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
                 // --- Text selection drag continuation ---
-                if self.selecting && !self.terminal.mouse_mode() {
+                if self.selecting && !self.active_tab().terminal.mouse_mode() {
                     if let Some((line, col)) = self.cursor_cell_0() {
-                        self.terminal.selection_update(line, col);
+                        self.active_tab_mut().terminal.selection_update(line, col);
                         if let Some(win) = &self.window {
                             win.request_redraw();
                         }
@@ -884,7 +1047,7 @@ impl ApplicationHandler<AppEvent> for App {
                         match idx {
                             0 => {
                                 // Copy
-                                if let Some(text) = self.terminal.selection_text() {
+                                if let Some(text) = self.active_tab().terminal.selection_text() {
                                     if !text.is_empty() {
                                         clipboard::set(&text);
                                     }
@@ -898,7 +1061,7 @@ impl ApplicationHandler<AppEvent> for App {
                             }
                             2 => {
                                 // Select All
-                                self.terminal.select_all();
+                                self.active_tab_mut().terminal.select_all();
                             }
                             _ => {}
                         }
@@ -911,13 +1074,50 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
 
-                let rows = self.terminal.rows();
-                let scroll_offset = self.terminal.scroll_offset();
-                let scroll_max = self.terminal.scroll_max();
-                let scrollbar = jetty_render::scrollbar_rect_geom(rows, scroll_offset, scroll_max, w, h);
-
                 let cx = self.cursor.0 as f32;
                 let cy = self.cursor.1 as f32;
+
+                // --- Tab bar hit-test (only when the click is on the bar) ---
+                // Switch tabs, close a tab, or open a new one BEFORE any
+                // terminal-area selection logic.
+                if cy < TABBAR_H {
+                    let theme = self.current_theme();
+                    let tabs_meta: Vec<(String, bool)> = self
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| (t.title.clone(), i == self.active))
+                        .collect();
+                    let bar = jetty_render::build_tab_bar(w, &tabs_meta, &theme);
+                    // Close buttons take priority over the tab body they sit on.
+                    if let Some(i) = bar
+                        .close_rects
+                        .iter()
+                        .position(|r| input::point_in(r, cx, cy))
+                    {
+                        self.close_tab(i, event_loop);
+                        return;
+                    }
+                    if input::point_in(&bar.plus_rect, cx, cy) {
+                        self.new_tab();
+                        return;
+                    }
+                    if let Some(i) = bar
+                        .tab_rects
+                        .iter()
+                        .position(|r| input::point_in(r, cx, cy))
+                    {
+                        self.select_tab(i);
+                        return;
+                    }
+                    // Click on the empty part of the bar: ignore.
+                    return;
+                }
+
+                let rows = self.active_tab().terminal.rows();
+                let scroll_offset = self.active_tab().terminal.scroll_offset();
+                let scroll_max = self.active_tab().terminal.scroll_max();
+                let scrollbar = jetty_render::scrollbar_rect_geom(rows, scroll_offset, scroll_max, w, h, TABBAR_H);
 
                 // The settings panel no longer lives in this window, so pass no
                 // panel geometry — only the scrollbar and terminal area are hit.
@@ -954,13 +1154,13 @@ impl ApplicationHandler<AppEvent> for App {
                         // The click landed in the terminal area (not a panel or
                         // scrollbar widget). When the app enabled mouse reporting,
                         // forward the press; otherwise start a text selection.
-                        if self.terminal.mouse_mode() {
+                        if self.active_tab().terminal.mouse_mode() {
                             self.send_mouse_report(input::MouseEvent::LeftPress);
                         } else {
                             // Clear prior selection and begin a new one.
-                            self.terminal.selection_clear();
+                            self.active_tab_mut().terminal.selection_clear();
                             if let Some((line, col)) = self.cursor_cell_0() {
-                                self.terminal.selection_start(line, col);
+                                self.active_tab_mut().terminal.selection_start(line, col);
                             }
                             self.selecting = true;
                             if let Some(win) = &self.window {
@@ -993,16 +1193,16 @@ impl ApplicationHandler<AppEvent> for App {
                 if self.selecting {
                     self.selecting = false;
                     // Copy-on-select: if we got any text, put it in the clipboard.
-                    if let Some(text) = self.terminal.selection_text() {
+                    if let Some(text) = self.active_tab().terminal.selection_text() {
                         if !text.is_empty() {
                             clipboard::set(&text);
                         } else {
                             // Empty drag (plain click) — clear the selection highlight.
-                            self.terminal.selection_clear();
+                            self.active_tab_mut().terminal.selection_clear();
                         }
                     } else {
                         // No selection text → plain click, clear selection.
-                        self.terminal.selection_clear();
+                        self.active_tab_mut().terminal.selection_clear();
                     }
                     if let Some(win) = &self.window {
                         win.request_redraw();
@@ -1014,7 +1214,7 @@ impl ApplicationHandler<AppEvent> for App {
                 // not re-check widget hit-testing here: the matching press was
                 // only forwarded when it landed in the terminal area (action ==
                 // None), so a non-drag release pairs with that forwarded press.
-                if !was_dragging && self.terminal.mouse_mode() {
+                if !was_dragging && self.active_tab().terminal.mouse_mode() {
                     self.send_mouse_report(input::MouseEvent::LeftRelease);
                 }
             }
@@ -1042,12 +1242,12 @@ impl ApplicationHandler<AppEvent> for App {
                     // (clamped) keeps apps like less/htop responsive without
                     // flooding the PTY.
                     let over_scrollbar = {
-                        let rows = self.terminal.rows();
-                        let off = self.terminal.scroll_offset();
-                        let max = self.terminal.scroll_max();
+                        let rows = self.active_tab().terminal.rows();
+                        let off = self.active_tab().terminal.scroll_offset();
+                        let max = self.active_tab().terminal.scroll_max();
                         if let Some(gpu) = &self.gpu {
                             let (w, h) = (gpu.config.width, gpu.config.height);
-                            jetty_render::scrollbar_rect_geom(rows, off, max, w, h)
+                            jetty_render::scrollbar_rect_geom(rows, off, max, w, h, TABBAR_H)
                                 .map(|r| {
                                     let cx = self.cursor.0 as f32;
                                     cx >= r.x && cx <= r.x + r.w
@@ -1058,7 +1258,7 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                     };
 
-                    if self.terminal.mouse_mode() && !over_scrollbar {
+                    if self.active_tab().terminal.mouse_mode() && !over_scrollbar {
                         let event = if lines > 0 {
                             input::MouseEvent::WheelUp
                         } else {
@@ -1071,7 +1271,7 @@ impl ApplicationHandler<AppEvent> for App {
                             self.send_mouse_report(event);
                         }
                     } else {
-                        self.terminal.scroll_lines(lines);
+                        self.active_tab_mut().terminal.scroll_lines(lines);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -1082,7 +1282,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
-                let app_cursor = self.terminal.app_cursor_keys();
+                let app_cursor = self.active_tab().terminal.app_cursor_keys();
                 // Escape in the main window never closes the settings window
                 // (that window handles its own Escape), so panel_open is always
                 // false here — Escape forwards an ESC byte to the PTY as normal.
@@ -1091,7 +1291,11 @@ impl ApplicationHandler<AppEvent> for App {
                     let action_name = match &action {
                         input::KeyAction::TogglePanel => "TogglePanel",
                         input::KeyAction::ClosePanel => "ClosePanel",
-                        input::KeyAction::CycleTheme => "CycleTheme",
+                        input::KeyAction::NewTab => "NewTab",
+                        input::KeyAction::CloseTab => "CloseTab",
+                        input::KeyAction::NextTab => "NextTab",
+                        input::KeyAction::PrevTab => "PrevTab",
+                        input::KeyAction::SelectTab(_) => "SelectTab",
                         input::KeyAction::OpacityUp => "OpacityUp",
                         input::KeyAction::OpacityDown => "OpacityDown",
                         input::KeyAction::ScrollPageUp => "ScrollPageUp",
@@ -1123,13 +1327,20 @@ impl ApplicationHandler<AppEvent> for App {
                             }
                         }
                     }
-                    input::KeyAction::CycleTheme => {
-                        self.theme_idx = (self.theme_idx + 1)
-                            % jetty_core::theme::PRESETS.len();
-                        self.apply_theme();
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
+                    input::KeyAction::NewTab => {
+                        self.new_tab();
+                    }
+                    input::KeyAction::CloseTab => {
+                        self.close_tab(self.active, event_loop);
+                    }
+                    input::KeyAction::NextTab => {
+                        self.switch_tab(true);
+                    }
+                    input::KeyAction::PrevTab => {
+                        self.switch_tab(false);
+                    }
+                    input::KeyAction::SelectTab(n) => {
+                        self.select_tab(n);
                     }
                     input::KeyAction::OpacityUp => {
                         self.opacity = (self.opacity + 0.05).min(1.0);
@@ -1146,13 +1357,13 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                     }
                     input::KeyAction::ScrollPageUp => {
-                        self.terminal.scroll_page(true);
+                        self.active_tab_mut().terminal.scroll_page(true);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                     }
                     input::KeyAction::ScrollPageDown => {
-                        self.terminal.scroll_page(false);
+                        self.active_tab_mut().terminal.scroll_page(false);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -1168,7 +1379,7 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     input::KeyAction::Copy => {
                         // Copy the current selection to the clipboard.
-                        if let Some(text) = self.terminal.selection_text() {
+                        if let Some(text) = self.active_tab().terminal.selection_text() {
                             if !text.is_empty() {
                                 clipboard::set(&text);
                             }
@@ -1191,25 +1402,36 @@ impl ApplicationHandler<AppEvent> for App {
                             return;
                         }
                         // Any real keystroke jumps back to the bottom so the user sees their input.
-                        self.terminal.scroll_to_bottom();
-                        if let Some(w) = &mut self.writer {
-                            let _ = w.write_all(&bytes);
-                            let _ = w.flush();
-                        }
+                        self.active_tab_mut().terminal.scroll_to_bottom();
+                        let w = &mut self.tabs[self.active].writer;
+                        let _ = w.write_all(&bytes);
+                        let _ = w.flush();
                     }
                     input::KeyAction::None => {}
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.drain_pty();
-                // The shell may have exited as part of the output we just
-                // drained (e.g. the user typed `exit`); close the window rather
-                // than render one more dead frame.
-                if self.terminal.child_exited() || self.pty.as_ref().is_some_and(|p| p.child_exited()) {
-                    event_loop.exit();
+                // Drain every tab so background shells keep running; close any
+                // whose child exited as part of the output we just drained.
+                let (_had, exited) = self.drain_pty();
+                if !self.close_exited_tabs(exited, event_loop) {
                     return;
                 }
-                let snap = self.terminal.snapshot();
+                if self.tabs.is_empty() {
+                    return;
+                }
+                // Snapshot the ACTIVE tab and build the tab bar (immutable reads
+                // gathered before borrowing the render stack mutably).
+                let snap = self.active_tab().terminal.snapshot();
+                let theme = self.current_theme();
+                let tabs_meta: Vec<(String, bool)> = self
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| (t.title.clone(), i == self.active))
+                    .collect();
+                let context_menu = self.context_menu;
+                let menu_hover = self.menu_hover;
                 let (Some(gpu), Some(text), Some(quad)) =
                     (&mut self.gpu, &mut self.text, &mut self.quad)
                 else {
@@ -1217,11 +1439,13 @@ impl ApplicationHandler<AppEvent> for App {
                 };
                 let width = gpu.config.width;
                 let height = gpu.config.height;
+                let bar = jetty_render::build_tab_bar(width, &tabs_meta, &theme);
                 if let Some((frame, view)) = gpu.acquire_frame() {
                     // Pass 1: clear to the theme bg and paint per-cell background
                     // quads (reverse-video / colored backgrounds) UNDER the text.
+                    // The grid's bg quads are offset down by the tab bar.
                     let (cell_w, cell_h) = text.cell_size();
-                    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h);
+                    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, TABBAR_H);
                     quad.render_clear(
                         &gpu.device,
                         &gpu.queue,
@@ -1231,7 +1455,8 @@ impl ApplicationHandler<AppEvent> for App {
                         &bg_rects,
                         jetty_render::default_bg_clear(&snap),
                     );
-                    // Pass 2: draw glyphs on top of the painted background (load).
+                    // Pass 2: draw glyphs on top of the painted background (load),
+                    // offset down by the tab bar height.
                     let _ = text.render_to(
                         &gpu.device,
                         &gpu.queue,
@@ -1240,17 +1465,26 @@ impl ApplicationHandler<AppEvent> for App {
                         height,
                         &snap,
                         false,
+                        TABBAR_H,
                     );
+                    // Pass 3: the tab bar (y 0..TABBAR_H) over the grid.
+                    quad.render(&gpu.device, &gpu.queue, &view, width, height, &bar.quads);
+                    if !bar.labels.is_empty() {
+                        let _ = text.render_overlays(
+                            &gpu.device, &gpu.queue, &view, width, height, &bar.labels,
+                        );
+                    }
+                    // Pass 4: scrollbar (spans the grid area below the bar).
                     let mut rects: Vec<jetty_render::Rect> = Vec::new();
                     if let Some(r) =
-                        jetty_render::scrollbar_rect(&snap, width, height)
+                        jetty_render::scrollbar_rect(&snap, width, height, TABBAR_H)
                     {
                         rects.push(r);
                     }
                     quad.render(&gpu.device, &gpu.queue, &view, width, height, &rects);
                     // Draw the right-click context menu on top of everything.
-                    if let Some((mx, my)) = self.context_menu {
-                        let menu = jetty_render::build_context_menu(mx, my, width, height, self.menu_hover);
+                    if let Some((mx, my)) = context_menu {
+                        let menu = jetty_render::build_context_menu(mx, my, width, height, menu_hover);
                         quad.render(&gpu.device, &gpu.queue, &view, width, height, &menu.quads);
                         if !menu.labels.is_empty() {
                             let _ = text.render_overlays(
