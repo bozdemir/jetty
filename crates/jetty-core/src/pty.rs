@@ -31,6 +31,13 @@ impl PtySession {
         // capability checks fail and the prompt renders the red "x".
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // Disable macOS's shell-session save/restore (/etc/zshrc writes
+        // ~/.zsh_sessions/<id>.session and sources it on the next launch). A
+        // window-close can interrupt the save, leaving a malformed file that the
+        // next shell tries to run — e.g. `command not found: Saving`. JeTTY is a
+        // quick-summon terminal; session restore isn't wanted. Harmless/ignored
+        // on Linux, so set it unconditionally (no platform-specific code).
+        cmd.env("SHELL_SESSIONS_DISABLE", "1");
         let child = pair
             .slave
             .spawn_command(cmd)
