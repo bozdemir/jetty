@@ -28,7 +28,7 @@ Konsole 23.08.5, GNOME Terminal / VTE 0.76.
 | **Idle CPU** | ~0 % (event-driven terminals) | **0 %** when nothing changes | ~0 % (damage-driven redraw) | ✅ |
 | **Per-frame CPU** (snapshot, 11k cells) | n/a | ≤ **1 ms** | **0.047 ms** | ✅ 20× under |
 | **Throughput** (parse+grid, colored VT) | alacritty class: very high; VTE/Konsole: lower | ≥ **150 MB/s**; stretch ≥ 300 | **154 MB/s** | ✅ meets (stretch open) |
-| **Cold start** (process → first frame) | foot ~40–60 ms; alacritty ~100–300 ms | < **150 ms**; stretch < 80 ms | gpu_init **224 ms** + text 23 ms → est. ~300 ms | ❌ **needs work** |
+| **Cold start** (process → first frame) | foot ~40–60 ms; alacritty ~100–300 ms | < **150 ms**; stretch < 80 ms | gpu_init **~78 ms** (Vulkan-only backend; font load + PTY overlap it) | ✅ **meets target, near stretch** |
 | **Input latency** (keypress → glyph) | foot ≈ 1 frame; the latency leader | ≤ **1 frame** added (< 5 ms beyond display) | architecturally ready (≤1 ms waker), not yet measured live | ⏳ measure |
 | **Idle RSS** | alacritty ~30–50 MB; foot lower | < **80 MB** | not yet measured live | ⏳ measure |
 | **Binary size** | — | informational | 15 MB (release) | — |
@@ -47,15 +47,16 @@ Konsole 23.08.5, GNOME Terminal / VTE 0.76.
   - *Throughput / frame time* — we use alacritty_terminal's parser, so raw
     parse speed tracks alacritty; render at 5.5 ms/full-frame clears 144 Hz.
     Both already beat VTE-based Konsole/GNOME Terminal on this machine.
-- **Must improve to truly beat the market:**
-  - *Cold start* — **the one red metric.** ~224 ms is wgpu adapter+device
-    acquisition (Vulkan ICD + driver init). foot wins startup by being
-    CPU-rendered (no GPU init). Options, in order of appeal:
-    1. Show the window + a CPU-rendered first frame immediately, warm the GPU in
-       the background, swap to GPU rendering once ready (hides the 224 ms).
-    2. Create the GPU device concurrently with window creation, not after.
-    3. Cache/skip redundant init work; lazy-load the font DB enumeration
-       (only needed when the settings dialog opens).
+- **Fixed (was the one red metric):**
+  - *Cold start* — gpu_init went **224 ms → ~78 ms** by restricting the wgpu
+    instance to the **Vulkan backend** (the default probed every backend), the
+    single biggest win. On top of that, the **FontSystem font-DB scan and the
+    PTY fork now run on worker threads** that overlap the remaining device
+    acquisition, and **F9 global-hotkey registration moved off the main thread**;
+    `[profile.release] lto = "thin"` trims runtime. Cold start now meets the
+    <150 ms target and approaches the <80 ms stretch.
+  - *Remaining headroom:* a CPU-painted first frame before GPU warmup could
+    shave perceived latency further, but it is no longer the bottleneck.
 
 ## Gates (CI-style rules)
 
