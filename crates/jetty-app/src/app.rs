@@ -30,12 +30,28 @@ pub enum SummonEffect {
     Bayer,
     /// Phosphor Ignition — CRT-style power-on (descending scan + accent rim).
     Phosphor,
+    /// Liquid Drop — Tier-B radial refraction ring that samples the frame.
+    Liquid,
+    /// Focus Pull — Tier-B rack-focus blur + chromatic that samples the frame.
+    Focus,
 }
 
 impl SummonEffect {
     /// Cycle order for the ‹ / › settings buttons.
-    const ORDER: [SummonEffect; 3] =
-        [SummonEffect::None, SummonEffect::Bayer, SummonEffect::Phosphor];
+    const ORDER: [SummonEffect; 5] = [
+        SummonEffect::None,
+        SummonEffect::Bayer,
+        SummonEffect::Phosphor,
+        SummonEffect::Liquid,
+        SummonEffect::Focus,
+    ];
+
+    /// Whether this is a Tier-B effect: one that SAMPLES the rendered frame from
+    /// an offscreen texture (Liquid/Focus). Tier-A effects (None/Bayer/Phosphor)
+    /// render straight to the surface, so the normal hot path is untouched.
+    fn is_tier_b(self) -> bool {
+        matches!(self, SummonEffect::Liquid | SummonEffect::Focus)
+    }
 
     /// Animation duration in seconds for this effect.
     fn duration(self) -> f32 {
@@ -43,6 +59,8 @@ impl SummonEffect {
             SummonEffect::None => 0.0,
             SummonEffect::Bayer => 0.20,
             SummonEffect::Phosphor => 0.25,
+            SummonEffect::Liquid => 0.25,
+            SummonEffect::Focus => 0.25,
         }
     }
 
@@ -51,6 +69,8 @@ impl SummonEffect {
         match s {
             "none" => SummonEffect::None,
             "phosphor" => SummonEffect::Phosphor,
+            "liquid" => SummonEffect::Liquid,
+            "focus" => SummonEffect::Focus,
             _ => SummonEffect::Bayer, // unknown → Bayer
         }
     }
@@ -60,6 +80,8 @@ impl SummonEffect {
             SummonEffect::None => "none",
             SummonEffect::Bayer => "bayer",
             SummonEffect::Phosphor => "phosphor",
+            SummonEffect::Liquid => "liquid",
+            SummonEffect::Focus => "focus",
         }
     }
 
@@ -69,6 +91,8 @@ impl SummonEffect {
             SummonEffect::None => "None",
             SummonEffect::Bayer => "Bayer",
             SummonEffect::Phosphor => "Phosphor",
+            SummonEffect::Liquid => "Liquid",
+            SummonEffect::Focus => "Focus",
         }
     }
 
@@ -130,6 +154,16 @@ pub struct App {
     bayer_reveal: Option<jetty_render::BayerReveal>,
     /// Final-pass Phosphor Ignition reveal for the summon animation.
     phosphor: Option<jetty_render::PhosphorIgnition>,
+    /// Tier-B LiquidDrop summon effect (samples the offscreen frame).
+    liquid: Option<jetty_render::LiquidDrop>,
+    /// Tier-B FocusPull summon effect (samples the offscreen frame).
+    focus: Option<jetty_render::FocusPull>,
+    /// Surface-sized offscreen color texture used ONLY while a Tier-B effect is
+    /// summoning: the scene is rendered into this, then the effect samples it and
+    /// writes the displaced/blurred result to the surface. `None` until built in
+    /// `resumed`; re-created on `Resized`. The normal (Tier-A / no-summon) hot
+    /// path never touches it — it renders straight to the surface as before.
+    offscreen: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// The currently selected window-summon reveal effect.
     summon_effect: SummonEffect,
     /// Start instant of the active summon (crystallize) animation, or None when
@@ -346,6 +380,9 @@ impl App {
             corner_mask: None,
             bayer_reveal: None,
             phosphor: None,
+            liquid: None,
+            focus: None,
+            offscreen: None,
             summon_effect: SummonEffect::Bayer,
             summon_anim: None,
             corner_radius,
@@ -465,6 +502,28 @@ impl App {
         for tab in &mut self.tabs {
             tab.terminal.set_theme(t.clone());
         }
+    }
+
+    /// Allocate a surface-sized offscreen color texture (same format as the
+    /// surface) usable as a render target AND a sampled texture. Used ONLY by the
+    /// Tier-B summon effects, which render the scene into it then sample it.
+    fn make_offscreen(gpu: &GpuContext) -> (wgpu::Texture, wgpu::TextureView) {
+        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("summon-offscreen"),
+            size: wgpu::Extent3d {
+                width: gpu.config.width.max(1),
+                height: gpu.config.height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: gpu.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        (tex, view)
     }
 
     /// Compute the current grid (cols, rows) from the GPU surface size and cell
@@ -1288,6 +1347,11 @@ impl ApplicationHandler<AppEvent> for App {
             // lattice the instant the window appears.
             self.bayer_reveal = Some(jetty_render::BayerReveal::new(&g.device, g.format));
             self.phosphor = Some(jetty_render::PhosphorIgnition::new(&g.device, g.format));
+            // Tier-B effects + their surface-sized offscreen scene texture. The
+            // texture is allocated up front (cheap) but only WRITTEN/SAMPLED while
+            // a Tier-B effect is summoning; Tier-A and normal frames never use it.
+            self.liquid = Some(jetty_render::LiquidDrop::new(&g.device, g.format));
+            self.focus = Some(jetty_render::FocusPull::new(&g.device, g.format));
             self.summon_anim = Some(std::time::Instant::now());
         }
 
@@ -1295,6 +1359,10 @@ impl ApplicationHandler<AppEvent> for App {
         self.gpu = gpu;
         self.text = text;
         self.quad = quad;
+        // Allocate the Tier-B offscreen scene texture now that the GPU exists.
+        if let Some(g) = &self.gpu {
+            self.offscreen = Some(Self::make_offscreen(g));
+        }
 
         // Build the first tab with the derived grid size so the PTY and terminal
         // agree with the actual window layout. The on_data callback wakes the
@@ -1414,6 +1482,11 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 if let (Some(gpu), Some(text)) = (&self.gpu, &mut self.text) {
                     text.resize(gpu);
+                }
+                // Re-create the Tier-B offscreen scene texture at the new size so
+                // a later Tier-B summon samples a correctly-sized frame.
+                if let Some(gpu) = &self.gpu {
+                    self.offscreen = Some(Self::make_offscreen(gpu));
                 }
                 // Recompute grid to match the new surface size and notify PTY.
                 self.reflow();
@@ -2231,6 +2304,9 @@ impl ApplicationHandler<AppEvent> for App {
                 let corner_mask = self.corner_mask.as_ref();
                 let bayer_reveal = self.bayer_reveal.as_ref();
                 let phosphor = self.phosphor.as_ref();
+                let liquid = self.liquid.as_ref();
+                let focus = self.focus.as_ref();
+                let offscreen = self.offscreen.as_ref();
                 let summon_effect = self.summon_effect;
                 // Summon progress: t in [0,1) drives a reveal pass this frame and
                 // self-schedules the next; t>=1 ends the animation so we return to
@@ -2260,6 +2336,22 @@ impl ApplicationHandler<AppEvent> for App {
                     width, &tabs_meta, &theme, rename_ref, ctrl_hover,
                 );
                 if let Some((frame, view)) = gpu.acquire_frame() {
+                    // Tier-B routing: when a Liquid/Focus effect is ACTIVELY
+                    // summoning (t in [0,1)) AND the offscreen texture exists,
+                    // render the whole scene into the offscreen view; the effect
+                    // pass below then samples it and writes the displaced/blurred
+                    // result to the surface `view`. For Tier-A effects, the
+                    // no-summon idle path, and any frame without offscreen, this is
+                    // `&view` — so the normal hot path is byte-identical to before
+                    // (it never allocates or touches the offscreen texture).
+                    let tier_b_active = summon_effect.is_tier_b()
+                        && matches!(summon_t, Some(t) if t < 1.0)
+                        && offscreen.is_some();
+                    let scene_view: &wgpu::TextureView = if tier_b_active {
+                        &offscreen.as_ref().unwrap().1
+                    } else {
+                        &view
+                    };
                     // Pass 1: clear to the theme bg and paint per-cell background
                     // quads (reverse-video / colored backgrounds) UNDER the text.
                     // The grid's bg quads are offset down by the tab bar.
@@ -2270,7 +2362,7 @@ impl ApplicationHandler<AppEvent> for App {
                     quad.render_clear(
                         &gpu.device,
                         &gpu.queue,
-                        &view,
+                        scene_view,
                         width,
                         height,
                         &bg_rects,
@@ -2281,7 +2373,7 @@ impl ApplicationHandler<AppEvent> for App {
                     let _ = text.render_to(
                         &gpu.device,
                         &gpu.queue,
-                        &view,
+                        scene_view,
                         width,
                         height,
                         &snap,
@@ -2289,10 +2381,10 @@ impl ApplicationHandler<AppEvent> for App {
                         TABBAR_H,
                     );
                     // Pass 3: the tab bar (y 0..TABBAR_H) over the grid.
-                    quad.render(&gpu.device, &gpu.queue, &view, width, height, &bar.quads);
+                    quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &bar.quads);
                     if !bar.labels.is_empty() {
                         let _ = text.render_overlays(
-                            &gpu.device, &gpu.queue, &view, width, height, &bar.labels,
+                            &gpu.device, &gpu.queue, scene_view, width, height, &bar.labels,
                         );
                     }
                     // Pass 4: scrollbar (spans the grid area below the bar).
@@ -2302,16 +2394,16 @@ impl ApplicationHandler<AppEvent> for App {
                     {
                         rects.push(r);
                     }
-                    quad.render(&gpu.device, &gpu.queue, &view, width, height, &rects);
+                    quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &rects);
                     // Draw the right-click context menu on top of everything.
                     if let Some((mx, my)) = context_menu {
                         let menu = jetty_render::build_context_menu(mx, my, width, height, menu_hover, &theme);
-                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &menu.quads);
+                        quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &menu.quads);
                         if !menu.labels.is_empty() {
                             let _ = text.render_overlays(
                                 &gpu.device,
                                 &gpu.queue,
-                                &view,
+                                scene_view,
                                 width,
                                 height,
                                 &menu.labels,
@@ -2322,12 +2414,12 @@ impl ApplicationHandler<AppEvent> for App {
                     // else — a dim layer, a bordered panel, and the binding rows.
                     if help_open {
                         let help = jetty_render::build_help_overlay(width, height, &theme);
-                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &help.quads);
+                        quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &help.quads);
                         if !help.labels.is_empty() {
                             let _ = text.render_overlays(
                                 &gpu.device,
                                 &gpu.queue,
-                                &view,
+                                scene_view,
                                 width,
                                 height,
                                 &help.labels,
@@ -2340,20 +2432,20 @@ impl ApplicationHandler<AppEvent> for App {
                         let popup = jetty_render::build_confirm(
                             width, height, "Quit JeTTY? — all tabs will close", &theme,
                         );
-                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &popup.quads);
+                        quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &popup.quads);
                         if !popup.labels.is_empty() {
                             let _ = text.render_overlays(
-                                &gpu.device, &gpu.queue, &view, width, height, &popup.labels,
+                                &gpu.device, &gpu.queue, scene_view, width, height, &popup.labels,
                             );
                         }
                     } else if let Some(title) = &confirm_close {
                         let popup = jetty_render::build_confirm_close(width, height, title, &theme);
-                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &popup.quads);
+                        quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &popup.quads);
                         if !popup.labels.is_empty() {
                             let _ = text.render_overlays(
                                 &gpu.device,
                                 &gpu.queue,
-                                &view,
+                                scene_view,
                                 width,
                                 height,
                                 &popup.labels,
@@ -2362,22 +2454,27 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     // Final pass: round the window corners by zeroing alpha
                     // outside a rounded rect. No-op when radius == 0 (square).
+                    // Applied to `scene_view`: for Tier-A this is the surface; for a
+                    // Tier-B summon it's the offscreen frame, so the rounded corners
+                    // are baked in before the effect samples it.
                     if let Some(mask) = corner_mask {
                         mask.apply(
                             &gpu.device,
                             &gpu.queue,
-                            &view,
+                            scene_view,
                             width,
                             height,
                             corner_radius_px,
                         );
                     }
                     // Final-final pass: the selected summon reveal effect. After the
-                    // corner mask, run the per-effect pass at the current t. Passes
-                    // compose cleanly with the dst-multiply mask. At t>=1 the effect
-                    // is fully resolved (zero residue) and we stop the animation;
-                    // otherwise self-drive the next frame. None runs no pass but still
-                    // ends the animation at t>=1.
+                    // corner mask, run the per-effect pass at the current t. Tier-A
+                    // (Bayer/Phosphor) write straight to the surface and compose with
+                    // the dst-multiply mask. Tier-B (Liquid/Focus) SAMPLE the
+                    // offscreen scene (`scene_view`) and write the displaced/blurred
+                    // result to the surface `view`. At t>=1 every effect is fully
+                    // resolved (zero residue, identity blit) and we stop the
+                    // animation; otherwise self-drive the next frame.
                     if let Some(t) = summon_t {
                         if t < 1.0 {
                             match summon_effect {
@@ -2394,6 +2491,24 @@ impl ApplicationHandler<AppEvent> for App {
                                         ph.apply(
                                             &gpu.device, &gpu.queue, &view, width, height,
                                             corner_radius_px, t, summon_accent,
+                                        );
+                                    }
+                                }
+                                SummonEffect::Liquid => {
+                                    // tier_b_active guarantees scene_view is the
+                                    // offscreen frame here; sample it → surface.
+                                    if let (Some(lq), true) = (liquid, tier_b_active) {
+                                        lq.apply(
+                                            &gpu.device, &gpu.queue, &view, scene_view,
+                                            width, height, t,
+                                        );
+                                    }
+                                }
+                                SummonEffect::Focus => {
+                                    if let (Some(fc), true) = (focus, tier_b_active) {
+                                        fc.apply(
+                                            &gpu.device, &gpu.queue, &view, scene_view,
+                                            width, height, t,
                                         );
                                     }
                                 }

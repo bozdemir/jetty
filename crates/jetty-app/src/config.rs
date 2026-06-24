@@ -22,7 +22,8 @@ pub struct Config {
     pub font_family: String,
     /// Window corner radius in logical px (0..=24).
     pub corner_radius: f32,
-    /// Window-summon reveal effect: "none", "bayer", or "phosphor".
+    /// Window-summon reveal effect: "none", "bayer", "phosphor", "liquid", or
+    /// "focus" (the last two are Tier-B effects that sample the rendered frame).
     #[serde(default = "default_summon_effect")]
     pub summon_effect: String,
 }
