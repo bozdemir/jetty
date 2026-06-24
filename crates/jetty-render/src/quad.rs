@@ -415,6 +415,50 @@ pub fn cell_bg_rects(
     rects
 }
 
+/// Build a soft glow under the block cursor: a few concentric, low-alpha, heavily
+/// rounded accent-colored rects larger than the cell, stacked so they fake a
+/// blurred halo. `(left, top)` is the cursor block's top-left pixel position
+/// (already including any tab-bar offset); `cell_w`/`cell_h` is the glyph cell.
+/// `accent` is the theme accent/cursor RGB. Returns the rects in draw order
+/// (largest/faintest first) so they composite into a centered glow.
+///
+/// The glow is intentionally subtle (max alpha ~46/255) so it reads as a premium
+/// accent, never a distracting bloom. Returns an empty Vec for a degenerate cell.
+pub fn cursor_glow_rects(
+    left: f32,
+    top: f32,
+    cell_w: f32,
+    cell_h: f32,
+    accent: [u8; 3],
+) -> Vec<Rect> {
+    if cell_w <= 0.0 || cell_h <= 0.0 {
+        return Vec::new();
+    }
+    let cx = left + cell_w * 0.5;
+    let cy = top + cell_h * 0.5;
+    // Three stacked layers: each larger and fainter, centered on the cell, with a
+    // big corner radius so the rect reads as a soft rounded blob rather than a box.
+    let layers: [(f32, u8); 3] = [
+        (10.0, 18), // outermost, faintest
+        (6.0, 30),
+        (3.0, 46), // innermost, tightest to the block
+    ];
+    let mut rects = Vec::with_capacity(layers.len());
+    for (grow, alpha) in layers {
+        let w = cell_w + grow * 2.0;
+        let h = cell_h + grow * 2.0;
+        rects.push(Rect::rounded(
+            cx - w * 0.5,
+            cy - h * 0.5,
+            w,
+            h,
+            [accent[0], accent[1], accent[2], alpha],
+            (w.min(h)) * 0.5,
+        ));
+    }
+    rects
+}
+
 /// Compute the scrollbar thumb rectangle from raw geometry values.
 /// This is the canonical geometry computation shared by drawing and hit-testing.
 /// Returns `None` when `scroll_max == 0` (nothing to scroll).
@@ -462,4 +506,41 @@ pub fn scrollbar_rect(
         top_offset,
         thumb,
     )
+}
+
+#[cfg(test)]
+mod cursor_glow_tests {
+    use super::cursor_glow_rects;
+
+    #[test]
+    fn glow_is_centered_subtle_and_grows_outward() {
+        let (left, top, cw, ch) = (100.0, 200.0, 10.0, 22.0);
+        let accent = [120, 200, 255];
+        let rects = cursor_glow_rects(left, top, cw, ch, accent);
+        assert_eq!(rects.len(), 3, "expected three stacked glow layers");
+        let cx = left + cw * 0.5;
+        let cy = top + ch * 0.5;
+        let mut prev_w = f32::INFINITY;
+        for r in &rects {
+            // Each layer is centered on the cell center.
+            assert!(((r.x + r.w * 0.5) - cx).abs() < 1e-3);
+            assert!(((r.y + r.h * 0.5) - cy).abs() < 1e-3);
+            // Accent color, low alpha (subtle, never a harsh bloom).
+            assert_eq!([r.color[0], r.color[1], r.color[2]], accent);
+            assert!(r.color[3] <= 46, "glow must stay subtle, a={}", r.color[3]);
+            // Heavily rounded so it reads as a soft blob.
+            assert!(r.radius > 0.0);
+        }
+        // Layers are ordered largest (faintest) → smallest (tightest).
+        for r in &rects {
+            assert!(r.w <= prev_w + 1e-3);
+            prev_w = r.w;
+        }
+    }
+
+    #[test]
+    fn degenerate_cell_yields_no_glow() {
+        assert!(cursor_glow_rects(0.0, 0.0, 0.0, 10.0, [255, 255, 255]).is_empty());
+        assert!(cursor_glow_rects(0.0, 0.0, 10.0, 0.0, [255, 255, 255]).is_empty());
+    }
 }

@@ -164,6 +164,10 @@ pub struct App {
     /// Animated cursor pixel position (top-left of the block), eased toward the
     /// snapshot's target cell each frame. `None` until the first frame seeds it.
     cursor_anim: Option<CursorAnim>,
+    /// Whether the cursor was still gliding at the end of the last frame. Drives
+    /// the self-sustaining frame loop WITHOUT keeping it alive once the cursor is
+    /// at rest (cursor_anim stays `Some` while parked, so we can't key off that).
+    cursor_moving: bool,
 }
 
 /// State for the center-summon materialization. `Show` scales up from ~0.94 with
@@ -370,6 +374,7 @@ impl App {
             last_pos: None,
             summon: None,
             cursor_anim: None,
+            cursor_moving: false,
         };
         // Persisted user settings override the env-derived defaults (but env
         // vars still seed the initial values above, so an explicit JETTY_* can
@@ -818,12 +823,74 @@ impl App {
         }
     }
 
+    /// Advance the gliding block cursor toward its target cell and return the
+    /// animated top-left pixel position to draw it at this frame (already including
+    /// the tab-bar offset), plus whether it is still in motion.
+    ///
+    /// The cursor eases toward the target with an exponential (critically-damped)
+    /// time constant so it never overshoots. Large jumps — a cleared screen, a
+    /// big vertical move, or the first frame — SNAP instantly so a glide never
+    /// turns into a long distracting sweep. Returns `None` when the cursor is
+    /// hidden (DECTCEM / scrolled) so neither the block nor the glow is drawn.
+    fn update_cursor_glide(
+        &mut self,
+        snap: &jetty_core::GridSnapshot,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> Option<(f32, f32, bool)> {
+        let cursor_in_bounds =
+            snap.cursor_row < snap.rows && snap.cursor_col < snap.cols;
+        if !snap.cursor_visible || !cursor_in_bounds || cell_w <= 0.0 || cell_h <= 0.0 {
+            // Hidden: drop any glide state so the next show snaps to place.
+            self.cursor_anim = None;
+            return None;
+        }
+        let target_x = snap.cursor_col as f32 * cell_w;
+        let target_y = snap.cursor_row as f32 * cell_h + TABBAR_H;
+        let now = std::time::Instant::now();
+
+        // Snap on a large jump (screen clear, newline-to-col0, paging) so the
+        // glide stays a short local slide, never a long sweep across the screen.
+        // ~2.5 cells horizontally OR >1.5 rows vertically counts as "large".
+        let snap_threshold_x = cell_w * 2.5;
+        let snap_threshold_y = cell_h * 1.5;
+
+        match &mut self.cursor_anim {
+            None => {
+                // First sighting → place instantly.
+                self.cursor_anim = Some(CursorAnim { x: target_x, y: target_y, last: now });
+                Some((target_x, target_y, false))
+            }
+            Some(c) => {
+                let big_jump = (target_x - c.x).abs() > snap_threshold_x
+                    || (target_y - c.y).abs() > snap_threshold_y;
+                if big_jump {
+                    c.x = target_x;
+                    c.y = target_y;
+                    c.last = now;
+                    return Some((c.x, c.y, false));
+                }
+                let dt = (now - c.last).as_secs_f32();
+                c.last = now;
+                c.x = crate::anim::exp_approach(c.x, target_x, dt, CURSOR_GLIDE_TAU);
+                c.y = crate::anim::exp_approach(c.y, target_y, dt, CURSOR_GLIDE_TAU);
+                // Still moving until within a sub-pixel of the target.
+                let moving = (c.x - target_x).abs() > 0.25 || (c.y - target_y).abs() > 0.25;
+                if !moving {
+                    c.x = target_x;
+                    c.y = target_y;
+                }
+                Some((c.x, c.y, moving))
+            }
+        }
+    }
+
     /// Whether any UI animation is currently in-flight. When true, the
     /// RedrawRequested handler re-requests a redraw so the frame loop self-sustains
     /// until every animation settles; when false (the common idle case) the loop
     /// stops requesting frames and the app returns to ~0 CPU.
     fn animating(&self) -> bool {
-        self.summon.is_some() || self.cursor_anim.is_some()
+        self.summon.is_some() || self.cursor_moving
     }
 
     /// Toggle window visibility (F9 / Yakuake-style summon).
@@ -2208,6 +2275,16 @@ impl ApplicationHandler<AppEvent> for App {
                 // this (scale, alpha) + corner rounding; when `None` the frame goes
                 // straight to the surface (byte-identical to the pre-animation path).
                 let summon_xform: Option<(f32, f32)> = self.summon.as_ref().map(|s| s.transform());
+                // Advance the gliding cursor (before the mutable render borrow).
+                // Returns the eased pixel position + whether it's still moving;
+                // `None` means the cursor is hidden (no block, no glow). The accent
+                // color for the glow is the theme cursor color.
+                let (glow_cell_w, glow_cell_h) =
+                    self.text.as_ref().map(|t| t.cell_size()).unwrap_or((0.0, 0.0));
+                let cursor_glide = self.update_cursor_glide(&snap, glow_cell_w, glow_cell_h);
+                self.cursor_moving = cursor_glide.map(|(_, _, m)| m).unwrap_or(false);
+                let cursor_px: Option<(f32, f32)> = cursor_glide.map(|(x, y, _)| (x, y));
+                let cursor_accent = snap.cursor_rgb;
                 let corner_mask = self.corner_mask.as_ref();
                 let mut scene_composite = self.scene_composite.as_mut();
                 let (Some(gpu), Some(text), Some(quad)) =
@@ -2251,7 +2328,16 @@ impl ApplicationHandler<AppEvent> for App {
                     let (cell_w, cell_h) = text.cell_size();
                     let selection_bg = selection_bg_for(&theme);
                     let scrollbar_thumb = scrollbar_thumb_for(&theme);
-                    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, TABBAR_H, selection_bg);
+                    let mut bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, TABBAR_H, selection_bg);
+                    // Soft glow under the cursor: drawn after the cell backgrounds
+                    // (on top of them) but before the text/block (pass 2), so it
+                    // reads as a halo behind the gliding block. Skipped when the
+                    // cursor is hidden (cursor_px is None).
+                    if let Some((gx, gy)) = cursor_px {
+                        bg_rects.extend(jetty_render::cursor_glow_rects(
+                            gx, gy, cell_w, cell_h, cursor_accent,
+                        ));
+                    }
                     quad.render_clear(
                         &gpu.device,
                         &gpu.queue,
@@ -2262,8 +2348,9 @@ impl ApplicationHandler<AppEvent> for App {
                         jetty_render::default_bg_clear(&snap),
                     );
                     // Pass 2: draw glyphs on top of the painted background (load),
-                    // offset down by the tab bar height.
-                    let _ = text.render_to(
+                    // offset down by the tab bar height. The cursor block is drawn
+                    // at the eased glide position (cursor_px) when animating.
+                    let _ = text.render_to_ex(
                         &gpu.device,
                         &gpu.queue,
                         target,
@@ -2272,6 +2359,7 @@ impl ApplicationHandler<AppEvent> for App {
                         &snap,
                         false,
                         TABBAR_H,
+                        cursor_px,
                     );
                     // Pass 3: the tab bar (y 0..TABBAR_H) over the grid.
                     quad.render(&gpu.device, &gpu.queue, target, width, height, &bar.quads);

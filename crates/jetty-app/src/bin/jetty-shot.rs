@@ -206,7 +206,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ((terminal.theme().bg[1] as u16 + sel_accent[1] as u16 * 2) / 3) as u8,
         ((terminal.theme().bg[2] as u16 + sel_accent[2] as u16 * 2) / 3) as u8,
     ];
-    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, 0.0, sel_bg);
+    let mut bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, 0.0, sel_bg);
+
+    // --- Cursor mid-glide keyframe (JETTY_SHOT_CURSOR_FRAC=0..1) ---
+    // Interpolate the block cursor between two sample cells and draw the soft glow
+    // under it, so the gliding-cursor look is inspectable headlessly. The cursor
+    // starts at the snapshot cell and glides `frac` of the way toward a sample
+    // target a few cells to the right and one row down. With frac unset, the
+    // cursor renders at its snapshot cell (no override) exactly as before.
+    let cursor_override: Option<(f32, f32)> = std::env::var("JETTY_SHOT_CURSOR_FRAC")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .map(|frac| {
+            let frac = frac.clamp(0.0, 1.0);
+            // From the snapshot cell to a target +6 cols, +1 row (clamped to grid).
+            let from_x = snap.cursor_col as f32 * cell_w;
+            let from_y = snap.cursor_row as f32 * cell_h;
+            let to_col = (snap.cursor_col + 6).min(snap.cols.saturating_sub(1));
+            let to_row = (snap.cursor_row + 1).min(snap.rows.saturating_sub(1));
+            let to_x = to_col as f32 * cell_w;
+            let to_y = to_row as f32 * cell_h;
+            let x = from_x + (to_x - from_x) * frac;
+            let y = from_y + (to_y - from_y) * frac;
+            eprintln!("jetty-shot: cursor mid-glide frac={frac:.2} -> ({x:.1},{y:.1})");
+            (x, y)
+        });
+    if let Some((gx, gy)) = cursor_override {
+        bg_rects.extend(jetty_render::cursor_glow_rects(
+            gx, gy, cell_w, cell_h, snap.cursor_rgb,
+        ));
+    }
+
     quad.render_clear(
         &device,
         &queue,
@@ -218,7 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // --- Pass 2: render the grid text on top of the painted background (load) ---
-    text.render_to(&device, &queue, &view, width, height, &snap, false, 0.0)?;
+    text.render_to_ex(&device, &queue, &view, width, height, &snap, false, 0.0, cursor_override)?;
 
     // --- Draw scrollbar quad (and optionally the settings panel) over the text ---
     {

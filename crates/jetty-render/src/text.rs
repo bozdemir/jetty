@@ -206,6 +206,26 @@ impl TextLayer {
         clear: bool,
         top_offset: f32,
     ) -> Result<(), PrepareError> {
+        self.render_to_ex(device, queue, view, width, height, snapshot, clear, top_offset, None)
+    }
+
+    /// Like [`render_to`], but `cursor_px_override` (when `Some`) draws the block
+    /// cursor at an arbitrary pixel position `(left, top)` instead of snapping it
+    /// to its snapshot cell — used by the App to render the cursor mid-glide. The
+    /// position already includes any top offset. `cursor_visible` is still honored.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_to_ex(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        snapshot: &GridSnapshot,
+        clear: bool,
+        top_offset: f32,
+        cursor_px_override: Option<(f32, f32)>,
+    ) -> Result<(), PrepareError> {
         // Build per-cell color spans: one (&str slice, Attrs) pair per cell.
         // We build a single String containing all text, then collect borrowed slices from it.
         let mut text = String::new();
@@ -291,10 +311,16 @@ impl TextLayer {
             && snapshot.cursor_col < snapshot.cols;
         if snapshot.cursor_visible && cursor_in_bounds {
             let [cr, cg, cb] = snapshot.cursor_rgb;
+            // Glide override: the App passes the eased pixel position so the block
+            // animates between cells; without it the cursor snaps to its cell.
+            let (cur_left, cur_top) = cursor_px_override.unwrap_or((
+                snapshot.cursor_col as f32 * self.cell_w,
+                snapshot.cursor_row as f32 * self.cell_h + top_offset,
+            ));
             areas.push(TextArea {
                 buffer: &self.cursor_buffer,
-                left: snapshot.cursor_col as f32 * self.cell_w,
-                top: snapshot.cursor_row as f32 * self.cell_h + top_offset,
+                left: cur_left,
+                top: cur_top,
                 scale: 1.0,
                 bounds: win_bounds,
                 // Color::rgba is not available in this glyphon version; use rgb.
