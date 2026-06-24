@@ -129,6 +129,10 @@ pub struct App {
     /// top of everything in the main window; dismissed by Esc, the "?" button,
     /// or a click outside the panel.
     help_open: bool,
+    /// When `Some(i)`, a "Close this tab?" confirmation popup is open for tab `i`.
+    /// The × click / Ctrl+Shift+W / Ctrl+D set this instead of closing immediately;
+    /// Enter (or the Close button) confirms, Esc (or Cancel / click-outside) clears.
+    confirm_close: Option<usize>,
 }
 
 /// Which resize zone (if any) the cursor is over on the borderless main window.
@@ -289,6 +293,7 @@ impl App {
             last_strip_click: None,
             resize_cursor: ResizeZone::None,
             help_open: false,
+            confirm_close: None,
         };
         // Persisted user settings override the env-derived defaults (but env
         // vars still seed the initial values above, so an explicit JETTY_* can
@@ -1311,6 +1316,29 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 };
 
+                // --- Close-tab confirmation popup is modal (highest priority) ---
+                // Clicking Close confirms; Cancel or anywhere outside the panel
+                // cancels. Either way the click is fully consumed.
+                if let Some(i) = self.confirm_close {
+                    let cx = self.cursor.0 as f32;
+                    let cy = self.cursor.1 as f32;
+                    let title = self.tabs.get(i).map(|t| t.title.clone()).unwrap_or_default();
+                    let popup = jetty_render::build_confirm_close(w, h, &title);
+                    if input::point_in(&popup.close_rect, cx, cy) {
+                        self.confirm_close = None;
+                        self.close_tab(i, event_loop);
+                    } else if input::point_in(&popup.cancel_rect, cx, cy)
+                        || !input::point_in(&popup.panel, cx, cy)
+                    {
+                        // Cancel button or click-outside cancels.
+                        self.confirm_close = None;
+                    }
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
                 // --- Context menu hit-test (consume the click entirely) ---
                 if let Some((mx, my)) = self.context_menu.take() {
                     self.menu_hover = None;
@@ -1449,7 +1477,11 @@ impl ApplicationHandler<AppEvent> for App {
                         .position(|r| input::point_in(r, cx, cy))
                     {
                         self.commit_rename();
-                        self.close_tab(i, event_loop);
+                        // Ask before closing instead of closing immediately.
+                        self.confirm_close = Some(i);
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
                         return;
                     }
                     if input::point_in(&bar.plus_rect, cx, cy) {
@@ -1662,6 +1694,29 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                // --- Close-tab confirmation popup captures Enter / Esc ---
+                // While the popup is open it is modal: Enter confirms the close,
+                // Esc cancels. Both are fully consumed so they never reach the
+                // shell, close the help, or fall through to other handlers.
+                if let Some(i) = self.confirm_close {
+                    use winit::keyboard::{Key, NamedKey};
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => {
+                            self.confirm_close = None;
+                            self.close_tab(i, event_loop);
+                            return;
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.confirm_close = None;
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        // Swallow every other key while the popup is open.
+                        _ => return,
+                    }
+                }
                 // --- Inline tab rename captures all keys ---
                 // While renaming, keys edit the title buffer and never reach the
                 // PTY: printable chars append, Backspace pops, Enter commits,
@@ -1771,7 +1826,11 @@ impl ApplicationHandler<AppEvent> for App {
                         self.new_tab();
                     }
                     input::KeyAction::CloseTab => {
-                        self.close_tab(self.active, event_loop);
+                        // Ask before closing instead of closing immediately.
+                        self.confirm_close = Some(self.active);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
                     }
                     input::KeyAction::NextTab => {
                         self.switch_tab(true);
@@ -1875,6 +1934,9 @@ impl ApplicationHandler<AppEvent> for App {
                 let context_menu = self.context_menu;
                 let menu_hover = self.menu_hover;
                 let help_open = self.help_open;
+                let confirm_close: Option<String> = self
+                    .confirm_close
+                    .and_then(|i| self.tabs.get(i).map(|t| t.title.clone()));
                 let rename_state: Option<(usize, String)> =
                     self.renaming.map(|i| (i, self.rename_buf.clone()));
                 // Corner-mask inputs captured before the mutable render borrows.
@@ -1966,6 +2028,22 @@ impl ApplicationHandler<AppEvent> for App {
                                 width,
                                 height,
                                 &help.labels,
+                            );
+                        }
+                    }
+                    // Draw the close-tab confirmation popup on top of everything
+                    // (above the help overlay): dim + bordered panel + buttons.
+                    if let Some(title) = &confirm_close {
+                        let popup = jetty_render::build_confirm_close(width, height, title);
+                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &popup.quads);
+                        if !popup.labels.is_empty() {
+                            let _ = text.render_overlays(
+                                &gpu.device,
+                                &gpu.queue,
+                                &view,
+                                width,
+                                height,
+                                &popup.labels,
                             );
                         }
                     }

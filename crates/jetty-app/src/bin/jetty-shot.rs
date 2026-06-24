@@ -298,6 +298,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("jetty-shot: JETTY_SHOT_TABBAR rendered 3 sample tabs (rounded + bordered)");
         }
 
+        // JETTY_SHOT_CONFIRM — render the "Close this tab?" confirmation popup.
+        if std::env::var("JETTY_SHOT_CONFIRM").is_ok() {
+            let popup = jetty_render::build_confirm_close(width, height, "Tab 2");
+            rects.extend(popup.quads);
+            panel_labels.extend(popup.labels);
+        }
+
         quad.render(&device, &queue, &view, width, height, &rects);
 
         // Render panel text labels on top of the panel quads.

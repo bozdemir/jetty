@@ -1,0 +1,114 @@
+use crate::Rect;
+
+/// Geometry + draw data for the "Close this tab?" confirmation popup. Reuses the
+/// overlay/panel visual style (full-screen dim + bordered rounded panel) and
+/// exposes clickable Close / Cancel button rects.
+pub struct ConfirmPopup {
+    /// Quads in draw order: full-screen dim, border, background panel, buttons.
+    pub quads: Vec<Rect>,
+    /// Text labels: (text, x, y, rgb).
+    pub labels: Vec<(String, f32, f32, [u8; 3])>,
+    /// The panel rect (for hit-testing "click outside cancels").
+    pub panel: Rect,
+    /// The "Enter — Close" button rect (confirm).
+    pub close_rect: Rect,
+    /// The "Esc — Cancel" button rect (cancel).
+    pub cancel_rect: Rect,
+}
+
+/// Build a centered confirmation popup asking whether to close the tab titled
+/// `title`, for a window of `win_w`×`win_h` physical pixels.
+pub fn build_confirm_close(win_w: u32, win_h: u32, title: &str) -> ConfirmPopup {
+    let sw = win_w as f32;
+    let sh = win_h as f32;
+
+    const CHAR_W: f32 = 9.8;
+    const PAD: f32 = 20.0;
+    const RADIUS: f32 = 8.0;
+    const BTN_H: f32 = 30.0;
+    const BTN_GAP: f32 = 16.0;
+
+    // The two button labels (kept for width sizing + drawing).
+    let close_label = "Enter — Close";
+    let cancel_label = "Esc — Cancel";
+
+    // Truncate the title for the prompt so it never overflows the popup.
+    let shown_title: String = if title.chars().count() > 28 {
+        let t: String = title.chars().take(27).collect();
+        format!("{t}…")
+    } else {
+        title.to_string()
+    };
+    let prompt = format!("Close tab \"{shown_title}\"?");
+
+    // Width fits the widest line (prompt, or the two buttons side by side).
+    let btn_close_w = close_label.chars().count() as f32 * CHAR_W + 20.0;
+    let btn_cancel_w = cancel_label.chars().count() as f32 * CHAR_W + 20.0;
+    let buttons_w = btn_close_w + BTN_GAP + btn_cancel_w;
+    let prompt_w = prompt.chars().count() as f32 * CHAR_W;
+    let content_w = prompt_w.max(buttons_w);
+    let panel_w = (content_w + PAD * 2.0).min((sw - 32.0).max(0.0)).max(content_w + 12.0);
+
+    // Height: pad + prompt line + gap + buttons + pad.
+    let panel_h = PAD + 28.0 + 18.0 + BTN_H + PAD;
+
+    let px = ((sw - panel_w) / 2.0).max(0.0).floor();
+    let py = ((sh - panel_h) / 2.0).max(0.0).floor();
+
+    let mut quads: Vec<Rect> = Vec::new();
+    // Full-screen dim.
+    quads.push(Rect { x: 0.0, y: 0.0, w: sw, h: sh, color: [0, 0, 0, 150], ..Default::default() });
+    // Border (rounded).
+    quads.push(Rect::rounded(
+        px - 2.0, py - 2.0, panel_w + 4.0, panel_h + 4.0,
+        [80, 80, 110, 255], RADIUS + 2.0,
+    ));
+    // Background panel (rounded).
+    let panel = Rect::rounded(px, py, panel_w, panel_h, [26, 26, 34, 245], RADIUS);
+    quads.push(panel);
+
+    let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
+    // Prompt line.
+    labels.push((prompt, px + PAD, py + PAD, [235, 235, 245]));
+
+    // Buttons row, centered horizontally within the panel.
+    let btn_y = py + panel_h - PAD - BTN_H;
+    let total_btn_w = btn_close_w + BTN_GAP + btn_cancel_w;
+    let btn_x0 = px + (panel_w - total_btn_w) / 2.0;
+    let close_rect = Rect::rounded(btn_x0, btn_y, btn_close_w, BTN_H, [60, 110, 70, 255], 5.0);
+    let cancel_x = btn_x0 + btn_close_w + BTN_GAP;
+    let cancel_rect = Rect::rounded(cancel_x, btn_y, btn_cancel_w, BTN_H, [70, 70, 88, 255], 5.0);
+    quads.push(close_rect);
+    quads.push(cancel_rect);
+
+    labels.push((close_label.to_string(), btn_x0 + 10.0, btn_y + 8.0, [230, 240, 230]));
+    labels.push((cancel_label.to_string(), cancel_x + 10.0, btn_y + 8.0, [220, 220, 230]));
+
+    ConfirmPopup { quads, labels, panel, close_rect, cancel_rect }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_is_centered_and_has_buttons() {
+        let p = build_confirm_close(1000, 700, "Tab 1");
+        assert!(p.panel.x >= 0.0 && p.panel.y >= 0.0);
+        assert!(p.panel.x + p.panel.w <= 1000.0 + 0.5);
+        // Close button sits left of Cancel.
+        assert!(p.close_rect.x < p.cancel_rect.x);
+        // The prompt mentions the tab title.
+        assert!(p.labels.iter().any(|l| l.0.contains("Tab 1")));
+    }
+
+    #[test]
+    fn long_title_is_truncated() {
+        let long = "a".repeat(80);
+        let p = build_confirm_close(1000, 700, &long);
+        let prompt = &p.labels[0].0;
+        assert!(prompt.contains('…'), "long title should be truncated: {prompt}");
+        // Panel still fits the window width.
+        assert!(p.panel.x + p.panel.w <= 1000.0 + 0.5);
+    }
+}
