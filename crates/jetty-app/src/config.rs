@@ -22,6 +22,13 @@ pub struct Config {
     pub font_family: String,
     /// Window corner radius in logical px (0..=24).
     pub corner_radius: f32,
+    /// Window-summon reveal effect: "none", "bayer", or "phosphor".
+    #[serde(default = "default_summon_effect")]
+    pub summon_effect: String,
+}
+
+fn default_summon_effect() -> String {
+    "bayer".to_string()
 }
 
 impl Default for Config {
@@ -32,6 +39,7 @@ impl Default for Config {
             font_size: 16.0,
             font_family: "MesloLGS NF".to_string(),
             corner_radius: 10.0,
+            summon_effect: default_summon_effect(),
         }
     }
 }
@@ -83,6 +91,15 @@ mod tests {
         assert_eq!(c.font_size, 16.0);
         assert_eq!(c.font_family, "MesloLGS NF");
         assert_eq!(c.corner_radius, 10.0);
+        assert_eq!(c.summon_effect, "bayer");
+    }
+
+    #[test]
+    fn missing_summon_effect_defaults_to_bayer() {
+        // An older config without a summon_effect key still loads (serde default).
+        let toml = "theme = \"dracula\"\nopacity = 1.0\nfont_size = 16.0\nfont_family = \"MesloLGS NF\"\ncorner_radius = 10.0\n";
+        let c: Config = toml::from_str(toml).expect("deserialize");
+        assert_eq!(c.summon_effect, "bayer");
     }
 
     #[test]
@@ -93,6 +110,7 @@ mod tests {
             font_size: 18.0,
             font_family: "Fira Code".to_string(),
             corner_radius: 6.0,
+            summon_effect: "phosphor".to_string(),
         };
         let s = toml::to_string_pretty(&c).expect("serialize");
         let back: Config = toml::from_str(&s).expect("deserialize");
@@ -110,6 +128,7 @@ mod tests {
             font_size: 14.0,
             font_family: "MesloLGS NF".to_string(),
             corner_radius: 12.0,
+            summon_effect: "none".to_string(),
         };
         std::fs::write(&path, toml::to_string_pretty(&c).unwrap()).unwrap();
         let s = std::fs::read_to_string(&path).unwrap();

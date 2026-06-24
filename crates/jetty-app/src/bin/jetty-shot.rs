@@ -266,6 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mono_families.first().map(String::as_str).unwrap_or(""),
                 0,
                 panel_radius,
+                std::env::var("JETTY_SHOT_PANEL_EFFECT").unwrap_or_else(|_| "Bayer".to_string()).as_str(),
                 panel_dx,
                 panel_dy,
                 terminal.theme(),
@@ -340,9 +341,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(t) = std::env::var("JETTY_SHOT_SUMMON_T").ok().and_then(|s| s.parse::<f32>().ok()) {
         eprintln!("jetty-shot: applying Bayer crystallize reveal (GPU pass, t={t})");
         let bayer = jetty_render::BayerReveal::new(&device, format);
+        bayer.apply(&device, &queue, &view, width, height, t);
+    }
+
+    // --- Phosphor Ignition summon reveal (JETTY_SHOT_PHOSPHOR_T) ---
+    // Run the REAL GPU pass on the offscreen view so this harness validates the
+    // actual two-pass pipeline + 32-byte uniform binding headlessly. Uses a
+    // sample accent (the theme's blue) and the corner radius (JETTY_CORNER_RADIUS,
+    // default 16 for a visible rounded rim) so the rim traces the rounded corners.
+    if let Some(t) = std::env::var("JETTY_SHOT_PHOSPHOR_T").ok().and_then(|s| s.parse::<f32>().ok()) {
+        let radius = std::env::var("JETTY_CORNER_RADIUS")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(16.0);
+        eprintln!("jetty-shot: applying Phosphor Ignition reveal (GPU pass, t={t}, radius={radius})");
+        let phosphor = jetty_render::PhosphorIgnition::new(&device, format);
         let a = terminal.theme().palette[4];
         let accent = [a[0] as f32 / 255.0, a[1] as f32 / 255.0, a[2] as f32 / 255.0];
-        bayer.apply(&device, &queue, &view, width, height, t, accent);
+        phosphor.apply(&device, &queue, &view, width, height, radius, t, accent);
     }
 
     // --- Read back to CPU ---
@@ -435,7 +451,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The rendered texture uses premultiplied alpha (the clear color is already
     // premultiplied in text.rs).  We un-premultiply before blending onto the
     // checkerboard, then output an opaque RGBA PNG.
-    let summon_active = std::env::var("JETTY_SHOT_SUMMON_T").is_ok();
+    let summon_active = std::env::var("JETTY_SHOT_SUMMON_T").is_ok()
+        || std::env::var("JETTY_SHOT_PHOSPHOR_T").is_ok();
     let composited = if bg_alpha < 255 || corner_radius > 0.0 || summon_active {
         eprintln!("jetty-shot: compositing over checkerboard (bg alpha={})", bg_alpha);
         const TILE: u32 = 16;

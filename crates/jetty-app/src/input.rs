@@ -227,6 +227,10 @@ pub enum MouseAction {
     FontScrollUp,
     /// User clicked the ▼ font-list scroll button — scroll down (offset+1).
     FontScrollDown,
+    /// User clicked the summon-effect "‹" button — cycle to the previous effect.
+    SummonPrev,
+    /// User clicked the summon-effect "›" button — cycle to the next effect.
+    SummonNext,
     /// User pressed on the title bar (not on any widget) — start dialog drag.
     StartDialogDrag,
     /// User clicked inside the panel but not on any widget — swallow the event.
@@ -294,6 +298,13 @@ pub fn decide_mouse_press(
         }
         if point_in(&g.font_scroll_down, cx, cy) {
             return MouseAction::FontScrollDown;
+        }
+        // Summon-effect cycle buttons.
+        if point_in(&g.summon_prev, cx, cy) {
+            return MouseAction::SummonPrev;
+        }
+        if point_in(&g.summon_next, cx, cy) {
+            return MouseAction::SummonNext;
         }
         // Font-family list rows.
         for (i, row) in g.font_rows.iter().enumerate() {

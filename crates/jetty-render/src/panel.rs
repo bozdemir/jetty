@@ -28,6 +28,10 @@ pub struct PanelGeom {
     pub radius_track: Rect,
     /// Corner-radius slider handle.
     pub radius_handle: Rect,
+    /// Summon-effect "‹" (previous) cycle button.
+    pub summon_prev: Rect,
+    /// Summon-effect "›" (next) cycle button.
+    pub summon_next: Rect,
 }
 
 /// Full description of how to draw the settings panel for one frame.
@@ -64,6 +68,7 @@ pub fn build_panel(
     selected_family: &str,
     font_scroll_offset: usize,
     corner_radius: f32,
+    summon_effect_name: &str,
     dx: f32,
     dy: f32,
     theme: &jetty_core::Theme,
@@ -121,14 +126,15 @@ pub fn build_panel(
     //                    slider track h=6 → bottom py+90; handle h=18 → bottom py+96
     //  py+108 .. py+156  Corner-radius band  (label at py+108, track at py+144)
     //                    track h=6 → bottom py+150; handle h=18 → bottom py+156
-    //  py+168 .. py+216  Font-size band  (label at py+168, buttons at py+188, btn h=28 → bottom py+216)
-    //  py+228 .. py+236  "Font" section header label
-    //  py+250 ..         Font-family list rows (5×(22+2)=120px → bottom py+370)
-    //  py+382            "Theme" label (12px gap after list bottom)
-    //  py+402            Theme chips (h=36 → bottom py+438)
-    //  PANEL_H = 438 + 18 = 456
+    //  py+168 .. py+204  Summon-effect band  (label at py+168, ‹ name › row at py+188, h=28 → bottom py+216)
+    //  py+216 .. py+264  Font-size band  (label at py+216, buttons at py+236, btn h=28 → bottom py+264)
+    //  py+276 .. py+284  "Font" section header label
+    //  py+298 ..         Font-family list rows (5×(22+2)=120px → bottom py+418)
+    //  py+430            "Theme" label (12px gap after list bottom)
+    //  py+450            Theme chips (h=36 → bottom py+486)
+    //  PANEL_H = 486 + 18 = 504
 
-    const PANEL_H: f32 = 456.0;
+    const PANEL_H: f32 = 504.0;
 
     // Center, then apply the user drag offset, then clamp to screen edges.
     let sw = screen_w as f32;
@@ -176,9 +182,17 @@ pub fn build_panel(
     let radius_handle_x = px + 16.0 + r_frac * (348.0 - 14.0);
     let radius_handle = Rect::rounded(radius_handle_x, py + 138.0, 14.0, 18.0, accent_col, 4.0);
 
-    // --- Font-size band (py+168 .. py+216) ---
-    // Label at py+168; "Npt" readout at py+194; buttons at py+188 (h=28 → bottom py+216).
-    let font_btn_y = py + 188.0;
+    // --- Summon-effect band (py+168 .. py+216) ---
+    // Label at py+168; ‹ / › cycle buttons at py+188 (h=28); effect name between them.
+    let summon_btn_y = py + 188.0;
+    let summon_prev_x = px + 200.0;
+    let summon_next_x = px + PANEL_W - 16.0 - 28.0; // rightmost
+    let summon_prev = Rect::rounded(summon_prev_x, summon_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let summon_next = Rect::rounded(summon_next_x, summon_btn_y, 28.0, 28.0, btn_fill, 4.0);
+
+    // --- Font-size band (py+216 .. py+264) ---
+    // Label at py+216; "Npt" readout at py+242; buttons at py+236 (h=28 → bottom py+264).
+    let font_btn_y = py + 236.0;
     let font_minus_x = px + 200.0;
     let font_plus_x  = font_minus_x + 36.0;
     let font_reset_x = font_plus_x  + 36.0;
@@ -187,21 +201,21 @@ pub fn build_panel(
     let font_plus = Rect::rounded(font_plus_x, font_btn_y, 28.0, 28.0, btn_fill, 4.0);
     let font_reset = Rect::rounded(font_reset_x, font_btn_y, 44.0, 28.0, btn_fill, 4.0);
 
-    // --- Font scroll buttons (▲ / ▼) in the "Font" header row at py+228 ---
+    // --- Font scroll buttons (▲ / ▼) in the "Font" header row at py+276 ---
     // Two 20×20 buttons placed at the right side of the header row.
-    let scroll_btn_y = py + 226.0;
+    let scroll_btn_y = py + 274.0;
     let scroll_down_x = px + PANEL_W - 16.0 - 20.0;        // ▼ rightmost
     let scroll_up_x   = scroll_down_x - 24.0;               // ▲ left of ▼
     let font_scroll_up = Rect::rounded(scroll_up_x, scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
     let font_scroll_down = Rect::rounded(scroll_down_x, scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
 
-    // --- Font-family list (py+250 .. py+370) ---
-    // "Font" header at py+228; list rows start at py+250.
-    // 5 rows × (22px row + 2px gap) = 120px → list bottom = py+370.
-    // Theme label at py+382 (12px gap); chips at py+402.
+    // --- Font-family list (py+298 .. py+418) ---
+    // "Font" header at py+276; list rows start at py+298.
+    // 5 rows × (22px row + 2px gap) = 120px → list bottom = py+418.
+    // Theme label at py+430 (12px gap); chips at py+450.
     const ROW_H: f32 = 22.0;
     const ROW_GAP: f32 = 2.0;
-    let list_top = py + 250.0;
+    let list_top = py + 298.0;
     let list_x = px + 16.0;
     let list_w = PANEL_W - 32.0;
 
@@ -217,12 +231,12 @@ pub fn build_panel(
         font_row_rects.push(Rect::rounded(list_x, row_y, list_w, ROW_H, row_color, 3.0));
     }
 
-    // --- Theme chips (py+402 .. py+438) ---
-    // "Theme" label at py+382; chips at py+402 (h=36 → bottom py+438).
+    // --- Theme chips (py+450 .. py+486) ---
+    // "Theme" label at py+430; chips at py+450 (h=36 → bottom py+486).
     let presets = jetty_core::theme::PRESETS;
     let num_presets = presets.len(); // should be 4
 
-    let chip_top = py + 402.0;
+    let chip_top = py + 450.0;
     let mut chip_rects: Vec<Rect> = Vec::with_capacity(num_presets);
     for i in 0..num_presets {
         let chip_x = px + 16.0 + i as f32 * 88.0;
@@ -240,6 +254,10 @@ pub fn build_panel(
     quads.push(dim_rect);
     quads.push(border_rect);
     quads.push(bg_rect);
+
+    // Summon-effect cycle buttons.
+    quads.push(summon_prev);
+    quads.push(summon_next);
 
     // Font-size buttons.
     quads.push(font_minus);
@@ -296,15 +314,28 @@ pub fn build_panel(
         text_dim,
     ));
 
-    // Font-size section header (band top at py+168).
-    labels.push(("Font size".to_string(), px + 16.0, py + 168.0, text_dim));
+    // Summon-effect section (band top at py+168).
+    labels.push(("Summon effect".to_string(), px + 16.0, py + 168.0, text_dim));
+    // Effect name centered between the ‹ / › buttons.
+    labels.push((
+        summon_effect_name.to_string(),
+        summon_prev_x + 40.0,
+        summon_btn_y + 6.0,
+        text_main,
+    ));
+    // Cycle button labels (‹ / ›).
+    labels.push(("<".to_string(), summon_prev_x + 9.0, summon_btn_y + 6.0, text_btn));
+    labels.push((">".to_string(), summon_next_x + 9.0, summon_btn_y + 6.0, text_btn));
+
+    // Font-size section header (band top at py+216).
+    labels.push(("Font size".to_string(), px + 16.0, py + 216.0, text_dim));
 
     // Current font-size readout aligned with buttons.
     let fs_display = font_size.round() as i32;
     labels.push((
         format!("{}pt", fs_display),
         px + 140.0,
-        py + 194.0,
+        py + 242.0,
         text_main,
     ));
 
@@ -313,8 +344,8 @@ pub fn build_panel(
     labels.push(("+".to_string(),  font_plus_x  + 8.0,  font_btn_y + 6.0,  text_btn));
     labels.push(("rst".to_string(), font_reset_x + 6.0, font_btn_y + 6.0,  text_btn));
 
-    // Font-family section header (at py+228; list starts at py+250).
-    labels.push(("Font".to_string(), px + 16.0, py + 228.0, text_dim));
+    // Font-family section header (at py+276; list starts at py+298).
+    labels.push(("Font".to_string(), px + 16.0, py + 276.0, text_dim));
 
     // Scroll button labels (▲ / ▼).
     labels.push(("^".to_string(), scroll_up_x   + 6.0, scroll_btn_y + 4.0, text_btn));
@@ -349,11 +380,11 @@ pub fn build_panel(
         // Place the "(shown/total)" hint to the LEFT of the ▲/▼ buttons
         // (which sit at px+PANEL_W-60..) so the count and the arrows never overlap.
         let hint = format!("({}/{})", offset + visible_count, families.len());
-        labels.push((hint, px + PANEL_W - 132.0, py + 228.0, text_dim));
+        labels.push((hint, px + PANEL_W - 132.0, py + 276.0, text_dim));
     }
 
-    // Theme section label (at py+382; 12px gap after list bottom py+370).
-    labels.push(("Theme".to_string(), px + 16.0, py + 382.0, text_dim));
+    // Theme section label (at py+430; 12px gap after list bottom py+418).
+    labels.push(("Theme".to_string(), px + 16.0, py + 430.0, text_dim));
 
     // Chip name labels.
     for i in 0..num_presets {
@@ -395,6 +426,8 @@ pub fn build_panel(
         font_scroll_down,
         radius_track,
         radius_handle,
+        summon_prev,
+        summon_next,
     };
 
     PanelView { quads, labels, geom }

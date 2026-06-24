@@ -18,6 +18,69 @@ pub enum AppEvent {
     ToggleVisibility,
 }
 
+/// Window-summon reveal effect, selectable in Settings and persisted in config.
+/// A clean dispatch a follow-up can extend with Tier-B (offscreen-texture)
+/// effects. Each variant is self-contained — our own wgpu/WGSL, no
+/// desktop-environment / compositor / OS-specific code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummonEffect {
+    /// No reveal — the window simply appears (animation ends immediately).
+    None,
+    /// Bayer Crystallize — the original subtle 1px ordered-dither reveal.
+    Bayer,
+    /// Phosphor Ignition — CRT-style power-on (descending scan + accent rim).
+    Phosphor,
+}
+
+impl SummonEffect {
+    /// Cycle order for the ‹ / › settings buttons.
+    const ORDER: [SummonEffect; 3] =
+        [SummonEffect::None, SummonEffect::Bayer, SummonEffect::Phosphor];
+
+    /// Animation duration in seconds for this effect.
+    fn duration(self) -> f32 {
+        match self {
+            SummonEffect::None => 0.0,
+            SummonEffect::Bayer => 0.20,
+            SummonEffect::Phosphor => 0.25,
+        }
+    }
+
+    /// Config string ↔ enum.
+    fn from_config(s: &str) -> SummonEffect {
+        match s {
+            "none" => SummonEffect::None,
+            "phosphor" => SummonEffect::Phosphor,
+            _ => SummonEffect::Bayer, // unknown → Bayer
+        }
+    }
+
+    fn to_config(self) -> &'static str {
+        match self {
+            SummonEffect::None => "none",
+            SummonEffect::Bayer => "bayer",
+            SummonEffect::Phosphor => "phosphor",
+        }
+    }
+
+    /// Display name shown in the settings selector.
+    fn display_name(self) -> &'static str {
+        match self {
+            SummonEffect::None => "None",
+            SummonEffect::Bayer => "Bayer",
+            SummonEffect::Phosphor => "Phosphor",
+        }
+    }
+
+    /// The next/previous effect in cycle order (wraps).
+    fn cycle(self, forward: bool) -> SummonEffect {
+        let i = Self::ORDER.iter().position(|&e| e == self).unwrap_or(1);
+        let n = Self::ORDER.len();
+        let j = if forward { (i + 1) % n } else { (i + n - 1) % n };
+        Self::ORDER[j]
+    }
+}
+
 /// Default logical (device-independent) font size in points. This is the value
 /// used when the user resets the font size with Ctrl+0 and on first launch.
 /// Scaled by the display's scale_factor before being passed to TextLayer so
@@ -44,10 +107,10 @@ struct Tab {
 }
 
 /// Logical size of the separate Settings window. Sized to exactly fit the panel
-/// (`build_panel` uses PANEL_W=380 × PANEL_H=456 plus a 2px border on each side)
+/// (`build_panel` uses PANEL_W=380 × PANEL_H=504 plus a 2px border on each side)
 /// so the panel fills the window with no margin and the OS frame handles moving.
 const SETTINGS_WIN_W: u32 = 384;
-const SETTINGS_WIN_H: u32 = 460;
+const SETTINGS_WIN_H: u32 = 508;
 
 pub struct App {
     proxy: EventLoopProxy<AppEvent>,
@@ -65,6 +128,10 @@ pub struct App {
     corner_mask: Option<jetty_render::CornerMask>,
     /// Final-pass Bayer crystallize reveal for the summon animation.
     bayer_reveal: Option<jetty_render::BayerReveal>,
+    /// Final-pass Phosphor Ignition reveal for the summon animation.
+    phosphor: Option<jetty_render::PhosphorIgnition>,
+    /// The currently selected window-summon reveal effect.
+    summon_effect: SummonEffect,
     /// Start instant of the active summon (crystallize) animation, or None when
     /// idle. While Some, the redraw loop self-drives frames; None = idle 0 CPU.
     summon_anim: Option<std::time::Instant>,
@@ -278,6 +345,8 @@ impl App {
             quad: None,
             corner_mask: None,
             bayer_reveal: None,
+            phosphor: None,
+            summon_effect: SummonEffect::Bayer,
             summon_anim: None,
             corner_radius,
             tabs: Vec::new(),
@@ -328,6 +397,7 @@ impl App {
         app.font_logical = cfg.font_size.clamp(6.0, 48.0);
         app.font_family = cfg.font_family;
         app.corner_radius = cfg.corner_radius.clamp(0.0, 24.0);
+        app.summon_effect = SummonEffect::from_config(&cfg.summon_effect);
 
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -345,8 +415,28 @@ impl App {
             font_size: self.font_logical,
             font_family: self.font_family.clone(),
             corner_radius: self.corner_radius,
+            summon_effect: self.summon_effect.to_config().to_string(),
         }
         .save();
+    }
+
+    /// Select a new window-summon reveal effect: persist it, fire a one-shot
+    /// PREVIEW summon on the main window so the user immediately SEES the effect,
+    /// and redraw the settings window so the new effect name shows.
+    fn set_summon_effect(&mut self, effect: SummonEffect) {
+        if self.summon_effect == effect {
+            return;
+        }
+        self.summon_effect = effect;
+        self.persist();
+        // One-shot preview on the main window (self-driving loop handles idle-0).
+        self.summon_anim = Some(std::time::Instant::now());
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        if let Some(w) = &self.settings_window {
+            w.request_redraw();
+        }
     }
 
     /// The active tab. Panics if `tabs` is empty, which only happens before
@@ -851,7 +941,7 @@ impl App {
         jetty_render::build_panel(
             w, h, self.opacity, self.theme_idx, self.font_logical,
             &self.font_families, &self.font_family, self.font_scroll_offset,
-            self.corner_radius, 0.0, 0.0, &theme,
+            self.corner_radius, self.summon_effect.display_name(), 0.0, 0.0, &theme,
         )
     }
 
@@ -874,9 +964,10 @@ impl App {
         };
         let width = gpu.config.width;
         let height = gpu.config.height;
+        let summon_name = self.summon_effect.display_name();
         let pv = jetty_render::build_panel(
             width, height, opacity, theme_idx, font_logical,
-            &families, &family, font_scroll_offset, corner_radius, 0.0, 0.0, &theme,
+            &families, &family, font_scroll_offset, corner_radius, summon_name, 0.0, 0.0, &theme,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
             // Clear the window background to the panel border color, then paint the
@@ -954,6 +1045,12 @@ impl App {
                 const MAX_FONT_ROWS: usize = 5;
                 let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
                 self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
+            }
+            input::MouseAction::SummonPrev => {
+                self.set_summon_effect(self.summon_effect.cycle(false));
+            }
+            input::MouseAction::SummonNext => {
+                self.set_summon_effect(self.summon_effect.cycle(true));
             }
             // The OS title bar moves the window now; in-panel drag/consume are no-ops.
             input::MouseAction::StartDialogDrag
@@ -1190,6 +1287,7 @@ impl ApplicationHandler<AppEvent> for App {
             // the first-open summon so the frame materializes out of the dither
             // lattice the instant the window appears.
             self.bayer_reveal = Some(jetty_render::BayerReveal::new(&g.device, g.format));
+            self.phosphor = Some(jetty_render::PhosphorIgnition::new(&g.device, g.format));
             self.summon_anim = Some(std::time::Instant::now());
         }
 
@@ -1700,6 +1798,8 @@ impl ApplicationHandler<AppEvent> for App {
                     | input::MouseAction::SetFont(_)
                     | input::MouseAction::FontScrollUp
                     | input::MouseAction::FontScrollDown
+                    | input::MouseAction::SummonPrev
+                    | input::MouseAction::SummonNext
                     | input::MouseAction::StartDialogDrag
                     | input::MouseAction::ConsumePanel => {}
                     input::MouseAction::StartScrollbarDrag { grab_dy } => {
@@ -2130,14 +2230,18 @@ impl ApplicationHandler<AppEvent> for App {
                 let corner_radius_px = self.corner_radius * scale;
                 let corner_mask = self.corner_mask.as_ref();
                 let bayer_reveal = self.bayer_reveal.as_ref();
-                // Summon (crystallize) progress: t in [0,1) drives a reveal pass
-                // this frame and self-schedules the next; t>=1 ends the animation
-                // so we return to damage-driven idle (0 CPU). None = not animating.
-                let summon_t = self
-                    .summon_anim
-                    .map(|start| start.elapsed().as_secs_f32() / 0.28);
-                // Theme accent for the crystallizing-front glow (captured before the
-                // mutable gpu/text/quad borrow below).
+                let phosphor = self.phosphor.as_ref();
+                let summon_effect = self.summon_effect;
+                // Summon progress: t in [0,1) drives a reveal pass this frame and
+                // self-schedules the next; t>=1 ends the animation so we return to
+                // damage-driven idle (0 CPU). None = not animating. Each effect has
+                // its own duration. (None has duration 0 → ends on the first frame.)
+                let summon_t = self.summon_anim.map(|start| {
+                    let d = summon_effect.duration();
+                    if d <= 0.0 { 1.0 } else { start.elapsed().as_secs_f32() / d }
+                });
+                // Theme accent for the reveal glow (captured before the mutable
+                // gpu/text/quad borrow below).
                 let summon_accent: [f32; 3] = {
                     let a = self.current_theme().palette[4];
                     [a[0] as f32 / 255.0, a[1] as f32 / 255.0, a[2] as f32 / 255.0]
@@ -2268,14 +2372,32 @@ impl ApplicationHandler<AppEvent> for App {
                             corner_radius_px,
                         );
                     }
-                    // Final-final pass: Bayer crystallize summon reveal. After the
-                    // corner mask, multiply the surface by the dither coverage at
-                    // the current t. Both passes are dst-multiply so they compose
-                    // cleanly. At t>=1 every pixel is revealed (zero residue) and
-                    // we stop the animation; otherwise self-drive the next frame.
-                    if let (Some(reveal), Some(t)) = (bayer_reveal, summon_t) {
+                    // Final-final pass: the selected summon reveal effect. After the
+                    // corner mask, run the per-effect pass at the current t. Passes
+                    // compose cleanly with the dst-multiply mask. At t>=1 the effect
+                    // is fully resolved (zero residue) and we stop the animation;
+                    // otherwise self-drive the next frame. None runs no pass but still
+                    // ends the animation at t>=1.
+                    if let Some(t) = summon_t {
                         if t < 1.0 {
-                            reveal.apply(&gpu.device, &gpu.queue, &view, width, height, t, summon_accent);
+                            match summon_effect {
+                                SummonEffect::None => {}
+                                SummonEffect::Bayer => {
+                                    if let Some(reveal) = bayer_reveal {
+                                        reveal.apply(
+                                            &gpu.device, &gpu.queue, &view, width, height, t,
+                                        );
+                                    }
+                                }
+                                SummonEffect::Phosphor => {
+                                    if let Some(ph) = phosphor {
+                                        ph.apply(
+                                            &gpu.device, &gpu.queue, &view, width, height,
+                                            corner_radius_px, t, summon_accent,
+                                        );
+                                    }
+                                }
+                            }
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
