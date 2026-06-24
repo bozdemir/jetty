@@ -18,7 +18,10 @@
 //! and absolutely no desktop-environment / compositor / OS-specific code.
 
 const REVEAL_SHADER: &str = r#"
-struct P { t: f32, _pad: vec3<f32> };
+// 16-byte uniform (4 scalars). NOTE: do NOT use vec3<f32> here — in the uniform
+// address space vec3 has 16-byte alignment, which would pad the struct to 32
+// bytes and mismatch the 16-byte Rust buffer (a wgpu validation panic).
+struct P { t: f32, _a: f32, _b: f32, _c: f32 };
 @group(0) @binding(0) var<uniform> p: P;
 
 @vertex

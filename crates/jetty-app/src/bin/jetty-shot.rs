@@ -332,6 +332,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // --- Bayer Crystallize summon reveal (JETTY_SHOT_SUMMON_T) ---
+    // Run the REAL GPU pass on the offscreen view (not a CPU mirror), so this
+    // harness validates the actual pipeline + uniform binding and would catch a
+    // shader/binding bug headlessly. Both this and the corner mask are dst-multiply
+    // (commutative), so applying it before the CPU corner mask gives the same result.
+    if let Some(t) = std::env::var("JETTY_SHOT_SUMMON_T").ok().and_then(|s| s.parse::<f32>().ok()) {
+        eprintln!("jetty-shot: applying Bayer crystallize reveal (GPU pass, t={t})");
+        let bayer = jetty_render::BayerReveal::new(&device, format);
+        bayer.apply(&device, &queue, &view, width, height, t);
+    }
+
     // --- Read back to CPU ---
     // wgpu requires bytes_per_row to be a multiple of 256.
     let unpadded = width * 4;
@@ -413,27 +424,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // --- Bayer Crystallize summon keyframe (JETTY_SHOT_SUMMON_T) ---
-    // Apply the SAME ordered-dither reveal coverage the live GPU pass uses, at a
-    // fixed t (0..1), so a summon keyframe is inspectable. Runs AFTER the corner
-    // mask, mirroring the live pass order. The texture is premultiplied alpha, so
-    // multiply r/g/b/a by the coverage to keep premultiplication consistent.
-    if let Ok(t_str) = std::env::var("JETTY_SHOT_SUMMON_T") {
-        if let Ok(t) = t_str.parse::<f32>() {
-            eprintln!("jetty-shot: applying Bayer crystallize reveal (t={t})");
-            for y in 0..height {
-                for x in 0..width {
-                    let cov = jetty_render::reveal_coverage(x, y, t);
-                    if cov < 1.0 {
-                        let idx = ((y * width + x) * 4) as usize;
-                        for c in 0..4 {
-                            tight[idx + c] = (tight[idx + c] as f32 * cov).round() as u8;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // (Bayer Crystallize summon reveal is applied earlier via the REAL GPU pass,
+    // before readback — see above. No CPU mirror here.)
 
     // --- Composite over checkerboard if bg alpha < 255 (or a corner radius is set,
     // so the now-transparent corners reveal the checkerboard even on an opaque
