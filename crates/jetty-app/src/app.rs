@@ -250,10 +250,12 @@ pub struct App {
     /// shown window can take a beat to present — starting the clock at
     /// set_visible() time would let the whole effect elapse unseen (effectless).
     summon_pending: bool,
-    /// True while a freshly-opened settings window still owes its first paint —
-    /// macOS won't draw it under ControlFlow::Wait until a click, so `about_to_wait`
-    /// forces Poll until this clears on the first settings RedrawRequested.
-    settings_needs_paint: bool,
+    /// While `now < this`, the freshly-opened settings window is kept repainting
+    /// under Poll. macOS can't present to a brand-new window's surface until the
+    /// run loop has displayed it a few times, so a SINGLE redraw on open is
+    /// dropped (the window shows blank until clicked). Repaint for a short window
+    /// instead, until one frame actually presents. None = idle.
+    settings_paint_until: Option<std::time::Instant>,
     /// Window corner radius in logical px, clamped [0, 24]. 0 = square corners.
     corner_radius: f32,
     /// All open terminal sessions, one per tab. Always non-empty once `resumed`
@@ -481,7 +483,7 @@ impl App {
             wayland_warned: false,
             summon_anim: None,
             summon_pending: false,
-            settings_needs_paint: false,
+            settings_paint_until: None,
             corner_radius,
             tabs: Vec::new(),
             active: 0,
@@ -1151,9 +1153,11 @@ impl App {
         window.focus_window();
         window.request_redraw();
         self.settings_window = Some(window);
-        // macOS: force Poll until the first paint lands (a request_redraw alone is
-        // dropped under Wait until a click), so the window opens already drawn.
-        self.settings_needs_paint = true;
+        // macOS: keep repainting under Poll for a short window so the surface
+        // presents once macOS has displayed the new window (a single redraw on
+        // open is dropped, leaving it blank until clicked).
+        self.settings_paint_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
         // …and draw the first frame SYNCHRONOUSLY now, before returning to the
         // event loop, so the window is never shown blank even for a frame.
         self.render_settings_window();
@@ -1525,8 +1529,9 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 self.render_settings_window();
-                // First paint delivered → stop forcing Poll for this window.
-                self.settings_needs_paint = false;
+                // The Poll repaint window (settings_paint_until) self-expires; no
+                // need to clear it here — we keep repainting until the surface has
+                // presented at least once.
             }
             _ => {}
         }
@@ -1551,12 +1556,16 @@ impl ApplicationHandler<AppEvent> for App {
                 w.request_redraw();
             }
         }
-        if self.settings_needs_paint {
+        let settings_pending = self.settings_window.is_some()
+            && self
+                .settings_paint_until
+                .is_some_and(|d| std::time::Instant::now() < d);
+        if settings_pending {
             if let Some(w) = &self.settings_window {
                 w.request_redraw();
             }
         }
-        event_loop.set_control_flow(if main_pending || self.settings_needs_paint {
+        event_loop.set_control_flow(if main_pending || settings_pending {
             winit::event_loop::ControlFlow::Poll
         } else {
             winit::event_loop::ControlFlow::Wait
