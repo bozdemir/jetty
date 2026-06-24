@@ -13,13 +13,16 @@ const PLUS_W: f32 = 32.0;
 const CLOSE_W: f32 = 18.0;
 /// Width of each window-control button (minimize/maximize/close) on the right.
 const CTRL_W: f32 = 28.0;
-/// Total width reserved on the right of the strip for the three controls.
-pub const CONTROLS_W: f32 = CTRL_W * 3.0;
+/// Total width reserved on the right of the strip for the controls. Left→right:
+/// Help "?", Settings "⚙", minimize "─", maximize "▢", close "✕" — five cells.
+pub const CONTROLS_W: f32 = CTRL_W * 5.0;
 
 /// Which window-control button (if any) is hovered, for the highlight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtrlHover {
     None,
+    Help,
+    Settings,
     Min,
     Max,
     Close,
@@ -37,6 +40,10 @@ pub struct TabBar {
     pub close_rects: Vec<Rect>,
     /// Hit-test rect for the "+" new-tab button.
     pub plus_rect: Rect,
+    /// Hit-test rect for the Help "?" button (left of the window controls).
+    pub help_rect: Rect,
+    /// Hit-test rect for the Settings "⚙" button (left of the window controls).
+    pub settings_rect: Rect,
     /// Hit-test rect for the minimize "─" window control.
     pub min_rect: Rect,
     /// Hit-test rect for the maximize/restore "▢" window control.
@@ -162,21 +169,32 @@ pub fn build_tab_bar_ex(
         labels.push(("+".to_string(), x + 11.0, 7.0, fg));
     }
 
-    // --- Window controls: minimize "─", maximize "▢", close "✕" (rightmost). ---
+    // --- Right-side controls (left→right): Help "?", Settings "⚙",
+    // minimize "─", maximize "▢", close "✕" (rightmost). ---
     let hover_bg = active_bg;
     // A red-ish background for the close button when hovered.
     let close_hover_bg = [0xE0, 0x40, 0x40, 255];
     let ctrl_y = 0.0;
 
-    let min_x = sw - CONTROLS_W;
+    let help_x = sw - CONTROLS_W;        // sw - 5*CTRL_W
+    let settings_x = sw - CTRL_W * 4.0;
+    let min_x = sw - CTRL_W * 3.0;
     let max_x = sw - CTRL_W * 2.0;
     let close_x = sw - CTRL_W;
 
+    let help_rect = Rect { x: help_x, y: ctrl_y, w: CTRL_W, h, color: bg };
+    let settings_rect = Rect { x: settings_x, y: ctrl_y, w: CTRL_W, h, color: bg };
     let min_rect = Rect { x: min_x, y: ctrl_y, w: CTRL_W, h, color: bg };
     let max_rect = Rect { x: max_x, y: ctrl_y, w: CTRL_W, h, color: bg };
     let close_rect = Rect { x: close_x, y: ctrl_y, w: CTRL_W, h, color: bg };
 
     // Hover highlight quads.
+    if ctrl_hover == CtrlHover::Help {
+        quads.push(Rect { x: help_x, y: 0.0, w: CTRL_W, h, color: hover_bg });
+    }
+    if ctrl_hover == CtrlHover::Settings {
+        quads.push(Rect { x: settings_x, y: 0.0, w: CTRL_W, h, color: hover_bg });
+    }
     if ctrl_hover == CtrlHover::Min {
         quads.push(Rect { x: min_x, y: 0.0, w: CTRL_W, h, color: hover_bg });
     }
@@ -187,13 +205,19 @@ pub fn build_tab_bar_ex(
         quads.push(Rect { x: close_x, y: 0.0, w: CTRL_W, h, color: close_hover_bg });
     }
 
-    // Glyphs centred-ish in each control cell.
+    // Glyphs centred-ish in each control cell. "⚙" may be missing in some
+    // monospace fonts; "≡" is a safe, widely-available fallback for settings.
+    labels.push(("?".to_string(), help_x + 9.0, 8.0, fg));
+    labels.push(("⚙".to_string(), settings_x + 8.0, 8.0, fg));
     labels.push(("─".to_string(), min_x + 8.0, 8.0, fg));
     labels.push(("▢".to_string(), max_x + 8.0, 8.0, fg));
     let close_fg = if ctrl_hover == CtrlHover::Close { [0xFF, 0xFF, 0xFF] } else { fg };
     labels.push(("✕".to_string(), close_x + 8.0, 8.0, close_fg));
 
-    TabBar { quads, labels, tab_rects, close_rects, plus_rect, min_rect, max_rect, close_rect }
+    TabBar {
+        quads, labels, tab_rects, close_rects, plus_rect,
+        help_rect, settings_rect, min_rect, max_rect, close_rect,
+    }
 }
 
 #[cfg(test)]
@@ -207,13 +231,15 @@ mod tests {
     #[test]
     fn controls_parked_at_right_in_order() {
         let bar = build_tab_bar(1000, &[("Tab 1".to_string(), true)], &theme());
-        // close is rightmost, then max, then min — all within the strip.
+        // Left→right: help, settings, min, max, close — all within the strip.
+        assert!(bar.help_rect.x < bar.settings_rect.x);
+        assert!(bar.settings_rect.x < bar.min_rect.x);
         assert!(bar.min_rect.x < bar.max_rect.x);
         assert!(bar.max_rect.x < bar.close_rect.x);
         // The close button's right edge reaches the surface edge.
         assert!((bar.close_rect.x + bar.close_rect.w - 1000.0).abs() < 0.01);
-        // Each control is one cell wide.
-        assert!((bar.close_rect.w - CONTROLS_W / 3.0).abs() < 0.01);
+        // Each control is one cell wide (CONTROLS_W spans five cells).
+        assert!((bar.close_rect.w - CONTROLS_W / 5.0).abs() < 0.01);
     }
 
     #[test]

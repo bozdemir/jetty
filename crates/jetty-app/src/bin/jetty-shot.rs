@@ -275,6 +275,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             panel_labels.extend(menu.labels);
         }
 
+        // JETTY_SHOT_HELP — render the Keyboard Shortcuts help overlay.
+        if std::env::var("JETTY_SHOT_HELP").is_ok() {
+            let help = jetty_render::build_help_overlay(width, height);
+            rects.extend(help.quads);
+            panel_labels.extend(help.labels);
+        }
+
         quad.render(&device, &queue, &view, width, height, &rects);
 
         // Render panel text labels on top of the panel quads.

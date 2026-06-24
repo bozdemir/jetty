@@ -3,6 +3,7 @@ mod text;
 mod quad;
 mod panel;
 mod menu;
+mod help;
 mod tabbar;
 mod mask;
 pub use gpu::GpuContext;
@@ -11,4 +12,5 @@ pub use quad::{QuadLayer, Rect, cell_bg_rects, default_bg_clear, scrollbar_rect,
 pub use panel::{build_panel, PanelView, PanelGeom};
 pub use mask::{CornerMask, rounded_rect_coverage};
 pub use menu::{build_context_menu, ContextMenu};
+pub use help::{build_help_overlay, HelpOverlay, HELP_ROWS};
 pub use tabbar::{build_tab_bar, build_tab_bar_ex, CtrlHover, TabBar, CONTROLS_W, TABBAR_H};

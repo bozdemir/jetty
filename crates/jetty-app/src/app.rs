@@ -125,6 +125,10 @@ pub struct App {
     /// call `set_cursor` when the zone actually changes (the borderless window
     /// draws its own resize edges).
     resize_cursor: ResizeZone,
+    /// Whether the in-window "Keyboard Shortcuts" help overlay is open. Drawn on
+    /// top of everything in the main window; dismissed by Esc, the "?" button,
+    /// or a click outside the panel.
+    help_open: bool,
 }
 
 /// Which resize zone (if any) the cursor is over on the borderless main window.
@@ -284,6 +288,7 @@ impl App {
             rename_buf: String::new(),
             last_strip_click: None,
             resize_cursor: ResizeZone::None,
+            help_open: false,
         };
         // Persisted user settings override the env-derived defaults (but env
         // vars still seed the initial values above, so an explicit JETTY_* can
@@ -1347,6 +1352,20 @@ impl ApplicationHandler<AppEvent> for App {
                 let cx = self.cursor.0 as f32;
                 let cy = self.cursor.1 as f32;
 
+                // --- Help overlay is modal: a click outside its panel closes it;
+                // a click inside is swallowed. Either way the click is consumed so
+                // it never reaches the tab bar, a resize edge, or the terminal. ---
+                if self.help_open {
+                    let help = jetty_render::build_help_overlay(w, h);
+                    if !input::point_in(&help.panel, cx, cy) {
+                        self.help_open = false;
+                    }
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
                 // --- Resize edges (borderless window): highest priority after the
                 // modal context menu. Corners > edges; a press in a resize zone
                 // starts an OS-driven resize and consumes the click so it never
@@ -1387,6 +1406,19 @@ impl ApplicationHandler<AppEvent> for App {
                     );
 
                     // Window controls take priority (rightmost region).
+                    if input::point_in(&bar.help_rect, cx, cy) {
+                        // Toggle the in-window Help overlay.
+                        self.help_open = !self.help_open;
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
+                        return;
+                    }
+                    if input::point_in(&bar.settings_rect, cx, cy) {
+                        // Same as Ctrl+Shift+P: open/close the Settings window.
+                        self.toggle_settings_window(event_loop);
+                        return;
+                    }
                     if input::point_in(&bar.close_rect, cx, cy) {
                         event_loop.exit();
                         return;
@@ -1670,6 +1702,21 @@ impl ApplicationHandler<AppEvent> for App {
                     let _ = i;
                     return;
                 }
+                // --- Help overlay captures Escape ---
+                // When the help overlay is open, Escape closes it and is fully
+                // consumed: it must NOT also close a tab or reach the shell.
+                if self.help_open
+                    && matches!(
+                        event.logical_key,
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                    )
+                {
+                    self.help_open = false;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
@@ -1825,6 +1872,7 @@ impl ApplicationHandler<AppEvent> for App {
                     .collect();
                 let context_menu = self.context_menu;
                 let menu_hover = self.menu_hover;
+                let help_open = self.help_open;
                 let rename_state: Option<(usize, String)> =
                     self.renaming.map(|i| (i, self.rename_buf.clone()));
                 // Corner-mask inputs captured before the mutable render borrows.
@@ -1903,6 +1951,22 @@ impl ApplicationHandler<AppEvent> for App {
                             );
                         }
                     }
+                    // Draw the Help overlay (Keyboard Shortcuts) on top of all
+                    // else — a dim layer, a bordered panel, and the binding rows.
+                    if help_open {
+                        let help = jetty_render::build_help_overlay(width, height);
+                        quad.render(&gpu.device, &gpu.queue, &view, width, height, &help.quads);
+                        if !help.labels.is_empty() {
+                            let _ = text.render_overlays(
+                                &gpu.device,
+                                &gpu.queue,
+                                &view,
+                                width,
+                                height,
+                                &help.labels,
+                            );
+                        }
+                    }
                     // Final pass: round the window corners by zeroing alpha
                     // outside a rounded rect. No-op when radius == 0 (square).
                     if let Some(mask) = corner_mask {
@@ -1946,8 +2010,10 @@ fn ctrl_hover_at(cx: f32, cy: f32, width: u32) -> jetty_render::CtrlHover {
         return CtrlHover::None;
     }
     let sw = width as f32;
-    let ctrl_w = jetty_render::CONTROLS_W / 3.0;
-    let min_x = sw - jetty_render::CONTROLS_W;
+    let ctrl_w = jetty_render::CONTROLS_W / 5.0;
+    let help_x = sw - jetty_render::CONTROLS_W; // sw - 5*ctrl_w
+    let settings_x = sw - ctrl_w * 4.0;
+    let min_x = sw - ctrl_w * 3.0;
     let max_x = sw - ctrl_w * 2.0;
     let close_x = sw - ctrl_w;
     if cx >= close_x {
@@ -1956,6 +2022,10 @@ fn ctrl_hover_at(cx: f32, cy: f32, width: u32) -> jetty_render::CtrlHover {
         CtrlHover::Max
     } else if cx >= min_x {
         CtrlHover::Min
+    } else if cx >= settings_x {
+        CtrlHover::Settings
+    } else if cx >= help_x {
+        CtrlHover::Help
     } else {
         CtrlHover::None
     }
