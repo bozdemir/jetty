@@ -115,6 +115,101 @@ pub struct App {
     /// Time + physical-pixel position of the last left press on the top strip,
     /// used to detect double-clicks (window maximize / enter-rename).
     last_strip_click: Option<(std::time::Instant, f32, f32)>,
+    /// The resize cursor currently applied to the main window. Cached so we only
+    /// call `set_cursor` when the zone actually changes (the borderless window
+    /// draws its own resize edges).
+    resize_cursor: ResizeZone,
+}
+
+/// Which resize zone (if any) the cursor is over on the borderless main window.
+/// Corners take priority over edges; `None` means a normal cursor / no resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeZone {
+    None,
+    West,
+    East,
+    North,
+    South,
+    NorthWest,
+    NorthEast,
+    SouthWest,
+    SouthEast,
+}
+
+impl ResizeZone {
+    /// The winit resize direction for this zone (None for `ResizeZone::None`).
+    fn direction(self) -> Option<winit::window::ResizeDirection> {
+        use winit::window::ResizeDirection as D;
+        Some(match self {
+            ResizeZone::None => return None,
+            ResizeZone::West => D::West,
+            ResizeZone::East => D::East,
+            ResizeZone::North => D::North,
+            ResizeZone::South => D::South,
+            ResizeZone::NorthWest => D::NorthWest,
+            ResizeZone::NorthEast => D::NorthEast,
+            ResizeZone::SouthWest => D::SouthWest,
+            ResizeZone::SouthEast => D::SouthEast,
+        })
+    }
+
+    /// The cursor icon matching this resize zone.
+    fn cursor_icon(self) -> winit::window::CursorIcon {
+        use winit::window::CursorIcon as C;
+        match self {
+            ResizeZone::None => C::Default,
+            ResizeZone::West | ResizeZone::East => C::EwResize,
+            ResizeZone::North | ResizeZone::South => C::NsResize,
+            ResizeZone::NorthWest | ResizeZone::SouthEast => C::NwseResize,
+            ResizeZone::NorthEast | ResizeZone::SouthWest => C::NeswResize,
+        }
+    }
+}
+
+/// Compute the resize zone for a cursor at `(cx, cy)` (physical px) in a window
+/// of physical size `w`×`h`. Edges are within `EDGE` px of a side; corners
+/// within `CORNER` px of a corner. Corners take priority over edges. Returns
+/// `ResizeZone::None` when the cursor is in the interior.
+fn resize_zone_at(cx: f32, cy: f32, w: u32, h: u32) -> ResizeZone {
+    const EDGE: f32 = 6.0;
+    const CORNER: f32 = 12.0;
+    let w = w as f32;
+    let h = h as f32;
+    // Out-of-bounds → no resize.
+    if cx < 0.0 || cy < 0.0 || cx > w || cy > h {
+        return ResizeZone::None;
+    }
+    let near_left = cx <= CORNER;
+    let near_right = cx >= w - CORNER;
+    let near_top = cy <= CORNER;
+    let near_bottom = cy >= h - CORNER;
+    // Corners first (within CORNER of two adjacent sides).
+    if near_top && near_left {
+        return ResizeZone::NorthWest;
+    }
+    if near_top && near_right {
+        return ResizeZone::NorthEast;
+    }
+    if near_bottom && near_left {
+        return ResizeZone::SouthWest;
+    }
+    if near_bottom && near_right {
+        return ResizeZone::SouthEast;
+    }
+    // Edges (within EDGE of one side).
+    if cx <= EDGE {
+        return ResizeZone::West;
+    }
+    if cx >= w - EDGE {
+        return ResizeZone::East;
+    }
+    if cy <= EDGE {
+        return ResizeZone::North;
+    }
+    if cy >= h - EDGE {
+        return ResizeZone::South;
+    }
+    ResizeZone::None
 }
 
 impl App {
@@ -172,6 +267,7 @@ impl App {
             renaming: None,
             rename_buf: String::new(),
             last_strip_click: None,
+            resize_cursor: ResizeZone::None,
         };
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -1046,6 +1142,21 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let prev = self.cursor;
                 self.cursor = (position.x, position.y);
+                // --- Resize-edge cursor feedback (borderless window) ---
+                // Only update the cursor when the zone changes, and never while a
+                // host drag (scrollbar / selection) is in progress.
+                if !self.dragging_scrollbar && !self.selecting {
+                    if let Some(gpu) = &self.gpu {
+                        let (w, h) = (gpu.config.width, gpu.config.height);
+                        let zone = resize_zone_at(position.x as f32, position.y as f32, w, h);
+                        if zone != self.resize_cursor {
+                            self.resize_cursor = zone;
+                            if let Some(win) = &self.window {
+                                win.set_cursor(zone.cursor_icon());
+                            }
+                        }
+                    }
+                }
                 // Repaint when the window-control hover state changes so the
                 // min/max/close highlight tracks the cursor.
                 if let Some(gpu) = &self.gpu {
@@ -1147,6 +1258,18 @@ impl ApplicationHandler<AppEvent> for App {
 
                 let cx = self.cursor.0 as f32;
                 let cy = self.cursor.1 as f32;
+
+                // --- Resize edges (borderless window): highest priority after the
+                // modal context menu. Corners > edges; a press in a resize zone
+                // starts an OS-driven resize and consumes the click so it never
+                // begins a selection, tab-bar drag, or window move. ---
+                let zone = resize_zone_at(cx, cy, w, h);
+                if let Some(dir) = zone.direction() {
+                    if let Some(win) = &self.window {
+                        let _ = win.drag_resize_window(dir);
+                    }
+                    return;
+                }
 
                 // --- Tab bar / titlebar hit-test (only when the click is on the strip) ---
                 // Window controls, tab switching/close/new, inline-rename, window
@@ -1743,5 +1866,70 @@ fn center_window(win: &Arc<Window>) {
         let x = (mon.width.saturating_sub(win_size.width) / 2) as i32;
         let y = (mon.height.saturating_sub(win_size.height) / 2) as i32;
         win.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+    }
+}
+
+#[cfg(test)]
+mod resize_zone_tests {
+    use super::{resize_zone_at, ResizeZone};
+
+    const W: u32 = 1000;
+    const H: u32 = 640;
+
+    #[test]
+    fn interior_is_none() {
+        assert_eq!(resize_zone_at(500.0, 320.0, W, H), ResizeZone::None);
+    }
+
+    #[test]
+    fn edges_map_to_sides() {
+        // West/East within 6px of a vertical side (mid-height).
+        assert_eq!(resize_zone_at(2.0, 320.0, W, H), ResizeZone::West);
+        assert_eq!(resize_zone_at(998.0, 320.0, W, H), ResizeZone::East);
+        // North/South within 6px of a horizontal side (mid-width).
+        assert_eq!(resize_zone_at(500.0, 2.0, W, H), ResizeZone::North);
+        assert_eq!(resize_zone_at(500.0, 638.0, W, H), ResizeZone::South);
+    }
+
+    #[test]
+    fn corners_take_priority_over_edges() {
+        // Within 12px of two adjacent sides → the diagonal corner zone.
+        assert_eq!(resize_zone_at(3.0, 3.0, W, H), ResizeZone::NorthWest);
+        assert_eq!(resize_zone_at(997.0, 3.0, W, H), ResizeZone::NorthEast);
+        assert_eq!(resize_zone_at(3.0, 637.0, W, H), ResizeZone::SouthWest);
+        assert_eq!(resize_zone_at(997.0, 637.0, W, H), ResizeZone::SouthEast);
+    }
+
+    #[test]
+    fn just_inside_edge_band_is_interior() {
+        // 7px from the left edge (> EDGE=6, < CORNER=12 only matters near a corner):
+        // at mid-height this is interior, not a resize zone.
+        assert_eq!(resize_zone_at(7.0, 320.0, W, H), ResizeZone::None);
+    }
+
+    #[test]
+    fn top_outer_strip_is_resize_inner_is_not() {
+        // The top 6px is North (resize); below that (still inside TABBAR_H) is the
+        // tab bar, so resize_zone_at returns None there.
+        assert_eq!(resize_zone_at(500.0, 3.0, W, H), ResizeZone::North);
+        assert_eq!(resize_zone_at(500.0, 20.0, W, H), ResizeZone::None);
+    }
+
+    #[test]
+    fn out_of_bounds_is_none() {
+        assert_eq!(resize_zone_at(-5.0, 320.0, W, H), ResizeZone::None);
+        assert_eq!(resize_zone_at(500.0, 700.0, W, H), ResizeZone::None);
+    }
+
+    #[test]
+    fn directions_and_cursors_pair_up() {
+        use winit::window::{CursorIcon, ResizeDirection};
+        assert!(ResizeZone::None.direction().is_none());
+        assert_eq!(ResizeZone::West.direction(), Some(ResizeDirection::West));
+        assert_eq!(ResizeZone::SouthEast.direction(), Some(ResizeDirection::SouthEast));
+        assert_eq!(ResizeZone::West.cursor_icon(), CursorIcon::EwResize);
+        assert_eq!(ResizeZone::North.cursor_icon(), CursorIcon::NsResize);
+        assert_eq!(ResizeZone::NorthWest.cursor_icon(), CursorIcon::NwseResize);
+        assert_eq!(ResizeZone::NorthEast.cursor_icon(), CursorIcon::NeswResize);
     }
 }
