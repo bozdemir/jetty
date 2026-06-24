@@ -29,7 +29,7 @@ pub struct Config {
 }
 
 fn default_summon_effect() -> String {
-    "bayer".to_string()
+    "phosphor".to_string()
 }
 
 impl Default for Config {
@@ -92,15 +92,15 @@ mod tests {
         assert_eq!(c.font_size, 16.0);
         assert_eq!(c.font_family, "MesloLGS NF");
         assert_eq!(c.corner_radius, 10.0);
-        assert_eq!(c.summon_effect, "bayer");
+        assert_eq!(c.summon_effect, "phosphor");
     }
 
     #[test]
-    fn missing_summon_effect_defaults_to_bayer() {
+    fn missing_summon_effect_defaults_to_phosphor() {
         // An older config without a summon_effect key still loads (serde default).
         let toml = "theme = \"dracula\"\nopacity = 1.0\nfont_size = 16.0\nfont_family = \"MesloLGS NF\"\ncorner_radius = 10.0\n";
         let c: Config = toml::from_str(toml).expect("deserialize");
-        assert_eq!(c.summon_effect, "bayer");
+        assert_eq!(c.summon_effect, "phosphor");
     }
 
     #[test]

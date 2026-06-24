@@ -71,7 +71,8 @@ impl SummonEffect {
             "phosphor" => SummonEffect::Phosphor,
             "liquid" => SummonEffect::Liquid,
             "focus" => SummonEffect::Focus,
-            _ => SummonEffect::Bayer, // unknown → Bayer
+            "bayer" => SummonEffect::Bayer,
+            _ => SummonEffect::Phosphor, // default / unknown → Phosphor
         }
     }
 
