@@ -19,8 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_path =
         std::env::var("JETTY_SHOT_OUT").unwrap_or_else(|_| "/tmp/jetty-shot.png".to_string());
 
-    let width: u32 = 1000;
-    let height: u32 = 640;
+    // Window size is overridable so the harness can reproduce narrow-window
+    // layouts (e.g. help/panel fit) — JETTY_SHOT_WIDTH / JETTY_SHOT_HEIGHT.
+    let width: u32 = std::env::var("JETTY_SHOT_WIDTH").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
+    let height: u32 = std::env::var("JETTY_SHOT_HEIGHT").ok().and_then(|s| s.parse().ok()).unwrap_or(640);
     // Allow headless renders at different font sizes so the test harness can
     // verify that font-size changes produce a different cell grid.
     let font_size: f32 = std::env::var("JETTY_FONT_SIZE")
