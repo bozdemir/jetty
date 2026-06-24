@@ -17,3 +17,6 @@ Cargo.lock.orig
 /dist/
 perf.data*
 flamegraph.svg
+
+# Claude Code local state (workflow worktrees, session data)
+.claude/
