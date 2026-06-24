@@ -51,39 +51,43 @@
 
 ## 🚀 Install
 
-### One-line installer (recommended — no toolchain needed)
+JeTTY runs on **Linux** (X11 / Wayland, Vulkan) and **macOS** (Metal). Building from source needs only the Rust toolchain and works on both.
+
+### 🍎 macOS — build from source
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bozdemir/jetty/main/install.sh | sh
-```
+# 1. Install Rust (skip if you already have it)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source "$HOME/.cargo/env"
 
-Downloads the latest prebuilt binary and installs it for your user (`~/.local/bin` + a launcher entry). For a system-wide install: `curl -fsSL …/install.sh | sudo JETTY_PREFIX=/usr/local sh`.
-
-### Debian / Ubuntu (`.deb`)
-
-Grab `jetty_<version>_amd64.deb` from the [latest release](https://github.com/bozdemir/jetty/releases/latest):
-
-```bash
-sudo apt install ./jetty_*_amd64.deb
-```
-
-### AppImage (any distro, portable)
-
-Download `JeTTY-<version>-x86_64.AppImage` from [releases](https://github.com/bozdemir/jetty/releases/latest), then:
-
-```bash
-chmod +x JeTTY-*-x86_64.AppImage && ./JeTTY-*-x86_64.AppImage
-```
-
-### From crates / source (Rust toolchain)
-
-```bash
+# 2. Build + run
 git clone https://github.com/bozdemir/jetty.git && cd jetty
 cargo build --release
 ./target/release/jetty
 ```
 
-> Releases (`.deb`, AppImage, tarball, checksums) are built automatically by CI when a `v*` tag is pushed.
+Renders through **Metal**. Summon with **`fn`+`F9`** (plain F9 is macOS Mission Control), or bind a key to `jetty --toggle`. A locally built binary is not quarantined, so there's no Gatekeeper prompt. *(Prebuilt `.app` / `.dmg` are on the [roadmap](#-roadmap).)*
+
+### 🐧 Linux — one-line installer (prebuilt, no toolchain)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bozdemir/jetty/main/install.sh | sh
+```
+
+Installs to `~/.local/bin` + a launcher entry. Or grab a `.deb` / **AppImage** from the [latest release](https://github.com/bozdemir/jetty/releases/latest):
+
+```bash
+sudo apt install ./jetty_*_amd64.deb                              # Debian / Ubuntu
+chmod +x JeTTY-*-x86_64.AppImage && ./JeTTY-*-x86_64.AppImage     # any distro
+```
+
+### Build from source (Linux or macOS)
+
+```bash
+git clone https://github.com/bozdemir/jetty.git && cd jetty
+cargo build --release && ./target/release/jetty
+```
+
+> Prebuilt artifacts (`.deb`, AppImage, tarball, checksums) are published by CI when a `v*` tag is pushed — **Linux x86_64 today; macOS prebuilt builds are on the roadmap.** Until then, macOS users build from source (above).
 
 ### Global summon hotkey
 
