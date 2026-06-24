@@ -223,6 +223,13 @@ pub struct App {
     /// The slide is a render-side content translate; while Some the redraw loop
     /// self-drives frames (idle 0 CPU once cleared).
     slide_anim: Option<std::time::Instant>,
+    /// Frames remaining to RE-APPLY the dropdown dock geometry after the window
+    /// is mapped. On X11, KWin ignores set_outer_position issued before the
+    /// window is realized (it applies its own placement → the window lands
+    /// centered), so a single pre-map dock fails. Re-asserting on the first few
+    /// post-map redraws makes the WM honor the top-strip position; counts down to
+    /// 0 so idle CPU returns to 0.
+    pending_dock_frames: u8,
     /// Hide the window on focus loss (Yakuake auto-hide). Default ON.
     focus_autohide: bool,
     /// The id of the most recently focused window (main or settings). Used to
@@ -454,6 +461,7 @@ impl App {
             dropdown_height_pct: 0.50,
             dropdown_width_pct: 1.0,
             slide_anim: None,
+            pending_dock_frames: 0,
             focus_autohide: true,
             last_focused_window: None,
             dragging_dropdown: false,
@@ -800,8 +808,18 @@ impl App {
                 self.slide_anim = None;
             }
             WindowMode::Dropdown => {
-                // Recompute dock geometry on the next summon (ignore stale pos).
+                // Recompute dock geometry (ignore stale pos). If the window is
+                // already visible, dock it LIVE so switching mode in settings
+                // immediately drops it to the top strip (re-asserted post-map via
+                // pending_dock_frames) instead of waiting for the next F9.
                 self.last_pos = None;
+                if self.visible {
+                    if let Some(w) = &self.window {
+                        dock_window_top(w, self.dropdown_width_pct, self.dropdown_height_pct);
+                    }
+                    self.pending_dock_frames = 5;
+                    self.slide_anim = Some(std::time::Instant::now());
+                }
             }
         }
         self.persist();
@@ -1045,11 +1063,14 @@ impl App {
                         }
                     }
                     WindowMode::Dropdown => {
-                        // Dock geometry is recomputed fresh each summon (ignores
-                        // last_pos). Position+size FIRST, then show, so the
-                        // resize happens before the window is visible.
-                        dock_window_top(win, self.dropdown_width_pct, self.dropdown_height_pct);
+                        // Show FIRST so the window is mapped, THEN dock: on X11 a
+                        // dock issued before the window is realized is ignored by
+                        // the WM (the window lands centered). pending_dock_frames
+                        // re-asserts the top-strip geometry on the next few
+                        // post-map redraws so it actually docks to the top.
                         win.set_visible(true);
+                        dock_window_top(win, self.dropdown_width_pct, self.dropdown_height_pct);
+                        self.pending_dock_frames = 5;
                         // Arm the render-side slide-down.
                         self.slide_anim = Some(std::time::Instant::now());
                     }
@@ -1467,6 +1488,10 @@ impl ApplicationHandler<AppEvent> for App {
             WindowMode::Center => center_window(&window),
             WindowMode::Dropdown => {
                 dock_window_top(&window, self.dropdown_width_pct, self.dropdown_height_pct);
+                // KWin ignores the pre-map dock above (window not realized yet) →
+                // re-assert on the first post-map redraws so it actually lands at
+                // the top strip instead of the WM's default (centered) placement.
+                self.pending_dock_frames = 5;
                 self.slide_anim = Some(std::time::Instant::now());
             }
         }
@@ -2492,6 +2517,19 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Re-assert the Dropdown dock AFTER the window is mapped: X11/KWin
+                // ignores a set_outer_position issued before the window is realized
+                // (it would land centered), so re-apply the top-strip geometry on
+                // the first few post-map redraws. Counts down → idle CPU back to 0.
+                if self.pending_dock_frames > 0 {
+                    self.pending_dock_frames -= 1;
+                    if let Some(win) = &self.window {
+                        dock_window_top(win, self.dropdown_width_pct, self.dropdown_height_pct);
+                        if self.pending_dock_frames > 0 {
+                            win.request_redraw();
+                        }
+                    }
+                }
                 // Drain every tab so background shells keep running; close any
                 // whose child exited as part of the output we just drained.
                 let (_had, exited) = self.drain_pty();
