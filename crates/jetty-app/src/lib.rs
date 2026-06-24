@@ -1,4 +1,5 @@
 mod app;
+mod config;
 pub mod clipboard;
 pub mod input;
 

@@ -285,10 +285,39 @@ impl App {
             last_strip_click: None,
             resize_cursor: ResizeZone::None,
         };
+        // Persisted user settings override the env-derived defaults (but env
+        // vars still seed the initial values above, so an explicit JETTY_* can
+        // win on a fresh config). Apply config BEFORE the first render so the
+        // window comes up already themed/sized as the user left it. The font
+        // size/family are consumed later by `resumed` when it builds the
+        // TextLayer; theme+opacity are pushed into the terminals by apply_theme.
+        let cfg = crate::config::Config::load();
+        if let Some(i) = jetty_core::theme::PRESETS.iter().position(|&n| n == cfg.theme.as_str()) {
+            app.theme_idx = i;
+        }
+        app.opacity = cfg.opacity.clamp(0.0, 1.0);
+        app.font_logical = cfg.font_size.clamp(6.0, 48.0);
+        app.font_family = cfg.font_family;
+        app.corner_radius = cfg.corner_radius.clamp(0.0, 24.0);
+
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
         app.apply_theme();
         app
+    }
+
+    /// Write the current user-tweakable settings to the on-disk config file.
+    /// Called whenever a setting changes (theme, opacity, font size/family,
+    /// corner radius). Best-effort and cheap; errors are swallowed by `save`.
+    fn persist(&self) {
+        crate::config::Config {
+            theme: jetty_core::theme::PRESETS[self.theme_idx].to_string(),
+            opacity: self.opacity,
+            font_size: self.font_logical,
+            font_family: self.font_family.clone(),
+            corner_radius: self.corner_radius,
+        }
+        .save();
     }
 
     /// The active tab. Panics if `tabs` is empty, which only happens before
@@ -645,6 +674,7 @@ impl App {
             }
         }
         self.reflow();
+        self.persist();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -658,6 +688,7 @@ impl App {
             text.set_font_family(&self.font_family);
         }
         self.reflow();
+        self.persist();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -848,6 +879,10 @@ impl App {
             | input::MouseAction::ScrollbarTrackJump
             | input::MouseAction::None => {}
         }
+        // Persist the new setting. Drag-in-progress (slider/radius) keeps writing
+        // on release too, but a write here is cheap and captures theme/font picks
+        // that don't go through a release event.
+        self.persist();
         // Redraw both windows: settings shows the updated control, main shows the
         // new theme/font/opacity live. set_font_size/set_font_family already redraw
         // the main window, but an extra request is harmless and keeps this simple.
@@ -917,6 +952,11 @@ impl App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                // Persist the final opacity/corner-radius after a drag settles
+                // (the drag itself only updates live state to keep writes cheap).
+                if self.dragging_slider || self.dragging_radius {
+                    self.persist();
+                }
                 self.dragging_slider = false;
                 self.dragging_radius = false;
             }
@@ -1696,6 +1736,7 @@ impl ApplicationHandler<AppEvent> for App {
                     input::KeyAction::OpacityUp => {
                         self.opacity = (self.opacity + 0.05).min(1.0);
                         self.apply_theme();
+                        self.persist();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -1703,6 +1744,7 @@ impl ApplicationHandler<AppEvent> for App {
                     input::KeyAction::OpacityDown => {
                         self.opacity = (self.opacity - 0.05).max(0.1);
                         self.apply_theme();
+                        self.persist();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }

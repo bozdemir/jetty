@@ -1,0 +1,127 @@
+//! Persisted user settings.
+//!
+//! Stores the small subset of UI state the user can tweak (theme, opacity,
+//! font size + family, corner radius) as a TOML file under the OS config dir
+//! (`~/.config/jetty/config.toml` on Linux). Loading is best-effort: a missing
+//! file or any parse error falls back to `Config::default()` and never panics.
+//! Saving is also best-effort: directory-create and write errors are ignored so
+//! a read-only home can never crash the terminal.
+
+use serde::{Deserialize, Serialize};
+
+/// The persisted user settings. Field names are the TOML keys.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Config {
+    /// Theme preset name (must match a `jetty_core::theme::PRESETS` entry).
+    pub theme: String,
+    /// Background opacity in 0.0..=1.0.
+    pub opacity: f32,
+    /// Logical font size in points.
+    pub font_size: f32,
+    /// Monospace font family name.
+    pub font_family: String,
+    /// Window corner radius in logical px (0..=24).
+    pub corner_radius: f32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            theme: "catppuccin_mocha".to_string(),
+            opacity: 1.0,
+            font_size: 16.0,
+            font_family: "MesloLGS NF".to_string(),
+            corner_radius: 10.0,
+        }
+    }
+}
+
+impl Config {
+    /// Resolve the config file path: `<config_dir>/jetty/config.toml`, falling
+    /// back to `~/.config/jetty/config.toml` when `dirs::config_dir()` is
+    /// unavailable.
+    fn path() -> std::path::PathBuf {
+        let base = dirs::config_dir().unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(home).join(".config")
+        });
+        base.join("jetty").join("config.toml")
+    }
+
+    /// Load settings from disk. A missing file or any parse error yields
+    /// `Config::default()` — this never panics.
+    pub fn load() -> Config {
+        let path = Self::path();
+        match std::fs::read_to_string(&path) {
+            Ok(s) => toml::from_str(&s).unwrap_or_default(),
+            Err(_) => Config::default(),
+        }
+    }
+
+    /// Persist settings to disk. Creates the parent directory if needed. All
+    /// errors are ignored: a failed write must never crash the terminal.
+    pub fn save(&self) {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(s) = toml::to_string_pretty(self) {
+            let _ = std::fs::write(&path, s);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_has_sensible_values() {
+        let c = Config::default();
+        assert_eq!(c.theme, "catppuccin_mocha");
+        assert_eq!(c.opacity, 1.0);
+        assert_eq!(c.font_size, 16.0);
+        assert_eq!(c.font_family, "MesloLGS NF");
+        assert_eq!(c.corner_radius, 10.0);
+    }
+
+    #[test]
+    fn round_trip_through_toml() {
+        let c = Config {
+            theme: "dracula".to_string(),
+            opacity: 0.85,
+            font_size: 18.0,
+            font_family: "Fira Code".to_string(),
+            corner_radius: 6.0,
+        };
+        let s = toml::to_string_pretty(&c).expect("serialize");
+        let back: Config = toml::from_str(&s).expect("deserialize");
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn round_trip_through_file() {
+        let dir = std::env::temp_dir().join(format!("jetty-cfg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let c = Config {
+            theme: "tokyo_night".to_string(),
+            opacity: 0.5,
+            font_size: 14.0,
+            font_family: "MesloLGS NF".to_string(),
+            corner_radius: 12.0,
+        };
+        std::fs::write(&path, toml::to_string_pretty(&c).unwrap()).unwrap();
+        let s = std::fs::read_to_string(&path).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(c, back);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_file_is_default() {
+        // toml::from_str on garbage falls back to default via unwrap_or_default.
+        let back: Config = toml::from_str("not valid toml !!!").unwrap_or_default();
+        assert_eq!(back, Config::default());
+    }
+}
