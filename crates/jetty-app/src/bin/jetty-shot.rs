@@ -360,6 +360,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        // JETTY_SHOT_WELCOME — render the neofetch-style welcome splash overlay
+        // (ASCII logo + info rows + 16-color swatch + tip) so the logo legibility
+        // and layout can be eyeballed headlessly.
+        if std::env::var("JETTY_SHOT_WELCOME").is_ok() {
+            let splash = jetty_render::build_welcome_overlay(
+                width,
+                height,
+                jetty_render::TABBAR_H,
+                env!("CARGO_PKG_VERSION"),
+                "Vulkan",
+                terminal.theme(),
+            );
+            rects.extend(splash.quads);
+            panel_labels.extend(splash.labels);
+            eprintln!("jetty-shot: JETTY_SHOT_WELCOME rendered welcome splash");
+        }
+
         // JETTY_SHOT_CONFIRM — render the "Close this tab?" confirmation popup.
         if std::env::var("JETTY_SHOT_CONFIRM").is_ok() {
             let popup = jetty_render::build_confirm_close(width, height, "Tab 2", terminal.theme());

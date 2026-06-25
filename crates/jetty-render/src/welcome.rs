@@ -1,14 +1,16 @@
 use crate::Rect;
 
-/// The ASCII "JeTTY" logo rendered with a thick-strokes style. Each string is
-/// one line of the art. Accent-colored, placed on the left side of the splash.
+/// The "JETTY" logo in the ANSI-Shadow block style (full-block + box-drawing
+/// glyphs, all present in the bundled Nerd Font). Each string is one line of the
+/// art, accent-colored, on the left side of the splash. The previous thin
+/// pipe-art style read as garble ("JTTU"); this block wordmark is unambiguous.
 const LOGO: [&str; 6] = [
-    " ___     _____  _____  _    _",
-    "|_  |   |_   _||_   _|| |  | |",
-    "  | |  _  | |    | |  | |  | |",
-    "  | | | | | |    | |  | |  | |",
-    " _| |_| |_| |_  _| |_ \\ \\__/ /",
-    "|_____|_____|_| |_____| \\____/ ",
+    "     ██╗███████╗████████╗████████╗██╗   ██╗",
+    "     ██║██╔════╝╚══██╔══╝╚══██╔══╝╚██╗ ██╔╝",
+    "     ██║█████╗     ██║      ██║    ╚████╔╝ ",
+    "██   ██║██╔══╝     ██║      ██║     ╚██╔╝  ",
+    "╚█████╔╝███████╗   ██║      ██║      ██║   ",
+    " ╚════╝ ╚══════╝   ╚═╝      ╚═╝      ╚═╝   ",
 ];
 
 /// Geometry + draw data for the Welcome splash overlay.

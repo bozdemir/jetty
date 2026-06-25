@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "jetty-app"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arboard",
  "dirs",
