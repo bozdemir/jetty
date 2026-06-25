@@ -415,6 +415,10 @@ pub fn cell_bg_rects(
     rects
 }
 
+/// Scrollbar thumb width in px. The terminal grid reserves this much on the
+/// right (a gutter) so content never renders underneath the scrollbar.
+pub const SCROLLBAR_W: f32 = 14.0;
+
 /// Compute the scrollbar thumb rectangle from raw geometry values.
 /// This is the canonical geometry computation shared by drawing and hit-testing.
 /// Returns `None` when `scroll_max == 0` (nothing to scroll).
@@ -442,7 +446,7 @@ pub fn scrollbar_rect_geom(
     let thumb_h = (track_h * rows as f32 / total as f32).max(24.0);
     let frac = (scroll_max - scroll_offset) as f32 / scroll_max as f32;
     let thumb_y = track_top + frac * (track_h - thumb_h);
-    let thumb_w = 14.0; // wide enough to grab comfortably
+    let thumb_w = SCROLLBAR_W; // wide enough to grab comfortably
     Some(Rect {
         x: screen_w as f32 - thumb_w,
         y: thumb_y,
