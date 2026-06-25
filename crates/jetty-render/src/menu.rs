@@ -6,7 +6,9 @@ pub const MENU_ITEMS: [&str; 3] = ["Copy", "Paste", "Select All"];
 const MENU_W: f32 = 150.0;
 const ROW_H: f32 = 28.0;
 const MENU_H: f32 = ROW_H * MENU_ITEMS.len() as f32;
-const BORDER: f32 = 1.0;
+// 2px halo to match every other overlay (panel/help/confirm all use a 2px
+// border with a radius delta of 2 over the bg).
+const BORDER: f32 = 2.0;
 
 /// Geometry and draw data for the right-click context menu.
 pub struct ContextMenu {
@@ -78,21 +80,27 @@ pub fn build_context_menu(
 
     let mut quads: Vec<Rect> = Vec::new();
 
-    // Outer border quad (slightly larger than content), rounded to match frame.
-    quads.push(Rect::rounded(mx, my, total_w, total_h, border_col, 7.0));
+    // Outer border quad (a 2px halo around the content), rounded to bg+2 so the
+    // halo width is uniform — matches panel/help/confirm.
+    quads.push(Rect::rounded(mx, my, total_w, total_h, border_col, 8.0));
 
     // Background panel (rounded; hover rows stay sharp inside).
     quads.push(Rect::rounded(cx, cy, MENU_W, MENU_H, menu_bg, 6.0));
 
-    // Hover highlight quad (drawn on top of background, under labels).
+    // Hover highlight quad (drawn on top of background, under labels). The top
+    // and bottom rows get the bg's corner radius so the highlight doesn't square
+    // off the rounded card corners; the middle row stays sharp.
     if let Some(idx) = hovered {
         if idx < MENU_ITEMS.len() {
+            let radius = if idx == 0 || idx == MENU_ITEMS.len() - 1 { 6.0 } else { 0.0 };
             quads.push(Rect {
                 x: cx,
                 y: cy + idx as f32 * ROW_H,
                 w: MENU_W,
                 h: ROW_H,
-                color: hover_col, ..Default::default() });
+                color: hover_col,
+                radius,
+            });
         }
     }
 

@@ -530,10 +530,16 @@ pub fn build_panel(
 
     // Show a scroll hint if there are more families than visible rows.
     if families.len() > MAX_FONT_ROWS {
-        // Place the "(shown/total)" hint to the LEFT of the ▲/▼ buttons
-        // (which sit at px+PANEL_W-60..) so the count and the arrows never overlap.
+        // Right-align the "(shown/total)" hint so its right edge stays clear of
+        // the ▲ scroll button (left edge at px+PANEL_W-60) regardless of how many
+        // digits the counts have — on desktops with hundreds of fonts a fixed
+        // px+PANEL_W-132 anchor overran the arrows.
         let hint = format!("({}/{})", offset + visible_count, families.len());
-        labels.push((hint, px + PANEL_W - 132.0, py + 528.0, text_dim));
+        const CHAR_W: f32 = 9.8; // chrome font advance (matches font-list metrics)
+        let scroll_up_left = px + PANEL_W - 60.0;
+        let hint_w = hint.chars().count() as f32 * CHAR_W;
+        let hint_x = scroll_up_left - 6.0 - hint_w;
+        labels.push((hint, hint_x, py + 528.0, text_dim));
     }
 
     // Theme section label (at py+682; 12px gap after list bottom py+670).
