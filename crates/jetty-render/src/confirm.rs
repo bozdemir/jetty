@@ -91,8 +91,8 @@ pub fn build_confirm(
     quads.push(panel);
 
     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
-    // Prompt line.
-    labels.push((prompt, px + PAD, py + PAD, text_col));
+    // Prompt line (vertically centered in its ~28px region).
+    labels.push((prompt, px + PAD, py + PAD + 5.0, text_col));
 
     // Buttons row, centered horizontally within the panel.
     let btn_y = py + panel_h - PAD - BTN_H;
@@ -105,8 +105,8 @@ pub fn build_confirm(
     quads.push(cancel_rect);
 
     // Button labels: white-on-green for Close, theme fg for Cancel.
-    labels.push((close_label.to_string(), btn_x0 + 10.0, btn_y + 8.0, [245, 245, 245]));
-    labels.push((cancel_label.to_string(), cancel_x + 10.0, btn_y + 8.0, text_col));
+    labels.push((close_label.to_string(), btn_x0 + 10.0, btn_y + 6.0, [245, 245, 245]));
+    labels.push((cancel_label.to_string(), cancel_x + 10.0, btn_y + 6.0, text_col));
 
     ConfirmPopup { quads, labels, panel, close_rect, cancel_rect }
 }
