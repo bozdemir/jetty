@@ -14,7 +14,7 @@ pub const HELP_ROWS: [&str; 16] = [
     "Ctrl+Shift+P — Settings",
     "Ctrl+= / Ctrl+- / Ctrl+0 — Font size",
     "Ctrl+Shift+C / Ctrl+Shift+V — Copy / Paste",
-    "Right-click — Copy/Paste menu",
+    "Right-click — Context menu (Copy/Paste/Clear/Close Tab)",
     "Drag top bar — Move window",
     "Drag edges/corners — Resize",
     "Ctrl+D — Close tab",

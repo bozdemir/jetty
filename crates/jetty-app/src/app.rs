@@ -2249,6 +2249,21 @@ impl ApplicationHandler<AppEvent> for App {
                                 // Select All
                                 self.active_tab_mut().terminal.select_all();
                             }
+                            3 => {
+                                // Clear — emulates Ctrl+L (form-feed 0x0C) sent to the active PTY.
+                                // This is the same byte the Ctrl+L keybinding produces via
+                                // ctrl_byte('L') in input.rs; reuse the same writer path.
+                                self.active_tab_mut().terminal.scroll_to_bottom();
+                                let w = &mut self.tabs[self.active].writer;
+                                let _ = w.write_all(&[0x0C]);
+                                let _ = w.flush();
+                            }
+                            4 => {
+                                // Close Tab — mirrors the Ctrl+Shift+W handler: set confirm_close
+                                // to open the confirmation popup (or close directly if no child).
+                                // This reuses the exact same flow as KeyAction::CloseTab.
+                                self.confirm_close = Some(self.active);
+                            }
                             _ => {}
                         }
                     }
