@@ -170,9 +170,9 @@ pub fn build_panel(
     //                    slider track h=6 → bottom py+78; handle h=18 → bottom py+84 (± 3)
     //  py+96  .. py+144  Corner-radius band  (CAPS label+value at py+96, track at py+120)
     //                    track h=6 → bottom py+126; handle h=18 → bottom py+132
-    //  py+144 .. py+192  Summon-effect band  (CAPS label at py+144, ‹ name › row at py+164, h=28)
-    //  py+192 .. py+240  Window-mode band    (CAPS label at py+192, ‹ name › row at py+212, h=28)
-    //  py+240 .. py+288  Tab-bar band        (CAPS label at py+240, ‹ name › row at py+260, h=28)
+    //  py+144 .. py+192  Summon-effect band  (CAPS label at py+144, ‹ name › INLINE on the header row at py+138, h=28)
+    //  py+192 .. py+240  Window-mode band    (CAPS label at py+192, ‹ name › INLINE on the header row at py+186, h=28)
+    //  py+240 .. py+288  Tab-bar band        (CAPS label at py+240, ‹ name › INLINE on the header row at py+234, h=28)
     //  py+300 .. py+336  Dropdown-height band (CAPS label+value at py+300, track at py+324, handle py+318)
     //  py+348 .. py+384  Dropdown-width band  (CAPS label+value at py+348, track at py+372, handle py+366)
     //  py+396 .. py+432  Auto-hide band      (CAPS label at py+396, toggle pill at py+396, h=28)
@@ -247,22 +247,24 @@ pub fn build_panel(
     let radius_fill = Rect::rounded(px + 16.0, py + 120.0, radius_fill_w, 6.0, accent_fill, 3.0);
 
     // --- Summon-effect band (py+144 .. py+192) ---
-    // CAPS label at py+144; ‹ / › cycle buttons at py+164 (h=28); effect name between them.
-    let summon_btn_y = py + 164.0;
+    // CAPS label at py+144; ‹ name › cycle control INLINE on the same row,
+    // right-aligned (button h=28 centred on the header text → top at py+138),
+    // mirroring the sliders' header+value-on-one-row rhythm.
+    let summon_btn_y = py + 138.0;
     let summon_prev_x = px + 200.0;
     let summon_next_x = px + PANEL_W - 16.0 - 28.0; // rightmost
     let summon_prev = Rect::rounded(summon_prev_x, summon_btn_y, 28.0, 28.0, btn_fill, 4.0);
     let summon_next = Rect::rounded(summon_next_x, summon_btn_y, 28.0, 28.0, btn_fill, 4.0);
 
     // --- Window-mode band (py+192 .. py+240) ---
-    // CAPS label at py+192; ‹ / › cycle buttons at py+212 (h=28); mode name between them.
-    let winmode_btn_y = py + 212.0;
+    // CAPS label at py+192; ‹ name › cycle control inline on the header row.
+    let winmode_btn_y = py + 186.0;
     let win_mode_prev = Rect::rounded(summon_prev_x, winmode_btn_y, 28.0, 28.0, btn_fill, 4.0);
     let win_mode_next = Rect::rounded(summon_next_x, winmode_btn_y, 28.0, 28.0, btn_fill, 4.0);
 
     // --- Tab-bar band (py+240 .. py+288) ---
-    // CAPS label at py+240; ‹ / › cycle buttons at py+260 (h=28); position name between.
-    let tabbar_btn_y = py + 260.0;
+    // CAPS label at py+240; ‹ name › cycle control inline on the header row.
+    let tabbar_btn_y = py + 234.0;
     let tab_bar_prev = Rect::rounded(summon_prev_x, tabbar_btn_y, 28.0, 28.0, btn_fill, 4.0);
     let tab_bar_next = Rect::rounded(summon_next_x, tabbar_btn_y, 28.0, 28.0, btn_fill, 4.0);
 
