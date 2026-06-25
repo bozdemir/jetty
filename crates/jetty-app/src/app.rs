@@ -1108,13 +1108,15 @@ impl App {
         // each press. Reflowing the grid repeatedly while the shell can't redraw
         // re-wraps p10k's absolute-positioned (non-reflow-friendly) prompt over and
         // over, scattering prompt fragments across the screen. Instead schedule ONE
-        // reflow() ~120ms after the user stops: it resizes the grid AND the PTY
-        // together, so the shell gets a single SIGWINCH and repaints its prompt once,
-        // cleanly. The new cell size is visible immediately via the rebuilt
-        // TextLayer; the grid snaps to the new col/row count when the reflow fires.
-        // Each press pushes the instant forward, collapsing N presses into one.
+        // reflow() after the user stops: it resizes the grid AND the PTY together,
+        // so the shell gets a single SIGWINCH and repaints its prompt once, cleanly.
+        // The new cell size is visible immediately via the rebuilt TextLayer; the
+        // grid snaps to the new col/row count when the reflow fires. The window is
+        // generous (250ms) so even DELIBERATE, one-at-a-time Ctrl+/- presses (which
+        // a short window let through, each firing its own reflow → a staircase of
+        // p10k prompts) collapse into a single reflow.
         self.reflow_pending_at =
-            Some(std::time::Instant::now() + std::time::Duration::from_millis(120));
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
         self.persist();
         if let Some(w) = &self.window {
             w.request_redraw();
