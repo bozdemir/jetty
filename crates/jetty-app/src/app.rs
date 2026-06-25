@@ -1922,8 +1922,15 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(gpu) = &self.gpu {
                     self.offscreen = Some(Self::make_offscreen(gpu));
                 }
-                // Recompute grid to match the new surface size and notify PTY.
-                self.reflow();
+                // DEBOUNCE the grid+PTY reflow (same reasoning as set_font_size): a
+                // corner-drag fires many Resized events; reflowing + a SIGWINCH on
+                // each bombards p10k with redraws and scatters its prompt across the
+                // screen (worst on an empty tab, where the lone prompt is the only
+                // content). Schedule ONE reflow ~120ms after the drag settles. The
+                // surface already resized above, so the window tracks the drag live;
+                // the grid snaps to the new col/row count when the reflow fires.
+                self.reflow_pending_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(120));
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
