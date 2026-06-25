@@ -7,8 +7,15 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, point_to_viewport, viewport_to_point};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor, Rgb};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+
+/// Pack `cols`/`rows` into a single `u32` (cols in the high 16 bits) so the
+/// `Terminal` and its moved-away `EventProxy` can share live geometry through
+/// an `Arc<AtomicU32>` (alacritty exposes no public listener setter).
+fn pack_geom(cols: usize, rows: usize) -> u32 {
+    ((cols.min(u16::MAX as usize) as u32) << 16) | (rows.min(u16::MAX as usize) as u32)
+}
 
 /// EventListener that captures the terminal's write-back bytes (replies to
 /// host queries such as DSR/DA, text-area size, and OSC color queries) and
@@ -21,9 +28,11 @@ use std::sync::Arc;
 #[derive(Clone)]
 struct EventProxy {
     tx: std::sync::mpsc::Sender<Vec<u8>>,
-    /// Terminal geometry, needed to answer `TextAreaSizeRequest` (\e[14t/\e[18t).
-    cols: u16,
-    rows: u16,
+    /// Live terminal geometry (cols<<16 | rows), needed to answer
+    /// `TextAreaSizeRequest` (\e[14t/\e[18t). Shared with the owning `Terminal`
+    /// so `resize()` keeps these replies current after the proxy is moved into
+    /// `Term` (alacritty has no public listener setter).
+    geom: Arc<AtomicU32>,
     /// Theme snapshot used to answer OSC `ColorRequest` queries with sensible
     /// colors. Captured at construction; runtime theme changes don't need to be
     /// reflected here since these replies only affect the shell's capability
@@ -66,9 +75,10 @@ impl EventListener for EventProxy {
             // Cell pixel sizes are not meaningful for our renderer, so we use a
             // small constant; the cell/col/line counts are what shells care about.
             Event::TextAreaSizeRequest(fmt) => {
+                let g = self.geom.load(Ordering::Relaxed);
                 let window_size = WindowSize {
-                    num_lines: self.rows,
-                    num_cols: self.cols,
+                    num_lines: (g & 0xFFFF) as u16,
+                    num_cols: (g >> 16) as u16,
                     cell_width: 1,
                     cell_height: 1,
                 };
@@ -120,10 +130,18 @@ pub struct Terminal {
     /// Set to `true` once the shell child process exits; shared with the
     /// `EventProxy` listener that observes `Event::ChildExit`/`Event::Exit`.
     child_exited: Arc<AtomicBool>,
+    /// Live geometry shared with the `EventProxy` so `\e[14t`/`\e[18t` replies
+    /// stay correct after a resize.
+    geom: Arc<AtomicU32>,
 }
 
 impl Terminal {
     pub fn new(cols: usize, rows: usize) -> Terminal {
+        // alacritty's MIN_COLUMNS is 2 but it is not enforced at Term::new;
+        // a 1-column grid panics when a wide (CJK) glyph wraps and indexes
+        // row.inner[1] on a 1-element row. Clamp to 2 (and rows to 1).
+        let cols = cols.max(2);
+        let rows = rows.max(1);
         let size = Size { cols, lines: rows };
         let config = Config { scrolling_history: 10_000, ..Default::default() };
         let (tx, pty_write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -145,16 +163,16 @@ impl Terminal {
         // TextAreaSizeRequest and ColorRequest queries. Clamp the usize
         // dimensions into the u16 that WindowSize expects.
         let child_exited = Arc::new(AtomicBool::new(false));
+        let geom = Arc::new(AtomicU32::new(pack_geom(cols, rows)));
         let proxy = EventProxy {
             tx,
-            cols: cols.min(u16::MAX as usize) as u16,
-            rows: rows.min(u16::MAX as usize) as u16,
+            geom: Arc::clone(&geom),
             theme: theme.clone(),
             child_exited: Arc::clone(&child_exited),
         };
         let term = Term::new(config, &size, proxy);
 
-        Terminal { term, parser: Processor::new(), cols, rows, theme, pty_write_rx, child_exited }
+        Terminal { term, parser: Processor::new(), cols, rows, theme, pty_write_rx, child_exited, geom }
     }
 
     /// Drain all currently-pending write-back byte chunks emitted by the
@@ -204,6 +222,18 @@ impl Terminal {
                     // renders inverted once backgrounds are painted.
                     if cell.flags.contains(Flags::INVERSE) {
                         std::mem::swap(&mut fg, &mut bg);
+                    }
+                    // SGR 2 (dim): alacritty sets Flags::DIM but leaves fg as a
+                    // named color resolving to full brightness, so dim text would
+                    // be indistinguishable from normal. Apply the conventional
+                    // ~0.66 brightness multiplier to the foreground here. Done
+                    // after INVERSE so the dimmed channel is whichever ends up fg.
+                    if cell.flags.contains(Flags::DIM) {
+                        fg = [
+                            (fg[0] as f32 * 0.66) as u8,
+                            (fg[1] as f32 * 0.66) as u8,
+                            (fg[2] as f32 * 0.66) as u8,
+                        ];
                     }
                     // A double-width glyph occupies two grid cells: the WIDE_CHAR
                     // cell holds the actual char, and the following
@@ -379,27 +409,22 @@ impl Terminal {
     /// `EventProxy`'s geometry fields are updated so subsequent
     /// `TextAreaSizeRequest` replies report the correct dimensions.
     pub fn resize(&mut self, cols: usize, rows: usize) {
-        let cols = cols.max(1);
+        // Clamp cols to alacritty's MIN_COLUMNS (2); a 1-column grid panics on
+        // wide-glyph wrap. See Terminal::new.
+        let cols = cols.max(2);
         let rows = rows.max(1);
         self.cols = cols;
         self.rows = rows;
+        // Publish the new geometry to the shared atomic BEFORE Term::resize so
+        // the EventProxy answers any subsequent \e[14t/\e[18t with the new size.
+        // This is the only mutation path into the proxy (alacritty exposes no
+        // public listener setter).
+        self.geom.store(pack_geom(cols, rows), Ordering::Relaxed);
         // Build a Size with the new dimensions and pass it to Term::resize.
         // Term::resize implements the xterm/VTE resize algorithm: it reflows
         // existing lines, preserves scrollback, and adjusts the cursor position.
         let new_size = Size { cols, lines: rows };
         self.term.resize(new_size);
-        // Update the EventProxy's geometry so TextAreaSizeRequest replies are
-        // correct after a resize. There is no public mutation path into the
-        // listener, so we update it via the stored fields on EventProxy — but
-        // EventProxy is behind the Term, so we rely on self.cols/self.rows
-        // being correct (they are updated above) and Term answering the next
-        // TextAreaSizeRequest with the new geometry by calling the formatter
-        // with the WindowSize fields, which come from the EventProxy.
-        // Because the EventProxy clones itself at Term construction and there
-        // is no public setter in alacritty's API, the EventProxy stores the
-        // original geometry only for initial replies. In practice after a
-        // resize the shell queries TIOCGWINSZ directly from the PTY, so the
-        // PTY resize (done by the caller) is what matters most.
     }
 
     /// Whether the shell child process has exited (or the terminal requested
@@ -552,6 +577,34 @@ mod tests {
         // DECTCEM on: show the cursor again.
         t.feed(b"\x1b[?25h");
         assert!(t.snapshot().cursor_visible, "cursor should be visible after \\e[?25h");
+    }
+
+    #[test]
+    fn narrow_terminal_survives_wide_char() {
+        // Regression: a 1-column grid would panic when a wide (CJK) glyph wraps
+        // and indexes row.inner[1] on a 1-element row. cols is clamped to 2.
+        let mut t = Terminal::new(1, 5);
+        t.feed("世界".as_bytes());
+        let _ = t.snapshot();
+        let mut t = Terminal::new(20, 5);
+        t.resize(1, 5);
+        t.feed("世界".as_bytes());
+        let _ = t.snapshot();
+    }
+
+    #[test]
+    fn dim_text_is_darker_than_normal() {
+        let mut t = Terminal::new(20, 5);
+        // Normal "A" then dim "B".
+        t.feed(b"A\x1b[2mB\x1b[0m");
+        let snap = t.snapshot();
+        let normal = snap.cell(0, 0).fg;
+        let dim = snap.cell(0, 1).fg;
+        assert!(
+            (dim[0] as u16 + dim[1] as u16 + dim[2] as u16)
+                < (normal[0] as u16 + normal[1] as u16 + normal[2] as u16),
+            "dim fg {dim:?} should be darker than normal fg {normal:?}"
+        );
     }
 
     #[test]

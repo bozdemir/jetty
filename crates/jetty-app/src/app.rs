@@ -683,7 +683,7 @@ impl App {
         if cw <= 0.0 || ch <= 0.0 {
             return (FALLBACK_COLS, FALLBACK_ROWS);
         }
-        let cols = ((gpu.config.width as f32 - SCROLLBAR_GUTTER) / cw).floor().max(1.0) as usize;
+        let cols = ((gpu.config.width as f32 - SCROLLBAR_GUTTER) / cw).floor().max(2.0) as usize;
         let rows = ((gpu.config.height as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
         (cols, rows)
     }
@@ -1095,7 +1095,7 @@ impl App {
         }
         let w = gpu.config.width;
         let h = gpu.config.height;
-        let cols = ((w as f32 - SCROLLBAR_GUTTER) / cw).floor().max(1.0) as usize;
+        let cols = ((w as f32 - SCROLLBAR_GUTTER) / cw).floor().max(2.0) as usize;
         // The grid occupies the area below the tab bar.
         let rows = ((h as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
         // Reflow every tab so background sessions stay in sync with the window.
@@ -1778,7 +1778,7 @@ impl ApplicationHandler<AppEvent> for App {
             );
             let (cw, ch) = text.cell_size();
             // Derive the grid from the physical pixel size and the physical cell size.
-            let cols = ((size.width as f32 - SCROLLBAR_GUTTER) / cw).floor().max(1.0) as usize;
+            let cols = ((size.width as f32 - SCROLLBAR_GUTTER) / cw).floor().max(2.0) as usize;
             let rows = ((size.height as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
             let quad = QuadLayer::new(&g.device, g.format);
             (Some(text), Some(quad), cols, rows)
