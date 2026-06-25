@@ -279,6 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 panel_radius,
                 std::env::var("JETTY_SHOT_PANEL_EFFECT").unwrap_or_else(|_| "Bayer".to_string()).as_str(),
                 std::env::var("JETTY_SHOT_PANEL_WINMODE").unwrap_or_else(|_| "Center".to_string()).as_str(),
+                if std::env::var("JETTY_TAB_BAR").map(|v| v == "bottom").unwrap_or(false) { "Bottom" } else { "Top" },
                 std::env::var("JETTY_SHOT_PANEL_DH").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.50),
                 std::env::var("JETTY_SHOT_PANEL_DW").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0),
                 std::env::var("JETTY_SHOT_PANEL_WINMODE").map(|m| m == "Dropdown").unwrap_or(false),
@@ -319,10 +320,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("Tab 2".to_string(), false),
                 ("Tab 3".to_string(), false),
             ];
-            let bar = jetty_render::build_tab_bar(width, &tabs, terminal.theme());
+            let mut bar = jetty_render::build_tab_bar(width, &tabs, terminal.theme());
+            // JETTY_TAB_BAR=bottom — place the bar flush at the window bottom.
+            // build_tab_bar lays it out at y 0..TABBAR_H; translate it down.
+            let tab_bar_bottom =
+                std::env::var("JETTY_TAB_BAR").map(|v| v == "bottom").unwrap_or(false);
+            if tab_bar_bottom {
+                let bar_y = (height as f32 - jetty_render::TABBAR_H).max(0.0);
+                for q in &mut bar.quads {
+                    q.y += bar_y;
+                }
+                for l in &mut bar.labels {
+                    l.2 += bar_y;
+                }
+            }
             rects.extend(bar.quads);
             panel_labels.extend(bar.labels);
-            eprintln!("jetty-shot: JETTY_SHOT_TABBAR rendered 3 sample tabs (rounded + bordered)");
+            eprintln!(
+                "jetty-shot: JETTY_SHOT_TABBAR rendered 3 sample tabs ({})",
+                if tab_bar_bottom { "BOTTOM" } else { "top" }
+            );
         }
 
         // JETTY_SHOT_CONFIRM — render the "Close this tab?" confirmation popup.

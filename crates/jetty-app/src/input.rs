@@ -235,6 +235,10 @@ pub enum MouseAction {
     WinModePrev,
     /// User clicked the window-mode "›" button — cycle to the next mode.
     WinModeNext,
+    /// User clicked the tab-bar "‹" button — cycle the tab-bar position.
+    TabBarPrev,
+    /// User clicked the tab-bar "›" button — cycle the tab-bar position.
+    TabBarNext,
     /// User pressed on the Dropdown-height slider handle or track — start drag.
     StartDropdownDrag,
     /// User pressed on the Dropdown-width slider handle or track — start drag.
@@ -322,6 +326,13 @@ pub fn decide_mouse_press(
         }
         if point_in(&g.win_mode_next, cx, cy) {
             return MouseAction::WinModeNext;
+        }
+        // Tab-bar position cycle buttons.
+        if point_in(&g.tab_bar_prev, cx, cy) {
+            return MouseAction::TabBarPrev;
+        }
+        if point_in(&g.tab_bar_next, cx, cy) {
+            return MouseAction::TabBarNext;
         }
         // Dropdown-height slider handle or track.
         if point_in(&g.dropdown_handle, cx, cy) || point_in(&g.dropdown_track, cx, cy) {

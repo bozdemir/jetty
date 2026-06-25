@@ -36,6 +36,10 @@ pub struct PanelGeom {
     pub win_mode_prev: Rect,
     /// Window-mode "›" (next) cycle button.
     pub win_mode_next: Rect,
+    /// Tab-bar-position "‹" (previous) cycle button.
+    pub tab_bar_prev: Rect,
+    /// Tab-bar-position "›" (next) cycle button.
+    pub tab_bar_next: Rect,
     /// Dropdown-height slider track.
     pub dropdown_track: Rect,
     /// Dropdown-height slider handle.
@@ -70,7 +74,7 @@ const MAX_FONT_ROWS: usize = 5;
 /// panel here (e.g. adding a row) automatically resizes that window, so the
 /// bottom rows can never be clipped off a too-short window again.
 pub const PANEL_W: f32 = 380.0;
-pub const PANEL_H: f32 = 696.0;
+pub const PANEL_H: f32 = 744.0;
 
 /// Build the settings panel for the given screen size, opacity (0.1..=1.0),
 /// selected theme index (index into `jetty_core::theme::PRESETS`), current
@@ -91,6 +95,7 @@ pub fn build_panel(
     corner_radius: f32,
     summon_effect_name: &str,
     window_mode_name: &str,
+    tab_bar_name: &str,
     dropdown_height_pct: f32,
     dropdown_width_pct: f32,
     is_dropdown: bool,
@@ -153,15 +158,16 @@ pub fn build_panel(
     //                    track h=6 → bottom py+150; handle h=18 → bottom py+156
     //  py+168 .. py+216  Summon-effect band  (label at py+168, ‹ name › row at py+188, h=28 → bottom py+216)
     //  py+216 .. py+264  Window-mode band    (label at py+216, ‹ name › row at py+236, h=28)
-    //  py+276 .. py+312  Dropdown-height band (label at py+276, track at py+300, handle py+294)
-    //  py+324 .. py+360  Dropdown-width band  (label at py+324, track at py+348, handle py+342)
-    //  py+372 .. py+408  Auto-hide band      (label at py+372, toggle pill at py+372, h=28)
-    //  py+420 .. py+468  Font-size band  (label at py+420, buttons at py+440, btn h=28 → bottom py+468)
-    //  py+480 .. py+488  "Font" section header label
-    //  py+502 ..         Font-family list rows (5×(22+2)=120px → bottom py+622)
-    //  py+634            "Theme" label (12px gap after list bottom)
-    //  py+654            Theme chips (h=36 → bottom py+690)
-    //  PANEL_H = 690 + 6 = 696  (PANEL_W/PANEL_H are module-level pub consts above)
+    //  py+264 .. py+312  Tab-bar band        (label at py+264, ‹ name › row at py+284, h=28)
+    //  py+324 .. py+360  Dropdown-height band (label at py+324, track at py+348, handle py+342)
+    //  py+372 .. py+408  Dropdown-width band  (label at py+372, track at py+396, handle py+390)
+    //  py+420 .. py+456  Auto-hide band      (label at py+420, toggle pill at py+420, h=28)
+    //  py+468 .. py+516  Font-size band  (label at py+468, buttons at py+488, btn h=28 → bottom py+516)
+    //  py+528 .. py+536  "Font" section header label
+    //  py+550 ..         Font-family list rows (5×(22+2)=120px → bottom py+670)
+    //  py+682            "Theme" label (12px gap after list bottom)
+    //  py+702            Theme chips (h=36 → bottom py+738)
+    //  PANEL_H = 738 + 6 = 744  (PANEL_W/PANEL_H are module-level pub consts above)
 
     // Center, then apply the user drag offset, then clamp to screen edges.
     let sw = screen_w as f32;
@@ -223,30 +229,36 @@ pub fn build_panel(
     let win_mode_prev = Rect::rounded(summon_prev_x, winmode_btn_y, 28.0, 28.0, btn_fill, 4.0);
     let win_mode_next = Rect::rounded(summon_next_x, winmode_btn_y, 28.0, 28.0, btn_fill, 4.0);
 
-    // --- Dropdown-height band (py+276 .. py+312) ---
-    // Label at py+276; track centred at py+300 (h=6); handle at py+294 (h=18).
+    // --- Tab-bar band (py+264 .. py+312) ---
+    // Label at py+264; ‹ / › cycle buttons at py+284 (h=28); position name between.
+    let tabbar_btn_y = py + 284.0;
+    let tab_bar_prev = Rect::rounded(summon_prev_x, tabbar_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let tab_bar_next = Rect::rounded(summon_next_x, tabbar_btn_y, 28.0, 28.0, btn_fill, 4.0);
+
+    // --- Dropdown-height band (py+324 .. py+360) ---
+    // Label at py+324; track centred at py+348 (h=6); handle at py+342 (h=18).
     // Range 25%..100%. Grayed (treated as no-op) when mode==Center.
-    let dropdown_track = Rect::rounded(px + 16.0, py + 300.0, 348.0, 6.0, slider_track_col, 3.0);
+    let dropdown_track = Rect::rounded(px + 16.0, py + 348.0, 348.0, 6.0, slider_track_col, 3.0);
     let dh_frac = ((dropdown_height_pct - 0.25) / 0.75).clamp(0.0, 1.0);
     let dropdown_handle_x = px + 16.0 + dh_frac * (348.0 - 14.0);
-    let dropdown_handle = Rect::rounded(dropdown_handle_x, py + 294.0, 14.0, 18.0, accent_col, 4.0);
+    let dropdown_handle = Rect::rounded(dropdown_handle_x, py + 342.0, 14.0, 18.0, accent_col, 4.0);
 
-    // --- Dropdown-width band (py+324 .. py+360) ---
-    // Label at py+324; track centred at py+348 (h=6); handle at py+342 (h=18).
+    // --- Dropdown-width band (py+372 .. py+408) ---
+    // Label at py+372; track centred at py+396 (h=6); handle at py+390 (h=18).
     // Range 20%..100%. Grayed (treated as no-op) when mode==Center.
-    let dropdown_width_track = Rect::rounded(px + 16.0, py + 348.0, 348.0, 6.0, slider_track_col, 3.0);
+    let dropdown_width_track = Rect::rounded(px + 16.0, py + 396.0, 348.0, 6.0, slider_track_col, 3.0);
     let dw_frac = ((dropdown_width_pct - 0.2) / 0.8).clamp(0.0, 1.0);
     let dropdown_width_handle_x = px + 16.0 + dw_frac * (348.0 - 14.0);
-    let dropdown_width_handle = Rect::rounded(dropdown_width_handle_x, py + 342.0, 14.0, 18.0, accent_col, 4.0);
+    let dropdown_width_handle = Rect::rounded(dropdown_width_handle_x, py + 390.0, 14.0, 18.0, accent_col, 4.0);
 
-    // --- Auto-hide band (py+372 .. py+408) ---
-    // Label at py+372; toggle pill at the right (h=28). Pill is accent when ON.
+    // --- Auto-hide band (py+420 .. py+456) ---
+    // Label at py+420; toggle pill at the right (h=28). Pill is accent when ON.
     let autohide_pill_col: [u8; 4] = if focus_autohide { accent_col } else { btn_fill };
-    let autohide_toggle = Rect::rounded(px + PANEL_W - 16.0 - 56.0, py + 372.0, 56.0, 28.0, autohide_pill_col, 14.0);
+    let autohide_toggle = Rect::rounded(px + PANEL_W - 16.0 - 56.0, py + 420.0, 56.0, 28.0, autohide_pill_col, 14.0);
 
-    // --- Font-size band (py+420 .. py+468) ---
-    // Label at py+420; "Npt" readout at py+446; buttons at py+440 (h=28 → bottom py+468).
-    let font_btn_y = py + 440.0;
+    // --- Font-size band (py+468 .. py+516) ---
+    // Label at py+468; "Npt" readout at py+494; buttons at py+488 (h=28 → bottom py+516).
+    let font_btn_y = py + 488.0;
     let font_minus_x = px + 200.0;
     let font_plus_x  = font_minus_x + 36.0;
     let font_reset_x = font_plus_x  + 36.0;
@@ -255,21 +267,21 @@ pub fn build_panel(
     let font_plus = Rect::rounded(font_plus_x, font_btn_y, 28.0, 28.0, btn_fill, 4.0);
     let font_reset = Rect::rounded(font_reset_x, font_btn_y, 44.0, 28.0, btn_fill, 4.0);
 
-    // --- Font scroll buttons (▲ / ▼) in the "Font" header row at py+480 ---
+    // --- Font scroll buttons (▲ / ▼) in the "Font" header row at py+528 ---
     // Two 20×20 buttons placed at the right side of the header row.
-    let scroll_btn_y = py + 478.0;
+    let scroll_btn_y = py + 526.0;
     let scroll_down_x = px + PANEL_W - 16.0 - 20.0;        // ▼ rightmost
     let scroll_up_x   = scroll_down_x - 24.0;               // ▲ left of ▼
     let font_scroll_up = Rect::rounded(scroll_up_x, scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
     let font_scroll_down = Rect::rounded(scroll_down_x, scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
 
-    // --- Font-family list (py+502 .. py+622) ---
-    // "Font" header at py+480; list rows start at py+502.
-    // 5 rows × (22px row + 2px gap) = 120px → list bottom = py+622.
-    // Theme label at py+634 (12px gap); chips at py+654.
+    // --- Font-family list (py+550 .. py+670) ---
+    // "Font" header at py+528; list rows start at py+550.
+    // 5 rows × (22px row + 2px gap) = 120px → list bottom = py+670.
+    // Theme label at py+682 (12px gap); chips at py+702.
     const ROW_H: f32 = 22.0;
     const ROW_GAP: f32 = 2.0;
-    let list_top = py + 502.0;
+    let list_top = py + 550.0;
     let list_x = px + 16.0;
     let list_w = PANEL_W - 32.0;
 
@@ -285,12 +297,12 @@ pub fn build_panel(
         font_row_rects.push(Rect::rounded(list_x, row_y, list_w, ROW_H, row_color, 3.0));
     }
 
-    // --- Theme chips (py+654 .. py+690) ---
-    // "Theme" label at py+634; chips at py+654 (h=36 → bottom py+690).
+    // --- Theme chips (py+702 .. py+738) ---
+    // "Theme" label at py+682; chips at py+702 (h=36 → bottom py+738).
     let presets = jetty_core::theme::PRESETS;
     let num_presets = presets.len(); // should be 4
 
-    let chip_top = py + 654.0;
+    let chip_top = py + 702.0;
     // Chips fill the row evenly for however many presets exist, so adding a theme
     // never overflows the panel (348px usable = PANEL_W - 2*16 margin).
     let chip_gap = 8.0;
@@ -320,6 +332,10 @@ pub fn build_panel(
     // Window-mode cycle buttons.
     quads.push(win_mode_prev);
     quads.push(win_mode_next);
+
+    // Tab-bar position cycle buttons.
+    quads.push(tab_bar_prev);
+    quads.push(tab_bar_next);
 
     // Dropdown-height slider (track + handle). Grayed to ~0.4 alpha when the
     // window mode is Center (the control is a no-op there).
@@ -419,28 +435,39 @@ pub fn build_panel(
     labels.push(("<".to_string(), summon_prev_x + 9.0, winmode_btn_y + 6.0, text_btn));
     labels.push((">".to_string(), summon_next_x + 9.0, winmode_btn_y + 6.0, text_btn));
 
-    // Dropdown-height section (band top at py+276). Grayed when mode==Center.
+    // Tab-bar section (band top at py+264).
+    labels.push(("Tab bar".to_string(), px + 16.0, py + 264.0, text_dim));
+    labels.push((
+        tab_bar_name.to_string(),
+        summon_prev_x + 40.0,
+        tabbar_btn_y + 6.0,
+        text_main,
+    ));
+    labels.push(("<".to_string(), summon_prev_x + 9.0, tabbar_btn_y + 6.0, text_btn));
+    labels.push((">".to_string(), summon_next_x + 9.0, tabbar_btn_y + 6.0, text_btn));
+
+    // Dropdown-height section (band top at py+324). Grayed when mode==Center.
     let dh_text = if is_dropdown { text_dim } else { text_btn };
     let dh_pct = (dropdown_height_pct * 100.0).round() as i32;
     labels.push((
         format!("Dropdown height  {}%", dh_pct),
         px + 16.0,
-        py + 276.0,
+        py + 324.0,
         dh_text,
     ));
 
-    // Dropdown-width section (band top at py+324). Grayed when mode==Center.
+    // Dropdown-width section (band top at py+372). Grayed when mode==Center.
     let dw_text = if is_dropdown { text_dim } else { text_btn };
     let dw_pct = (dropdown_width_pct * 100.0).round() as i32;
     labels.push((
         format!("Dropdown width  {}%", dw_pct),
         px + 16.0,
-        py + 324.0,
+        py + 372.0,
         dw_text,
     ));
 
-    // Auto-hide section (band top at py+372) with an ON/OFF pill label.
-    labels.push(("Auto-hide on focus loss".to_string(), px + 16.0, py + 372.0, text_dim));
+    // Auto-hide section (band top at py+420) with an ON/OFF pill label.
+    labels.push(("Auto-hide on focus loss".to_string(), px + 16.0, py + 420.0, text_dim));
     let (pill_text, pill_col) = if focus_autohide {
         ("ON", [20u8, 20, 20])
     } else {
@@ -453,15 +480,15 @@ pub fn build_panel(
         pill_col,
     ));
 
-    // Font-size section header (band top at py+420).
-    labels.push(("Font size".to_string(), px + 16.0, py + 420.0, text_dim));
+    // Font-size section header (band top at py+468).
+    labels.push(("Font size".to_string(), px + 16.0, py + 468.0, text_dim));
 
     // Current font-size readout aligned with buttons.
     let fs_display = font_size.round() as i32;
     labels.push((
         format!("{}pt", fs_display),
         px + 140.0,
-        py + 446.0,
+        py + 494.0,
         text_main,
     ));
 
@@ -470,8 +497,8 @@ pub fn build_panel(
     labels.push(("+".to_string(),  font_plus_x  + 8.0,  font_btn_y + 6.0,  text_btn));
     labels.push(("rst".to_string(), font_reset_x + 6.0, font_btn_y + 6.0,  text_btn));
 
-    // Font-family section header (at py+480; list starts at py+502).
-    labels.push(("Font".to_string(), px + 16.0, py + 480.0, text_dim));
+    // Font-family section header (at py+528; list starts at py+550).
+    labels.push(("Font".to_string(), px + 16.0, py + 528.0, text_dim));
 
     // Scroll button labels (▲ / ▼).
     labels.push(("^".to_string(), scroll_up_x   + 6.0, scroll_btn_y + 4.0, text_btn));
@@ -506,11 +533,11 @@ pub fn build_panel(
         // Place the "(shown/total)" hint to the LEFT of the ▲/▼ buttons
         // (which sit at px+PANEL_W-60..) so the count and the arrows never overlap.
         let hint = format!("({}/{})", offset + visible_count, families.len());
-        labels.push((hint, px + PANEL_W - 132.0, py + 480.0, text_dim));
+        labels.push((hint, px + PANEL_W - 132.0, py + 528.0, text_dim));
     }
 
-    // Theme section label (at py+634; 12px gap after list bottom py+622).
-    labels.push(("Theme".to_string(), px + 16.0, py + 634.0, text_dim));
+    // Theme section label (at py+682; 12px gap after list bottom py+670).
+    labels.push(("Theme".to_string(), px + 16.0, py + 682.0, text_dim));
 
     // Chip name labels.
     for i in 0..num_presets {
@@ -556,6 +583,8 @@ pub fn build_panel(
         summon_next,
         win_mode_prev,
         win_mode_next,
+        tab_bar_prev,
+        tab_bar_next,
         dropdown_track,
         dropdown_handle,
         dropdown_width_track,
