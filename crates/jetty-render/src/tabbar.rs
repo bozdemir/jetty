@@ -203,7 +203,7 @@ pub fn build_tab_bar_ex(
         } else {
             dim_fg
         };
-        labels.push(("❯".to_string(), x + 10.0, 13.0, marker_color));
+        labels.push(("❯".to_string(), x + 10.0, 9.0, marker_color));
         if being_renamed {
             // Show the live edit buffer plus a trailing caret. Truncate from the
             // FRONT so the caret/most-recent text stays visible while typing.
@@ -215,7 +215,7 @@ pub fn build_tab_bar_ex(
                 buf.to_string()
             };
             shown.push('▏');
-            labels.push((shown, x + 26.0, 13.0, label_color));
+            labels.push((shown, x + 26.0, 9.0, label_color));
         } else {
             // Truncated title label.
             let shown: String = if title.chars().count() > max_chars {
@@ -225,11 +225,11 @@ pub fn build_tab_bar_ex(
             } else {
                 title.clone()
             };
-            labels.push((shown, x + 26.0, 13.0, label_color));
+            labels.push((shown, x + 26.0, 9.0, label_color));
 
             // Close "×" at the tab's right (hidden while renaming this tab).
             let close_x = x + tab_w - CLOSE_W - 4.0;
-            labels.push(("×".to_string(), close_x + 4.0, 13.0, label_color));
+            labels.push(("×".to_string(), close_x + 4.0, 9.0, label_color));
         }
 
         // Close hit-box (kept even while renaming so indices stay aligned).
@@ -244,14 +244,14 @@ pub fn build_tab_bar_ex(
     let plus_rect = Rect { x, y: 0.0, w: PLUS_W, h, color: inactive_bg, ..Default::default() };
     if x + PLUS_W <= tab_area_x {
         quads.push(Rect::rounded(x + 3.0, TAB_VPAD, PLUS_W - 6.0, h - TAB_VPAD * 2.0, inactive_bg, 5.0));
-        labels.push(("+".to_string(), x + 11.0, 12.0, fg));
+        labels.push(("+".to_string(), x + 11.0, 8.0, fg));
     }
 
     // A small "+N" hint when some tabs couldn't be drawn (too many to fit even at
     // the minimum width). Placed just left of the controls so it never overlaps.
     if overflow > 0 {
         let hint_x = (tab_area_x - 34.0).max(x + PLUS_W + 4.0);
-        labels.push((format!("+{overflow}"), hint_x, 13.0, dim_fg));
+        labels.push((format!("+{overflow}"), hint_x, 9.0, dim_fg));
     }
 
     // --- Right-side controls (left→right): Help "?", Settings "⚙",
@@ -293,12 +293,12 @@ pub fn build_tab_bar_ex(
 
     // Glyphs centred-ish in each control cell. "⚙" may be missing in some
     // monospace fonts; "≡" is a safe, widely-available fallback for settings.
-    labels.push(("?".to_string(), help_x + 9.0, 13.0, fg));
-    labels.push(("⚙".to_string(), settings_x + 8.0, 13.0, fg));
-    labels.push(("─".to_string(), min_x + 8.0, 13.0, fg));
-    labels.push(("▢".to_string(), max_x + 8.0, 13.0, fg));
+    labels.push(("?".to_string(), help_x + 9.0, 9.0, fg));
+    labels.push(("⚙".to_string(), settings_x + 8.0, 9.0, fg));
+    labels.push(("─".to_string(), min_x + 8.0, 9.0, fg));
+    labels.push(("▢".to_string(), max_x + 8.0, 9.0, fg));
     let close_fg = if ctrl_hover == CtrlHover::Close { [0xFF, 0xFF, 0xFF] } else { fg };
-    labels.push(("✕".to_string(), close_x + 8.0, 13.0, close_fg));
+    labels.push(("✕".to_string(), close_x + 8.0, 9.0, close_fg));
 
     TabBar {
         quads, labels, tab_rects, close_rects, plus_rect,

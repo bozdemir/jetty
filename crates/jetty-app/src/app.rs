@@ -1096,6 +1096,11 @@ impl App {
         if let Some(text) = &mut self.text {
             text.set_font_family(&self.font_family);
         }
+        // The chrome follows the selected font FAMILY too (but keeps its fixed
+        // size), so the tab bar / controls match the terminal typeface.
+        if let Some(ct) = &mut self.chrome_text {
+            ct.set_font_family(&self.font_family);
+        }
         self.reflow();
         self.persist();
         if let Some(w) = &self.window {
