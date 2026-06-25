@@ -1151,15 +1151,12 @@ impl App {
         let clamped = new_logical.clamp(6.0, 48.0);
         self.font_logical = clamped;
         let scale = self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
-        if let Some(ref g) = self.gpu {
-            let new_text = TextLayer::new_with_family(
-                &g.device, &g.queue, g.format, clamped * scale, &self.font_family,
-            );
-            self.text = Some(new_text);
-            // Re-populate family list from the new TextLayer.
-            if let Some(ref t) = self.text {
-                self.font_families = t.monospace_families();
-            }
+        // Resize the font IN-PLACE, reusing the existing FontSystem — rebuilding
+        // it (new_with_family) would rescan fontconfig (~20ms) on the main thread
+        // on every Ctrl+/Ctrl- press. The family list is unchanged by a size
+        // change, so it does not need re-querying.
+        if let Some(t) = self.text.as_mut() {
+            t.set_font_size(clamped * scale);
         }
         // DEBOUNCE the WHOLE grid+PTY reflow — do NOT resize the terminal grid on
         // each press. Reflowing the grid repeatedly while the shell can't redraw
@@ -1543,13 +1540,11 @@ impl App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let scale = scale_factor as f32;
-                if let Some(ref g) = self.settings_gpu {
-                    // FIXED chrome size (16 * scale), so the panel text never
-                    // overflows the fixed window regardless of the terminal font.
-                    let new_text = TextLayer::new_with_family(
-                        &g.device, &g.queue, g.format, FONT_LOGICAL_DEFAULT * scale, &self.font_family,
-                    );
-                    self.settings_text = Some(new_text);
+                // FIXED chrome size (16 * scale); re-scale in place (reusing the
+                // FontSystem) so a settings-window DPI change doesn't rescan
+                // fontconfig (~20ms) on the main thread.
+                if let Some(t) = self.settings_text.as_mut() {
+                    t.set_font_size(FONT_LOGICAL_DEFAULT * scale);
                 }
                 if let Some(w) = &self.settings_window {
                     w.request_redraw();
@@ -2040,17 +2035,14 @@ impl ApplicationHandler<AppEvent> for App {
                 // debounced reflow and let the Resized event's reflow correct the
                 // grid against the real surface size.
                 let scale = scale_factor as f32;
-                if let Some(ref g) = self.gpu {
-                    let new_text = TextLayer::new_with_family(
-                        &g.device, &g.queue, g.format, self.font_logical * scale, &self.font_family,
-                    );
-                    self.text = Some(new_text);
-                    // Rebuild the chrome layer at the new scale (still FIXED logical
-                    // size), so chrome stays sharp on the new monitor's DPI without
-                    // scaling to the terminal font.
-                    self.chrome_text = Some(TextLayer::new_with_family(
-                        &g.device, &g.queue, g.format, FONT_LOGICAL_DEFAULT * scale, &self.font_family,
-                    ));
+                // Re-scale the font IN-PLACE (reusing the FontSystem) rather than
+                // rebuilding the TextLayers — a DPI change must not rescan
+                // fontconfig (~20ms) twice on the main thread.
+                if let Some(t) = self.text.as_mut() {
+                    t.set_font_size(self.font_logical * scale);
+                }
+                if let Some(t) = self.chrome_text.as_mut() {
+                    t.set_font_size(FONT_LOGICAL_DEFAULT * scale);
                 }
                 self.reflow_pending_at =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(120));

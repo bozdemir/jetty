@@ -183,6 +183,38 @@ impl TextLayer {
         );
     }
 
+    /// Change the font size in-place, REUSING the existing `FontSystem` (and its
+    /// already-loaded fontconfig + ~/.local/share/fonts database) instead of
+    /// rebuilding it. Rebuilding the FontSystem costs ~20ms of fontconfig rescan;
+    /// font-size changes (Ctrl+/Ctrl-, DPI changes) must not pay that on the main
+    /// thread per keypress. Re-derives metrics, the layout/cursor buffers, and the
+    /// cell measurements. The caller must `reflow()` + `request_redraw()` after.
+    pub fn set_font_size(&mut self, font_size: f32) {
+        let line_height = (font_size * 1.3).ceil();
+        self.metrics = Metrics::new(font_size, line_height);
+        self.buffer.set_metrics(&mut self.font_system, self.metrics);
+        self.buffer.set_size(&mut self.font_system, None, None);
+        self.cursor_buffer.set_metrics(&mut self.font_system, self.metrics);
+        self.cursor_buffer.set_size(&mut self.font_system, None, None);
+        let cursor_attrs = Attrs::new().family(Family::Name(&self.font_family));
+        self.cursor_buffer.set_text(
+            &mut self.font_system,
+            "\u{2588}",
+            &cursor_attrs,
+            Shaping::Basic,
+            None,
+        );
+        // Re-measure the monospace cell at the new size.
+        self.cell_w = measure_advance_family(
+            &mut self.font_system,
+            self.metrics,
+            // measure with the current family; clone the Arc cheaply to satisfy
+            // the &mut self.font_system borrow.
+            &Arc::clone(&self.font_family),
+        );
+        self.cell_h = line_height;
+    }
+
     /// Returns the currently active font family name.
     pub fn font_family(&self) -> &str {
         &self.font_family
