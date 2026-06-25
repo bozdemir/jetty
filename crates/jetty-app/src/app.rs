@@ -367,6 +367,11 @@ pub struct App {
     /// call `set_cursor` when the zone actually changes (the borderless window
     /// draws its own resize edges).
     resize_cursor: ResizeZone,
+    /// Whether the neofetch-style welcome splash is still open. Shown on launch
+    /// (when `show_welcome` is true in config); dismissed on the first real PTY
+    /// keypress, any mouse click in the grid area, or Esc. A single bool — the
+    /// check and the clear are both O(1) so the idle path is unaffected.
+    welcome_open: bool,
     /// Whether the in-window "Keyboard Shortcuts" help overlay is open. Drawn on
     /// top of everything in the main window; dismissed by Esc, the "?" button,
     /// or a click outside the panel.
@@ -571,6 +576,7 @@ impl App {
             rename_buf: String::new(),
             last_strip_click: None,
             resize_cursor: ResizeZone::None,
+            welcome_open: true, // overridden below by config.show_welcome
             help_open: false,
             confirm_close: None,
             confirm_quit: false,
@@ -598,6 +604,7 @@ impl App {
         app.dropdown_height_pct = cfg.dropdown_height_pct.clamp(0.25, 1.0);
         app.dropdown_width_pct = cfg.dropdown_width_pct.clamp(0.2, 1.0);
         app.focus_autohide = cfg.focus_autohide;
+        app.welcome_open = cfg.show_welcome;
 
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -621,6 +628,11 @@ impl App {
             dropdown_width_pct: self.dropdown_width_pct,
             focus_autohide: self.focus_autohide,
             tab_bar_position: if self.tab_bar_bottom { "bottom" } else { "top" }.to_string(),
+            // show_welcome persists the startup preference, not the session
+            // dismissal state. We re-read the on-disk value so a user who has
+            // manually set show_welcome = false in their TOML keeps that choice
+            // even when persist() is called for an unrelated setting change.
+            show_welcome: crate::config::Config::load().show_welcome,
         }
         .save();
     }
@@ -2448,6 +2460,13 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 // A click in the terminal area commits any in-progress rename.
                 self.commit_rename();
+                // A click in the grid area dismisses the welcome splash.
+                if self.welcome_open {
+                    self.welcome_open = false;
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                }
 
                 let rows = self.active_tab().terminal.rows();
                 let scroll_offset = self.active_tab().terminal.scroll_offset();
@@ -2737,6 +2756,19 @@ impl ApplicationHandler<AppEvent> for App {
                     let _ = i;
                     return;
                 }
+                // --- Welcome splash captures Escape (dismiss only, non-modal) ---
+                // Esc dismisses the welcome splash without consuming the key further
+                // (it still falls through to the help/PTY path so the shell also
+                // sees the ESC byte, which is the normal behaviour for Esc → PTY).
+                if self.welcome_open
+                    && matches!(
+                        event.logical_key,
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)
+                    )
+                {
+                    self.welcome_open = false;
+                    // Don't return — let Esc continue through to the PTY path.
+                }
                 // --- Help overlay captures Escape ---
                 // When the help overlay is open, Escape closes it and is fully
                 // consumed: it must NOT also close a tab or reach the shell.
@@ -2882,6 +2914,11 @@ impl ApplicationHandler<AppEvent> for App {
                             }
                             return;
                         }
+                        // Esc also dismisses the welcome splash (but still reaches PTY).
+                        // Any real Send to the PTY also dismisses the welcome splash.
+                        if self.welcome_open {
+                            self.welcome_open = false;
+                        }
                         // Any real keystroke jumps back to the bottom so the user sees their input.
                         self.active_tab_mut().terminal.scroll_to_bottom();
                         let w = &mut self.tabs[self.active].writer;
@@ -2948,6 +2985,14 @@ impl ApplicationHandler<AppEvent> for App {
                 let context_menu = self.context_menu;
                 let menu_hover = self.menu_hover;
                 let help_open = self.help_open;
+                let welcome_open = self.welcome_open;
+                // Backend name for the welcome overlay (captured before the mutable
+                // gpu borrow; falls back to "?" when gpu is not yet available).
+                let gpu_backend_name: String = self
+                    .gpu
+                    .as_ref()
+                    .map(|g| g.backend_name.clone())
+                    .unwrap_or_else(|| "?".to_string());
                 let confirm_quit = self.confirm_quit;
                 let confirm_close: Option<String> = self
                     .confirm_close
@@ -3112,6 +3157,35 @@ impl ApplicationHandler<AppEvent> for App {
                         rects.push(r);
                     }
                     quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &rects);
+                    // Pass 4b: welcome splash — drawn over the grid but UNDER all
+                    // modals (context menu, help, confirm popups). Only shown when
+                    // welcome_open is true (dismissed on first PTY input/click/Esc).
+                    // No modal is active at this draw position, so it won't occlude
+                    // the splash, and modals drawn afterward sit on top of it.
+                    // Skip the splash if any modal is active to avoid visual clutter.
+                    if welcome_open
+                        && context_menu.is_none()
+                        && !help_open
+                        && confirm_close.is_none()
+                        && !confirm_quit
+                    {
+                        let splash = jetty_render::build_welcome_overlay(
+                            width,
+                            height,
+                            grid_top + slide_y_offset,
+                            env!("CARGO_PKG_VERSION"),
+                            &gpu_backend_name,
+                            &theme,
+                        );
+                        if !splash.quads.is_empty() {
+                            quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &splash.quads);
+                        }
+                        if !splash.labels.is_empty() {
+                            let _ = chrome_text.render_overlays(
+                                &gpu.device, &gpu.queue, scene_view, width, height, &splash.labels,
+                            );
+                        }
+                    }
                     // Draw the right-click context menu on top of everything.
                     if let Some((mx, my)) = context_menu {
                         let menu = jetty_render::build_context_menu(mx, my, width, height, menu_hover, &theme);

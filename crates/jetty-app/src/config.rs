@@ -44,6 +44,10 @@ pub struct Config {
     /// `window_mode` — usable in both Center and Dropdown modes.
     #[serde(default = "default_tab_bar_position")]
     pub tab_bar_position: String,
+    /// Show the neofetch-style welcome splash on launch (dismissed on first input).
+    /// Default `true`. Set to `false` to skip the splash entirely.
+    #[serde(default = "default_show_welcome")]
+    pub show_welcome: bool,
 }
 
 fn default_summon_effect() -> String {
@@ -70,6 +74,10 @@ fn default_tab_bar_position() -> String {
     "top".to_string()
 }
 
+fn default_show_welcome() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -84,6 +92,7 @@ impl Default for Config {
             dropdown_width_pct: default_dropdown_width_pct(),
             focus_autohide: default_focus_autohide(),
             tab_bar_position: default_tab_bar_position(),
+            show_welcome: default_show_welcome(),
         }
     }
 }
@@ -141,6 +150,7 @@ mod tests {
         assert_eq!(c.dropdown_width_pct, 1.0);
         assert!(c.focus_autohide);
         assert_eq!(c.tab_bar_position, "top");
+        assert!(c.show_welcome);
     }
 
     #[test]
@@ -163,6 +173,8 @@ mod tests {
         assert!(c.focus_autohide);
         // An older config without tab_bar_position still loads as "top".
         assert_eq!(c.tab_bar_position, "top");
+        // An older config without show_welcome still loads as true.
+        assert!(c.show_welcome);
     }
 
     #[test]
@@ -179,6 +191,7 @@ mod tests {
             dropdown_width_pct: 1.0,
             focus_autohide: false,
             tab_bar_position: "bottom".to_string(),
+            show_welcome: false,
         };
         let s = toml::to_string_pretty(&c).expect("serialize");
         let back: Config = toml::from_str(&s).expect("deserialize");
@@ -202,6 +215,7 @@ mod tests {
             dropdown_width_pct: 1.0,
             focus_autohide: true,
             tab_bar_position: "bottom".to_string(),
+            show_welcome: true,
         };
         std::fs::write(&path, toml::to_string_pretty(&c).unwrap()).unwrap();
         let s = std::fs::read_to_string(&path).unwrap();

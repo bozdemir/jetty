@@ -11,6 +11,7 @@ mod reveal;
 mod phosphor;
 mod liquid;
 mod focus;
+mod welcome;
 pub use gpu::GpuContext;
 pub use text::TextLayer;
 pub use quad::{QuadLayer, Rect, cell_bg_rects, default_bg_clear, scrollbar_rect, scrollbar_rect_geom, SCROLLBAR_W};
@@ -26,3 +27,4 @@ pub use confirm::{build_confirm, build_confirm_close, ConfirmPopup};
 pub use tabbar::{
     build_tab_bar, build_tab_bar_ex, CtrlHover, TabBar, CONTROLS_W, STRIP_PAD, TABBAR_H,
 };
+pub use welcome::{build_welcome_overlay, WelcomeOverlay};

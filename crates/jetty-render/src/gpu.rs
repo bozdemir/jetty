@@ -6,6 +6,9 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub format: wgpu::TextureFormat,
+    /// Human-readable wgpu backend name captured at adapter selection, e.g.
+    /// "Vulkan", "Metal", "Gl". Used by the Welcome overlay "Render" row.
+    pub backend_name: String,
 }
 
 impl GpuContext {
@@ -112,7 +115,10 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
 
-        Some(Self { surface, device, queue, config, format })
+        // Capture the backend name for display in the Welcome overlay.
+        let backend_name = format!("{:?}", adapter.get_info().backend);
+
+        Some(Self { surface, device, queue, config, format, backend_name })
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
