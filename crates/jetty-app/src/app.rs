@@ -2024,11 +2024,13 @@ impl ApplicationHandler<AppEvent> for App {
                 // corner-drag fires many Resized events; reflowing + a SIGWINCH on
                 // each bombards p10k with redraws and scatters its prompt across the
                 // screen (worst on an empty tab, where the lone prompt is the only
-                // content). Schedule ONE reflow ~120ms after the drag settles. The
-                // surface already resized above, so the window tracks the drag live;
-                // the grid snaps to the new col/row count when the reflow fires.
+                // content). Schedule ONE reflow after the drag settles (250ms, same
+                // as font changes — a short window let aggressive/paused drags fire
+                // several reflows, each leaving a stray prompt). The surface already
+                // resized above, so the window tracks the drag live; the grid snaps
+                // to the new col/row count when the single reflow fires.
                 self.reflow_pending_at =
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(120));
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
