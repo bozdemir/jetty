@@ -220,6 +220,10 @@ pub struct App {
     summon_effect: SummonEffect,
     /// How F9 summons the window (Center vs Yakuake-style Dropdown).
     window_mode: WindowMode,
+    /// Whether the tab bar (tabs + window controls) sits at the BOTTOM of the
+    /// window instead of the TOP. Orthogonal to `window_mode` (works in both
+    /// Center and Dropdown). Default `false` (top).
+    tab_bar_bottom: bool,
     /// Dropdown height as a fraction of the monitor height (clamped 0.25..=1.0).
     dropdown_height_pct: f32,
     /// Dropdown width as a fraction of the monitor width (clamped 0.2..=1.0).
@@ -483,6 +487,7 @@ impl App {
             offscreen: None,
             summon_effect: SummonEffect::Bayer,
             window_mode: WindowMode::Center,
+            tab_bar_bottom: false,
             dropdown_height_pct: 0.50,
             dropdown_width_pct: 1.0,
             slide_anim: None,
@@ -547,6 +552,7 @@ impl App {
         app.corner_radius = cfg.corner_radius.clamp(0.0, 24.0);
         app.summon_effect = SummonEffect::from_config(&cfg.summon_effect);
         app.window_mode = WindowMode::from_config(&cfg.window_mode);
+        app.tab_bar_bottom = cfg.tab_bar_position == "bottom";
         app.dropdown_height_pct = cfg.dropdown_height_pct.clamp(0.25, 1.0);
         app.dropdown_width_pct = cfg.dropdown_width_pct.clamp(0.2, 1.0);
         app.focus_autohide = cfg.focus_autohide;
@@ -572,6 +578,7 @@ impl App {
             dropdown_height_pct: self.dropdown_height_pct,
             dropdown_width_pct: self.dropdown_width_pct,
             focus_autohide: self.focus_autohide,
+            tab_bar_position: if self.tab_bar_bottom { "bottom" } else { "top" }.to_string(),
         }
         .save();
     }
@@ -659,6 +666,20 @@ impl App {
         let cols = (gpu.config.width as f32 / cw).floor().max(1.0) as usize;
         let rows = ((gpu.config.height as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
         (cols, rows)
+    }
+
+    /// Pixel Y origin of the terminal grid. The bar always costs `TABBAR_H` of
+    /// grid HEIGHT regardless of side, but the grid's pixel ORIGIN is 0 when the
+    /// bar is at the bottom (grid fills from the top) and `TABBAR_H` when it's at
+    /// the top (grid starts below the bar).
+    fn grid_top_offset(&self) -> f32 {
+        if self.tab_bar_bottom { 0.0 } else { TABBAR_H }
+    }
+
+    /// Pixel Y of the tab bar's top edge for a surface of physical `height`.
+    /// 0 when the bar is at the top; `height - TABBAR_H` when at the bottom.
+    fn tabbar_y(&self, height: f32) -> f32 {
+        if self.tab_bar_bottom { (height - TABBAR_H).max(0.0) } else { 0.0 }
     }
 
     /// Spawn a new tab sized to the current grid, themed like the others, make it
@@ -781,7 +802,8 @@ impl App {
         if max == 0 {
             return;
         }
-        // The scrollbar track lives below the tab bar.
+        // The scrollbar track spans the grid area (always TABBAR_H shorter than
+        // the surface, whichever side the bar is on).
         let track_h = (h as f32 - TABBAR_H).max(0.0);
         // Recompute thumb height the same way as the geometry function.
         let rows = self.active_tab().terminal.rows();
@@ -793,8 +815,8 @@ impl App {
             return;
         }
 
-        // Cursor y is absolute; subtract the bar offset so 0 == track top.
-        let thumb_top = ((self.cursor.1 as f32 - TABBAR_H) - self.drag_grab_dy).clamp(0.0, travel);
+        // Cursor y is absolute; subtract the grid origin so 0 == track top.
+        let thumb_top = ((self.cursor.1 as f32 - self.grid_top_offset()) - self.drag_grab_dy).clamp(0.0, travel);
         // frac=0 → thumb at top → scroll_offset=max (oldest history)
         // frac=1 → thumb at bottom → scroll_offset=0 (live bottom)
         let frac = thumb_top / travel;
@@ -867,6 +889,23 @@ impl App {
         }
     }
 
+    /// Flip the tab-bar position (top ↔ bottom): persist it and apply live. The
+    /// grid dimensions are unchanged (the bar always costs TABBAR_H of grid
+    /// height), so no reflow is needed — only a redraw of both windows.
+    fn set_tab_bar_bottom(&mut self, bottom: bool) {
+        if self.tab_bar_bottom == bottom {
+            return;
+        }
+        self.tab_bar_bottom = bottom;
+        self.persist();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        if let Some(w) = &self.settings_window {
+            w.request_redraw();
+        }
+    }
+
     /// Convert the current cursor pixel position into 1-based terminal cell
     /// coordinates `(col, row)` using the renderer's cell size. Returns `None`
     /// when the renderer (and thus cell metrics) is not yet available.
@@ -876,8 +915,9 @@ impl App {
             return None;
         }
         let col = (self.cursor.0 as f32 / cell_w).floor() as i64 + 1;
-        // The grid starts below the tab bar; subtract TABBAR_H before dividing.
-        let y = (self.cursor.1 as f32 - TABBAR_H).max(0.0);
+        // Subtract the grid's pixel origin before dividing (0 when the bar is at
+        // the bottom, TABBAR_H when at the top).
+        let y = (self.cursor.1 as f32 - self.grid_top_offset()).max(0.0);
         let row = (y / cell_h).floor() as i64 + 1;
         Some((col.max(1) as usize, row.max(1) as usize))
     }
@@ -892,8 +932,8 @@ impl App {
         }
         let cols = self.active_tab().terminal.cols().saturating_sub(1);
         let rows = self.active_tab().terminal.rows().saturating_sub(1);
-        // The grid is offset down by the tab bar; subtract it (clamped ≥0).
-        let y = (self.cursor.1 as f32 - TABBAR_H).max(0.0);
+        // Subtract the grid's pixel origin (0 at bottom, TABBAR_H at top).
+        let y = (self.cursor.1 as f32 - self.grid_top_offset()).max(0.0);
         let col = ((self.cursor.0 as f32 / cell_w).floor() as i64).clamp(0, cols as i64) as usize;
         let line = ((y / cell_h).floor() as i64).clamp(0, rows as i64) as usize;
         Some((line, col))
@@ -1237,7 +1277,9 @@ impl App {
             w, h, self.opacity, self.theme_idx, self.font_logical,
             &self.font_families, &self.font_family, self.font_scroll_offset,
             self.corner_radius, self.summon_effect.display_name(),
-            self.window_mode.display_name(), self.dropdown_height_pct,
+            self.window_mode.display_name(),
+            if self.tab_bar_bottom { "Bottom" } else { "Top" },
+            self.dropdown_height_pct,
             self.dropdown_width_pct,
             self.window_mode == WindowMode::Dropdown, self.focus_autohide,
             0.0, 0.0, &theme,
@@ -1257,6 +1299,7 @@ impl App {
         let dropdown_width_pct = self.dropdown_width_pct;
         let is_dropdown = self.window_mode == WindowMode::Dropdown;
         let focus_autohide = self.focus_autohide;
+        let tab_bar_name = if self.tab_bar_bottom { "Bottom" } else { "Top" };
         // Clone the small inputs build_panel needs so we can borrow the render
         // stack mutably below without overlapping the immutable self borrows.
         let families = self.font_families.clone();
@@ -1272,7 +1315,7 @@ impl App {
         let pv = jetty_render::build_panel(
             width, height, opacity, theme_idx, font_logical,
             &families, &family, font_scroll_offset, corner_radius, summon_name,
-            window_mode_name, dropdown_height_pct, dropdown_width_pct, is_dropdown, focus_autohide,
+            window_mode_name, tab_bar_name, dropdown_height_pct, dropdown_width_pct, is_dropdown, focus_autohide,
             0.0, 0.0, &theme,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
@@ -1365,6 +1408,10 @@ impl App {
             }
             input::MouseAction::WinModeNext => {
                 self.set_window_mode(self.window_mode.cycle(true));
+            }
+            input::MouseAction::TabBarPrev | input::MouseAction::TabBarNext => {
+                // Only two positions, so prev and next both toggle.
+                self.set_tab_bar_bottom(!self.tab_bar_bottom);
             }
             input::MouseAction::StartDropdownDrag => {
                 // No-op in Center mode (the slider is grayed/disabled there).
@@ -1978,8 +2025,9 @@ impl ApplicationHandler<AppEvent> for App {
                 // min/max/close highlight tracks the cursor.
                 if let Some(gpu) = &self.gpu {
                     let w = gpu.config.width;
-                    let before = ctrl_hover_at(prev.0 as f32, prev.1 as f32, w);
-                    let after = ctrl_hover_at(position.x as f32, position.y as f32, w);
+                    let bar_y = self.tabbar_y(gpu.config.height as f32);
+                    let before = ctrl_hover_at(prev.0 as f32, prev.1 as f32, w, bar_y);
+                    let after = ctrl_hover_at(position.x as f32, position.y as f32, w, bar_y);
                     if before != after {
                         if let Some(win) = &self.window {
                             win.request_redraw();
@@ -2153,7 +2201,8 @@ impl ApplicationHandler<AppEvent> for App {
                 // --- Tab bar / titlebar hit-test (only when the click is on the strip) ---
                 // Window controls, tab switching/close/new, inline-rename, window
                 // drag, and double-click-maximize — all BEFORE terminal selection.
-                if cy < TABBAR_H {
+                let bar_y = self.tabbar_y(h as f32);
+                if cy >= bar_y && cy < bar_y + TABBAR_H {
                     // Detect a double-click on the strip (within ~400ms and ~5px).
                     let now = std::time::Instant::now();
                     let is_double = matches!(
@@ -2173,9 +2222,14 @@ impl ApplicationHandler<AppEvent> for App {
                         .map(|(i, t)| (t.title.clone(), i == self.active))
                         .collect();
                     let rename_ref = self.renaming.map(|i| (i, self.rename_buf.as_str()));
-                    let bar = jetty_render::build_tab_bar_ex(
+                    let mut bar = jetty_render::build_tab_bar_ex(
                         w, &tabs_meta, &theme, rename_ref, jetty_render::CtrlHover::None,
                     );
+                    // build_tab_bar_ex lays the bar out at y 0..TABBAR_H; shift its
+                    // hit-test rects down to the bar's actual position (bottom mode).
+                    if bar_y != 0.0 {
+                        translate_bar_rects(&mut bar, bar_y);
+                    }
 
                     // Window controls take priority (rightmost region).
                     if input::point_in(&bar.help_rect, cx, cy) {
@@ -2292,7 +2346,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let scroll_offset = self.active_tab().terminal.scroll_offset();
                 let scroll_max = self.active_tab().terminal.scroll_max();
                 // Color is irrelevant for hit-test geometry; pass transparent.
-                let scrollbar = jetty_render::scrollbar_rect_geom(rows, scroll_offset, scroll_max, w, h, TABBAR_H, [0, 0, 0, 0]);
+                let scrollbar = jetty_render::scrollbar_rect_geom(rows, scroll_offset, scroll_max, w, h, self.grid_top_offset(), [0, 0, 0, 0]);
 
                 // The settings panel no longer lives in this window, so pass no
                 // panel geometry — only the scrollbar and terminal area are hit.
@@ -2316,6 +2370,8 @@ impl ApplicationHandler<AppEvent> for App {
                     | input::MouseAction::SummonNext
                     | input::MouseAction::WinModePrev
                     | input::MouseAction::WinModeNext
+                    | input::MouseAction::TabBarPrev
+                    | input::MouseAction::TabBarNext
                     | input::MouseAction::StartDropdownDrag
                     | input::MouseAction::StartDropdownWidthDrag
                     | input::MouseAction::ToggleFocusAutoHide
@@ -2361,7 +2417,12 @@ impl ApplicationHandler<AppEvent> for App {
                 let cy = self.cursor.1 as f32;
                 // A right-click on the tab bar must NOT open the terminal Copy/
                 // Paste menu (the strip has its own affordances).
-                if cy < TABBAR_H {
+                let bar_y = if let Some(gpu) = &self.gpu {
+                    self.tabbar_y(gpu.config.height as f32)
+                } else {
+                    0.0
+                };
+                if cy >= bar_y && cy < bar_y + TABBAR_H {
                     return;
                 }
                 // Commit any in-progress rename and close the help overlay so the
@@ -2433,13 +2494,14 @@ impl ApplicationHandler<AppEvent> for App {
                     // the host scrollback. One report per LineDelta notch
                     // (clamped) keeps apps like less/htop responsive without
                     // flooding the PTY.
+                    let grid_top = self.grid_top_offset();
                     let over_scrollbar = {
                         let rows = self.active_tab().terminal.rows();
                         let off = self.active_tab().terminal.scroll_offset();
                         let max = self.active_tab().terminal.scroll_max();
                         if let Some(gpu) = &self.gpu {
                             let (w, h) = (gpu.config.width, gpu.config.height);
-                            jetty_render::scrollbar_rect_geom(rows, off, max, w, h, TABBAR_H, [0, 0, 0, 0])
+                            jetty_render::scrollbar_rect_geom(rows, off, max, w, h, grid_top, [0, 0, 0, 0])
                                 .map(|r| {
                                     let cx = self.cursor.0 as f32;
                                     cx >= r.x && cx <= r.x + r.w
@@ -2800,6 +2862,10 @@ impl ApplicationHandler<AppEvent> for App {
                 // Dropdown slide progress (ease-out cubic). Captured here; the
                 // pixel offset is computed once `height` is bound below.
                 let slide_anim = self.slide_anim;
+                // Tab-bar position + cursor captured before the mutable gpu/text
+                // borrow so the render below can place the bar at top or bottom.
+                let tab_bar_bottom = self.tab_bar_bottom;
+                let cursor = self.cursor;
                 // Theme accent for the reveal glow (captured before the mutable
                 // gpu/text/quad borrow below).
                 let summon_accent: [f32; 3] = {
@@ -2824,20 +2890,25 @@ impl ApplicationHandler<AppEvent> for App {
                         -(height as f32) * (1.0 - eased)
                     })
                     .unwrap_or(0.0);
+                // Tab-bar geometry: the bar's pixel Y (0 at top, height-TABBAR_H at
+                // bottom) and the grid's pixel ORIGIN (TABBAR_H at top, 0 at bottom).
+                let bar_y = if tab_bar_bottom { (height as f32 - TABBAR_H).max(0.0) } else { 0.0 };
+                let grid_top = if tab_bar_bottom { 0.0 } else { TABBAR_H };
                 // Compute window-control hover from the last cursor position.
-                let ctrl_hover = ctrl_hover_at(self.cursor.0 as f32, self.cursor.1 as f32, width);
+                let ctrl_hover = ctrl_hover_at(cursor.0 as f32, cursor.1 as f32, width, bar_y);
                 let rename_ref = rename_state.as_ref().map(|(i, b)| (*i, b.as_str()));
                 let mut bar = jetty_render::build_tab_bar_ex(
                     width, &tabs_meta, &theme, rename_ref, ctrl_hover,
                 );
-                // Offset the tab-bar quads + labels by the slide so the bar moves
-                // with the content during the Dropdown slide-in.
-                if slide_y_offset != 0.0 {
+                // Translate the bar quads + labels to its actual y (bottom mode)
+                // PLUS the dropdown slide so it moves with the content.
+                let bar_offset = bar_y + slide_y_offset;
+                if bar_offset != 0.0 {
                     for q in &mut bar.quads {
-                        q.y += slide_y_offset;
+                        q.y += bar_offset;
                     }
                     for l in &mut bar.labels {
-                        l.2 += slide_y_offset;
+                        l.2 += bar_offset;
                     }
                 }
                 if let Some((frame, view)) = gpu.acquire_frame() {
@@ -2863,7 +2934,7 @@ impl ApplicationHandler<AppEvent> for App {
                     let (cell_w, cell_h) = text.cell_size();
                     let selection_bg = selection_bg_for(&theme);
                     let scrollbar_thumb = scrollbar_thumb_for(&theme);
-                    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, TABBAR_H + slide_y_offset, selection_bg);
+                    let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, grid_top + slide_y_offset, selection_bg);
                     quad.render_clear(
                         &gpu.device,
                         &gpu.queue,
@@ -2883,9 +2954,9 @@ impl ApplicationHandler<AppEvent> for App {
                         height,
                         &snap,
                         false,
-                        TABBAR_H + slide_y_offset,
+                        grid_top + slide_y_offset,
                     );
-                    // Pass 3: the tab bar (y 0..TABBAR_H) over the grid.
+                    // Pass 3: the tab bar (translated to its actual y) over the grid.
                     quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &bar.quads);
                     if !bar.labels.is_empty() {
                         // Chrome: fixed-size layer so the bar text never scales with
@@ -2897,7 +2968,7 @@ impl ApplicationHandler<AppEvent> for App {
                     // Pass 4: scrollbar (spans the grid area below the bar).
                     let mut rects: Vec<jetty_render::Rect> = Vec::new();
                     if let Some(mut r) =
-                        jetty_render::scrollbar_rect(&snap, width, height, TABBAR_H, scrollbar_thumb)
+                        jetty_render::scrollbar_rect(&snap, width, height, grid_top, scrollbar_thumb)
                     {
                         r.y += slide_y_offset;
                         rects.push(r);
@@ -3093,9 +3164,9 @@ fn scrollbar_thumb_for(theme: &jetty_core::Theme) -> [u8; 4] {
     [mix(0), mix(1), mix(2), 210]
 }
 
-fn ctrl_hover_at(cx: f32, cy: f32, width: u32) -> jetty_render::CtrlHover {
+fn ctrl_hover_at(cx: f32, cy: f32, width: u32, bar_y: f32) -> jetty_render::CtrlHover {
     use jetty_render::CtrlHover;
-    if cy >= TABBAR_H {
+    if cy < bar_y || cy >= bar_y + TABBAR_H {
         return CtrlHover::None;
     }
     let sw = width as f32;
@@ -3118,6 +3189,24 @@ fn ctrl_hover_at(cx: f32, cy: f32, width: u32) -> jetty_render::CtrlHover {
     } else {
         CtrlHover::None
     }
+}
+
+/// Shift every hit-test rect of a `TabBar` down by `dy` so the bar (built at
+/// y 0..TABBAR_H) can be placed at the bottom of the window. Mirrors the
+/// render-side translate of `bar.quads`/`bar.labels`.
+fn translate_bar_rects(bar: &mut jetty_render::TabBar, dy: f32) {
+    for r in &mut bar.tab_rects {
+        r.y += dy;
+    }
+    for r in &mut bar.close_rects {
+        r.y += dy;
+    }
+    bar.plus_rect.y += dy;
+    bar.help_rect.y += dy;
+    bar.settings_rect.y += dy;
+    bar.min_rect.y += dy;
+    bar.max_rect.y += dy;
+    bar.close_rect.y += dy;
 }
 
 /// Centre `win` on its current monitor (or the first available monitor if the

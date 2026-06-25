@@ -40,6 +40,10 @@ pub struct Config {
     /// Hide the window on focus loss (Yakuake-style auto-hide). Default ON.
     #[serde(default = "default_focus_autohide")]
     pub focus_autohide: bool,
+    /// Tab-bar position: "top" (default) or "bottom". Orthogonal to
+    /// `window_mode` — usable in both Center and Dropdown modes.
+    #[serde(default = "default_tab_bar_position")]
+    pub tab_bar_position: String,
 }
 
 fn default_summon_effect() -> String {
@@ -62,6 +66,10 @@ fn default_focus_autohide() -> bool {
     true
 }
 
+fn default_tab_bar_position() -> String {
+    "top".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -75,6 +83,7 @@ impl Default for Config {
             dropdown_height_pct: default_dropdown_height_pct(),
             dropdown_width_pct: default_dropdown_width_pct(),
             focus_autohide: default_focus_autohide(),
+            tab_bar_position: default_tab_bar_position(),
         }
     }
 }
@@ -131,6 +140,7 @@ mod tests {
         assert_eq!(c.dropdown_height_pct, 0.50);
         assert_eq!(c.dropdown_width_pct, 1.0);
         assert!(c.focus_autohide);
+        assert_eq!(c.tab_bar_position, "top");
     }
 
     #[test]
@@ -151,6 +161,8 @@ mod tests {
         assert_eq!(c.dropdown_height_pct, 0.50);
         assert_eq!(c.dropdown_width_pct, 1.0);
         assert!(c.focus_autohide);
+        // An older config without tab_bar_position still loads as "top".
+        assert_eq!(c.tab_bar_position, "top");
     }
 
     #[test]
@@ -166,6 +178,7 @@ mod tests {
             dropdown_height_pct: 0.6,
             dropdown_width_pct: 1.0,
             focus_autohide: false,
+            tab_bar_position: "bottom".to_string(),
         };
         let s = toml::to_string_pretty(&c).expect("serialize");
         let back: Config = toml::from_str(&s).expect("deserialize");
@@ -188,6 +201,7 @@ mod tests {
             dropdown_height_pct: 0.5,
             dropdown_width_pct: 1.0,
             focus_autohide: true,
+            tab_bar_position: "bottom".to_string(),
         };
         std::fs::write(&path, toml::to_string_pretty(&c).unwrap()).unwrap();
         let s = std::fs::read_to_string(&path).unwrap();
