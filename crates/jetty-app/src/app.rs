@@ -1079,25 +1079,6 @@ impl App {
         }
     }
 
-    /// Like `reflow`, but resizes ONLY the in-process terminal grids — it does
-    /// NOT issue `pty.resize` (no SIGWINCH). Used by `set_font_size` so the grid
-    /// matches the new cell size instantly while the (shell-visible) PTY resize is
-    /// debounced to a single SIGWINCH once the user stops changing the font size.
-    fn reflow_terminal_only(&mut self) {
-        let (Some(gpu), Some(text)) = (&self.gpu, &self.text) else { return };
-        let (cw, ch) = text.cell_size();
-        if cw <= 0.0 || ch <= 0.0 {
-            return;
-        }
-        let w = gpu.config.width;
-        let h = gpu.config.height;
-        let cols = (w as f32 / cw).floor().max(1.0) as usize;
-        let rows = ((h as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
-        for tab in &mut self.tabs {
-            tab.terminal.resize(cols, rows);
-        }
-    }
-
     /// Change the font size at runtime. `new_logical` is clamped to [6.0, 48.0].
     /// Rebuilds TextLayer with the new physical font size (logical * scale),
     /// then calls `reflow()` to recompute the grid, and requests a redraw.
@@ -1115,12 +1096,15 @@ impl App {
                 self.font_families = t.monospace_families();
             }
         }
-        // Resize the in-process grid NOW so the rendered content matches the new
-        // cell size immediately (no mis-fit flash), but DEBOUNCE the PTY resize:
-        // schedule a single SIGWINCH ~120ms out. Rapid Ctrl+/- presses keep pushing
-        // this instant forward so N presses collapse to ONE pty.resize → one
-        // shell-side prompt repaint (no staircase of duplicate p10k prompts).
-        self.reflow_terminal_only();
+        // DEBOUNCE the WHOLE grid+PTY reflow — do NOT resize the terminal grid on
+        // each press. Reflowing the grid repeatedly while the shell can't redraw
+        // re-wraps p10k's absolute-positioned (non-reflow-friendly) prompt over and
+        // over, scattering prompt fragments across the screen. Instead schedule ONE
+        // reflow() ~120ms after the user stops: it resizes the grid AND the PTY
+        // together, so the shell gets a single SIGWINCH and repaints its prompt once,
+        // cleanly. The new cell size is visible immediately via the rebuilt
+        // TextLayer; the grid snaps to the new col/row count when the reflow fires.
+        // Each press pushes the instant forward, collapsing N presses into one.
         self.reflow_pending_at =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(120));
         self.persist();
