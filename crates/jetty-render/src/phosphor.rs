@@ -46,7 +46,7 @@ fn fs_reveal(in: VsOut) -> @location(0) vec4<f32> {
     let t = clamp(p.t, 0.0, 1.0);
     let scan_y = smoothstep(0.15, 1.0, t);
     // 1 below the descending line (revealed), 0 above (still dark).
-    let wipe = smoothstep(scan_y + 0.05, scan_y - 0.02, in.uv.y);
+    let wipe = smoothstep(scan_y - 0.02, scan_y + 0.05, in.uv.y);
     let b = mix(0.10, 1.0, wipe);
     return vec4<f32>(b, b, b, b);
 }
@@ -59,7 +59,7 @@ fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
     let pos = vec2<f32>(in.uv.x * p.w, in.uv.y * p.h) - hsize;
     let d = sd_round_rect(pos, hsize, p.radius);
     // Thin band just inside the edge.
-    let rim = smoothstep(-5.0, -2.0, d) * smoothstep(0.5, -2.0, d);
+    let rim = smoothstep(-5.0, -2.0, d) * (1.0 - smoothstep(-2.0, 0.5, d));
     // Corner-stagger: corners light first as t rises.
     let ct = smoothstep(0.0, 0.45, t);
     // Descending bright scan line (matches the reveal front).

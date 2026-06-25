@@ -1739,7 +1739,7 @@ impl ApplicationHandler<AppEvent> for App {
             let (cw, ch) = text.cell_size();
             // Derive the grid from the physical pixel size and the physical cell size.
             let cols = ((size.width as f32 - SCROLLBAR_GUTTER) / cw).floor().max(1.0) as usize;
-            let rows = (size.height as f32 / ch).floor().max(1.0) as usize;
+            let rows = ((size.height as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
             let quad = QuadLayer::new(&g.device, g.format);
             (Some(text), Some(quad), cols, rows)
         } else {
@@ -1817,7 +1817,14 @@ impl ApplicationHandler<AppEvent> for App {
         // Join the PTY worker (forked in parallel with the GPU block) and resize
         // it from the provisional grid to the real cols/rows now that the cell
         // size is known.
-        let pty = pty_handle.join().expect("pty worker panicked").expect("pty");
+        let pty = match pty_handle.join().expect("pty worker panicked") {
+            Ok(pty) => pty,
+            Err(e) => {
+                eprintln!("jetty: failed to spawn PTY: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
         pty.resize(cols as u16, rows as u16);
         terminal.resize(cols, rows);
         let writer = pty.writer();
@@ -1992,6 +1999,7 @@ impl ApplicationHandler<AppEvent> for App {
                 if self.focus_autohide
                     && self.visible
                     && self.summon_anim.is_none()
+                    && !self.summon_pending
                     && !to_settings
                 {
                     if let Some(win) = &self.window {
