@@ -403,6 +403,15 @@ pub struct App {
     vt_window_start: std::time::Instant,
     /// Last computed VT throughput in MB/s, held between ~1s window updates.
     perf_mb: f32,
+    /// Idle-HUD one-shot: after the last ACTIVE frame, the deadline at which —
+    /// if nothing else has drawn — the loop wakes ONCE to repaint the HUD in its
+    /// honest "idle" state (so it doesn't sit frozen on a stale fps/CPU value).
+    /// Re-armed on every active frame; `None` until the first frame.
+    perf_idle_at: Option<std::time::Instant>,
+    /// True once the idle-state HUD has been painted, so we don't repaint it in a
+    /// loop. Cleared on the next active frame. This is what keeps idle at ~0 CPU:
+    /// exactly ONE extra repaint per activity burst, then a true `Wait`.
+    perf_idle_shown: bool,
     /// The perf-HUD string built on the most recent render, cached so the
     /// click-time tab-bar hit-test rebuild reserves the IDENTICAL HUD width and
     /// the tab/close hit-rects line up with what's drawn. `None` when the HUD is
@@ -629,6 +638,8 @@ impl App {
             vt_bytes_at_window_start: 0,
             vt_window_start: std::time::Instant::now(),
             perf_mb: 0.0,
+            perf_idle_at: None,
+            perf_idle_shown: false,
             perf_label: None,
             help_open: false,
             confirm_close: None,
@@ -1896,11 +1907,33 @@ impl ApplicationHandler<AppEvent> for App {
                 w.request_redraw();
             }
         }
-        event_loop.set_control_flow(if main_pending || settings_pending {
+        // Idle-HUD one-shot: when otherwise idle, schedule a single wake at the
+        // idle-repaint deadline so the perf HUD can flip from its last live value
+        // to an honest "idle" reading — then go fully idle. This adds at most ONE
+        // repaint per activity burst; it never polls.
+        let perf_idle_pending = self.show_perf_hud
+            && !self.perf_idle_shown
+            && self.perf_idle_at.is_some();
+
+        let control_flow = if main_pending || settings_pending {
             winit::event_loop::ControlFlow::Poll
+        } else if perf_idle_pending {
+            let deadline = self.perf_idle_at.unwrap();
+            if std::time::Instant::now() >= deadline {
+                // Deadline reached while idle: request the single idle repaint, then
+                // wait (the redraw request itself wakes the loop to service it).
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                winit::event_loop::ControlFlow::Wait
+            } else {
+                // Wake exactly once at the deadline instead of busy-polling.
+                winit::event_loop::ControlFlow::WaitUntil(deadline)
+            }
         } else {
             winit::event_loop::ControlFlow::Wait
-        });
+        };
+        event_loop.set_control_flow(control_flow);
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -3118,11 +3151,34 @@ impl ApplicationHandler<AppEvent> for App {
                 // conflict with this &self borrow; it is restored after rendering.
                 self.tabs_meta();
                 let tabs_meta = std::mem::take(&mut self.cached_tabs_meta);
-                // Live perf HUD: update metrics (frame ms / CPU% / VT MB/s) and
-                // build the label. This runs ONLY here, inside a frame already in
-                // progress — it never requests a redraw, so the idle path stays
-                // 0-CPU. Cached so the click-time hit-test reserves the same width.
-                let perf_string = self.update_perf_hud();
+                // Live perf HUD. Two render modes:
+                //  • ACTIVE frame  → recompute live metrics (frame ms / CPU% / MB/s)
+                //    and (re)arm the idle-repaint deadline. Runs inside a frame
+                //    already in progress; it never itself requests a redraw.
+                //  • IDLE frame    → when the deadline has elapsed with no other
+                //    activity, paint the HUD as an honest "idle" instead of leaving
+                //    a frozen, misleading fps/CPU on screen. about_to_wait scheduled
+                //    exactly ONE such repaint, so idle still settles at ~0 CPU.
+                let render_idle_hud = self.show_perf_hud
+                    && !self.perf_idle_shown
+                    && self
+                        .perf_idle_at
+                        .is_some_and(|d| std::time::Instant::now() >= d);
+                let perf_string = if render_idle_hud {
+                    self.perf_idle_shown = true;
+                    Some("⚡ idle · 0% CPU · 0 MB/s".to_string())
+                } else {
+                    let s = self.update_perf_hud();
+                    if self.show_perf_hud {
+                        // (Re)arm the one-shot idle repaint for ~700ms after this
+                        // active frame; cleared/rescheduled by the next active frame.
+                        self.perf_idle_at = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(700),
+                        );
+                        self.perf_idle_shown = false;
+                    }
+                    s
+                };
                 self.perf_label = perf_string.clone();
                 let context_menu = self.context_menu;
                 let menu_hover = self.menu_hover;
