@@ -1885,14 +1885,19 @@ impl ApplicationHandler<AppEvent> for App {
                 w.request_redraw();
             }
         }
-        let reflow_waiting = self.reflow_pending_at.is_some();
-
+        // A pending (debounced) reflow does NOT keep the loop in Poll. The old
+        // code folded `reflow_pending_at.is_some()` into `main_pending`, so for up
+        // to 250ms after every font/window resize the loop sat in Poll and
+        // re-rendered the full scene ~15× for nothing (a SPEED-#1 idle regression).
+        // The active resize already drives redraws via per-event request_redraw;
+        // here we only need to WAKE ONCE at the debounce deadline to run the reflow
+        // (handled by `reflow_due` at the top of this fn). So the reflow deadline
+        // is routed through WaitUntil below, never Poll.
         let main_pending = self.summon_anim.is_some()
             || self.slide_anim.is_some()
             || self.summon_pending
             || self.pending_dock_frames > 0
-            || self.pending_center_frames > 0
-            || reflow_waiting;
+            || self.pending_center_frames > 0;
         if main_pending {
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -1907,29 +1912,40 @@ impl ApplicationHandler<AppEvent> for App {
                 w.request_redraw();
             }
         }
-        // Idle-HUD one-shot: when otherwise idle, schedule a single wake at the
-        // idle-repaint deadline so the perf HUD can flip from its last live value
-        // to an honest "idle" reading — then go fully idle. This adds at most ONE
-        // repaint per activity burst; it never polls.
+
+        // Earliest FUTURE deadline we owe a single wake for: the reflow debounce
+        // and/or the perf-HUD idle one-shot. Neither polls — we sleep until the
+        // soonest and wake exactly once. (A reflow whose deadline already elapsed
+        // was run by `reflow_due` above, so `reflow_pending_at` here is always in
+        // the future or None.)
+        let now = std::time::Instant::now();
+        let mut wake_at = self.reflow_pending_at;
+        // Idle-HUD one-shot: flip the HUD from its last live value to an honest
+        // "idle" reading once the app settles, then go fully idle.
         let perf_idle_pending = self.show_perf_hud
             && !self.perf_idle_shown
             && self.perf_idle_at.is_some();
-
-        let control_flow = if main_pending || settings_pending {
-            winit::event_loop::ControlFlow::Poll
-        } else if perf_idle_pending {
-            let deadline = self.perf_idle_at.unwrap();
-            if std::time::Instant::now() >= deadline {
-                // Deadline reached while idle: request the single idle repaint, then
-                // wait (the redraw request itself wakes the loop to service it).
+        if perf_idle_pending {
+            let d = self.perf_idle_at.unwrap();
+            if now >= d {
+                // Idle repaint is due now: request the single repaint (the redraw
+                // request itself wakes the loop to service it).
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
-                winit::event_loop::ControlFlow::Wait
             } else {
-                // Wake exactly once at the deadline instead of busy-polling.
-                winit::event_loop::ControlFlow::WaitUntil(deadline)
+                wake_at = Some(match wake_at {
+                    Some(w) if w <= d => w,
+                    _ => d,
+                });
             }
+        }
+
+        let control_flow = if main_pending || settings_pending {
+            winit::event_loop::ControlFlow::Poll
+        } else if let Some(d) = wake_at {
+            // Wake exactly once at the soonest pending deadline instead of polling.
+            winit::event_loop::ControlFlow::WaitUntil(d)
         } else {
             winit::event_loop::ControlFlow::Wait
         };
