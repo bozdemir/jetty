@@ -154,7 +154,10 @@ impl Terminal {
         // This multiplies into the theme bg alpha, enabling composited transparency.
         if let Ok(op_str) = std::env::var("JETTY_OPACITY") {
             if let Ok(opacity) = op_str.parse::<f32>() {
-                let opacity = opacity.clamp(0.0, 1.0);
+                // Clamp to a VISIBLE floor (0.1), matching the app/settings path —
+                // a literal JETTY_OPACITY=0 would otherwise load a fully transparent
+                // (invisible) window that reads as a launch failure.
+                let opacity = opacity.clamp(0.1, 1.0);
                 theme.bg[3] = (opacity * 255.0) as u8;
             }
         }

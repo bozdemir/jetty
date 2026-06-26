@@ -2290,6 +2290,12 @@ impl ApplicationHandler<AppEvent> for App {
                         win.set_visible(false);
                     }
                     self.visible = false;
+                    // If auto-hide fired mid-drag, the matching button-release
+                    // never arrives — clear the terminal drag state so it doesn't
+                    // resume stuck (a no-button selection/scrollbar drag) on the
+                    // next summon.
+                    self.selecting = false;
+                    self.dragging_scrollbar = false;
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -2367,6 +2373,15 @@ impl ApplicationHandler<AppEvent> for App {
                 } else {
                     return;
                 };
+
+                // While the Dropdown slide is animating, the scene is drawn shifted
+                // by slide_y_offset but every hit-test uses the settled (unshifted)
+                // coordinates — a press now would land on where surfaces WILL be,
+                // not where they currently appear. Swallow presses until it settles
+                // (~200ms); the user can click once the window is in place.
+                if self.slide_anim.is_some() {
+                    return;
+                }
 
                 // --- Quit confirmation popup is modal (highest priority) ---
                 if self.confirm_quit {
