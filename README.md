@@ -60,7 +60,7 @@ JeTTY runs on **Linux** (X11 / Wayland, Vulkan) and **macOS** (Metal). Building 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source "$HOME/.cargo/env"
 
 # 2. Build + run
-git clone https://github.com/bozdemir/jetty.git && cd jetty
+git clone https://github.com/bozdemir/JeTTY.git && cd JeTTY
 cargo build --release
 ./target/release/jetty
 ```
@@ -70,10 +70,10 @@ Renders through **Metal**. Summon with **`fn`+`F9`** (plain F9 is macOS Mission 
 ### 🐧 Linux — one-line installer (prebuilt, no toolchain)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bozdemir/jetty/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/bozdemir/JeTTY/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin` + a launcher entry. Or grab a `.deb` / **AppImage** from the [latest release](https://github.com/bozdemir/jetty/releases/latest):
+Installs to `~/.local/bin` + a launcher entry. Or grab a `.deb` / **AppImage** from the [latest release](https://github.com/bozdemir/JeTTY/releases/latest):
 
 ```bash
 sudo apt install ./jetty_*_amd64.deb                              # Debian / Ubuntu
@@ -83,7 +83,7 @@ chmod +x JeTTY-*-x86_64.AppImage && ./JeTTY-*-x86_64.AppImage     # any distro
 ### Build from source (Linux or macOS)
 
 ```bash
-git clone https://github.com/bozdemir/jetty.git && cd jetty
+git clone https://github.com/bozdemir/JeTTY.git && cd JeTTY
 cargo build --release && ./target/release/jetty
 ```
 
@@ -146,7 +146,7 @@ Great places to jump in right now:
 - Faster cold start
 - Packaging (PPA, AUR, Flatpak research), docs
 
-**How to get involved:** open an [issue](https://github.com/bozdemir/jetty/issues) or discussion, or send a pull request. New to the code? The [architecture](#-architecture) section is a good place to start.
+**How to get involved:** open an [issue](https://github.com/bozdemir/JeTTY/issues) or discussion, or send a pull request. New to the code? The [architecture](#-architecture) section is a good place to start.
 
 ## 🗺️ Roadmap
 

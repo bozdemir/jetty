@@ -2,13 +2,13 @@
 # JeTTY one-line installer — downloads the latest prebuilt release (no Rust
 # toolchain needed) and installs it for the current user.
 #
-#   curl -fsSL https://raw.githubusercontent.com/bozdemir/jetty/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/bozdemir/JeTTY/main/install.sh | sh
 #
 # Installs to ~/.local (binary on PATH, icons, and a .desktop launcher entry).
 # Set JETTY_PREFIX=/usr/local and run with sudo for a system-wide install.
 set -eu
 
-REPO="bozdemir/jetty"
+REPO="bozdemir/JeTTY"
 PREFIX="${JETTY_PREFIX:-$HOME/.local}"
 
 say()  { printf '\033[1;35m::\033[0m %s\n' "$1"; }
