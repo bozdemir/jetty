@@ -75,10 +75,11 @@ const CHROME_CHAR_W: f32 = 9.6;
 /// Gap (px) between the perf HUD's left edge and the nearest tab/+button, so the
 /// reserved area never visually touches the tabs.
 const PERF_GAP: f32 = 16.0;
-/// Minimum tab-area width (px) that must remain for the tabs after reserving the
-/// perf HUD. If the HUD can't fit without squeezing tabs below this, it's HIDDEN
-/// (the tab layout then matches the no-HUD case exactly).
-const PERF_MIN_TABS_W: f32 = 220.0;
+/// Comfortable PER-TAB width (px) the perf HUD must NOT push tabs below. The HUD
+/// is the lowest-priority strip element: if reserving its width would shrink each
+/// tab beneath this (≈6 title chars), the HUD is HIDDEN and the tabs get the full
+/// area instead (so several tabs in a narrowish window never squash to "T…×").
+const PERF_MIN_TAB_W: f32 = 110.0;
 
 /// Extended tab-bar builder with inline-rename, window-control hover state, and
 /// an optional right-aligned performance HUD label.
@@ -138,19 +139,24 @@ pub fn build_tab_bar_ex(
     // The controls region begins here; tabs+HUD must stay left of it.
     let controls_left = (sw - STRIP_PAD - CONTROLS_W).max(left);
 
-    // --- Perf HUD reservation ---
+    // --- Perf HUD reservation (LOWEST priority — yields space to the tabs) ---
     // The HUD sits between the tabs and the window controls, right-aligned with a
-    // small gap before the controls. Reserve its measured width out of the tab
-    // area so tabs never overlap it. If reserving it would squeeze the tabs below
-    // PERF_MIN_TABS_W, HIDE the HUD entirely (perf_shown = false) so the tab
-    // layout is byte-identical to the no-HUD case.
+    // small gap before the controls. Reserve its width out of the tab area ONLY if,
+    // after reserving, each tab still gets a COMFORTABLE width (>= PERF_MIN_TAB_W).
+    // Otherwise (several tabs in a narrowish window) the HUD is HIDDEN so the tabs
+    // aren't squashed to their unreadable ~64px floor just to fit a stats readout —
+    // the tab layout then matches the no-HUD case exactly.
+    let n_tabs = tabs.len().max(1) as f32;
     let perf_w = perf
         .map(|s| s.chars().count() as f32 * CHROME_CHAR_W)
         .unwrap_or(0.0);
     // Width carved out of the tab area when the HUD is shown: the label plus the
     // gap to the tabs and a small gap to the controls.
     let perf_reserve = if perf_w > 0.0 { perf_w + PERF_GAP * 1.5 } else { 0.0 };
-    let perf_shown = perf_w > 0.0 && (controls_left - perf_reserve - left) >= PERF_MIN_TABS_W;
+    // Per-tab width the tabs WOULD get if we reserved for the HUD (capped at the
+    // ideal TAB_W — extra room beyond that doesn't make a tab more comfortable).
+    let tab_w_if_hud = ((controls_left - perf_reserve - left - PLUS_W).max(0.0) / n_tabs).min(TAB_W);
+    let perf_shown = perf_w > 0.0 && tab_w_if_hud >= PERF_MIN_TAB_W;
     // Right boundary for the tabs / "+" / overflow hint. Shrinks by the HUD
     // reservation only when the HUD is actually shown.
     let tab_area_x = if perf_shown { controls_left - perf_reserve } else { controls_left };
@@ -164,7 +170,6 @@ pub fn build_tab_bar_ex(
     // number of tabs drawn (the rest are unreachable here but stay index-aligned
     // via the switch_tab keyboard path). ---
     const TAB_W_MIN: f32 = 64.0;
-    let n_tabs = tabs.len().max(1) as f32;
     // Ideal width per tab, clamped to [MIN, default]. Use the full default when
     // there's room; shrink toward MIN as tabs are added.
     let tab_w = (tabs_avail_w / n_tabs).clamp(TAB_W_MIN, TAB_W).min(TAB_W);
@@ -500,6 +505,29 @@ mod tests {
             assert!((a.x - b.x).abs() < 0.01);
         }
         assert!((with.plus_rect.x - without.plus_rect.x).abs() < 0.01);
+    }
+
+    #[test]
+    fn perf_hud_yields_to_tabs_when_many_tabs_would_squash() {
+        // A moderately WIDE window (900px) where the tab area alone is plenty, but
+        // 4 tabs + the HUD reservation would shrink each tab below the comfortable
+        // floor. The HUD must hide and hand the full area to the tabs, so no tab is
+        // squashed to its ~64px minimum just to fit the stats readout.
+        let tabs: Vec<(String, bool)> =
+            (0..4).map(|i| (format!("Tab {i}"), i == 0)).collect();
+        let with = build_tab_bar_ex(900, &tabs, &theme(), None, CtrlHover::None, Some(PERF));
+        let without = build_tab_bar_ex(900, &tabs, &theme(), None, CtrlHover::None, None);
+
+        // HUD hidden, layout identical to no-HUD.
+        assert!(with.labels.iter().all(|l| l.0 != PERF), "HUD should yield to the tabs");
+        assert_eq!(with.tab_rects.len(), without.tab_rects.len());
+        for (a, b) in with.tab_rects.iter().zip(&without.tab_rects) {
+            assert!((a.x - b.x).abs() < 0.01 && (a.w - b.w).abs() < 0.01);
+        }
+        // Each drawn tab is comfortably above the squashed minimum.
+        for r in &with.tab_rects {
+            assert!(r.w >= PERF_MIN_TAB_W - 0.5, "tab squashed to {} despite hiding HUD", r.w);
+        }
     }
 
     #[test]
