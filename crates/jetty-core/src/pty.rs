@@ -8,7 +8,29 @@ pub struct PtySession {
     master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
     rx: Receiver<Vec<u8>>,
     exited: Arc<AtomicBool>,
-    _child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// The shell child. `Option` so `Drop` can move it to a reaper thread.
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        // Reap the shell child so closing a tab (or `exit` / Ctrl+D) doesn't leak a
+        // `<defunct>` zombie for the life of the process — previously `_child`'s
+        // Drop neither killed nor waited, so a long-lived summon terminal leaked a
+        // PID slot per closed tab. We kill+wait on a DETACHED thread so the event
+        // loop never blocks on the SIGKILL/wait grace period. Killing the shell
+        // also closes the slave, so the reader thread hits EOF and drops its master
+        // clone; with the master itself dropped, the kernel then SIGHUPs any
+        // lingering foreground job (vim/top/build) on the controlling terminal.
+        // `kill()` on an already-exited child errors harmlessly (ignored); `wait()`
+        // still reaps it.
+        if let Some(mut child) = self.child.take() {
+            std::thread::spawn(move || {
+                let _ = child.kill();
+                let _ = child.wait();
+            });
+        }
+    }
 }
 
 impl PtySession {
@@ -81,7 +103,7 @@ impl PtySession {
             master: Arc::new(Mutex::new(pair.master)),
             rx,
             exited,
-            _child: child,
+            child: Some(child),
         })
     }
 
