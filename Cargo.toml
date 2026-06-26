@@ -9,11 +9,12 @@ edition = "2021"
 description = "A blazing-fast, GPU-accelerated, desktop-environment-independent terminal with a center-summon / Yakuake-style dropdown hotkey."
 authors = ["Burak Ozdemir <bozdemir@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/bozdemir/jetty"
-homepage = "https://github.com/bozdemir/jetty"
+repository = "https://github.com/bozdemir/JeTTY"
+homepage = "https://github.com/bozdemir/JeTTY"
 readme = "README.md"
 keywords = ["terminal", "gpu", "wgpu", "tty", "dropdown"]
-categories = ["command-line-utilities"]
+categories = ["command-line-utilities", "gui"]
+documentation = "https://github.com/bozdemir/JeTTY#readme"
 
 [[bin]]
 name = "jetty"

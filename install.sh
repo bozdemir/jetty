@@ -37,6 +37,24 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 say "Downloading $asset…"
 curl -fSL "$url" -o "$tmp/jetty.tar.gz" || die "download failed: $url"
+
+# --- verify checksum (best-effort; never hard-fails when tools/sums absent) ---
+sums_url="https://github.com/$REPO/releases/download/$tag/SHA256SUMS.txt"
+if curl -fsSL "$sums_url" -o "$tmp/SHA256SUMS.txt" 2>/dev/null; then
+  want="$(sed -n "s/^\\([0-9a-f]\\{64\\}\\)  *$asset\$/\\1/p" "$tmp/SHA256SUMS.txt")"
+  if [ -n "$want" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      got="$(sha256sum "$tmp/jetty.tar.gz" | cut -d' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+      got="$(shasum -a 256 "$tmp/jetty.tar.gz" | cut -d' ' -f1)"
+    fi
+    if [ -n "${got:-}" ] && [ "$got" != "$want" ]; then
+      die "checksum mismatch for $asset (expected $want, got $got) — aborting"
+    fi
+    [ -n "${got:-}" ] && say "Checksum verified."
+  fi
+fi
+
 tar -C "$tmp" -xzf "$tmp/jetty.tar.gz"
 src="$tmp/jetty-${ver}-x86_64-linux"
 [ -x "$src/jetty" ] || die "archive layout unexpected (missing jetty binary)"
@@ -49,6 +67,13 @@ for sz in 16 32 48 64 128 256; do
   [ -f "$icon" ] && install -Dm644 "$icon" "$PREFIX/share/icons/hicolor/${sz}x${sz}/apps/jetty.png"
 done
 [ -f "$src/assets/jetty.desktop" ] && install -Dm644 "$src/assets/jetty.desktop" "$PREFIX/share/applications/jetty.desktop"
+
+# Absolute Exec= so the launcher entry works even when $PREFIX/bin is off the
+# session PATH (common for ~/.local installs without PATH update).
+desktop="$PREFIX/share/applications/jetty.desktop"
+if [ -f "$desktop" ]; then
+  sed -i.bak "s|^Exec=jetty|Exec=$PREFIX/bin/jetty|" "$desktop" 2>/dev/null && rm -f "$desktop.bak"
+fi
 
 gtk-update-icon-cache "$PREFIX/share/icons/hicolor" >/dev/null 2>&1 || true
 update-desktop-database "$PREFIX/share/applications" >/dev/null 2>&1 || true
