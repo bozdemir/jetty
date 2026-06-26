@@ -1,0 +1,106 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly in JeTTY.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill in as much
+        detail as you can — especially the display server and GPU info, since
+        JeTTY is a GPU-rendered app and many bugs are environment-specific.
+
+  - type: input
+    id: version
+    attributes:
+      label: JeTTY version
+      description: "`jetty --version` output, or the git commit hash if built from source."
+      placeholder: "v0.1.0 / commit abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - "One-line installer (install.sh)"
+        - ".deb package"
+        - "AppImage"
+        - "Built from source (cargo build --release)"
+        - "Other"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: display_server
+    attributes:
+      label: Display server
+      options:
+        - "X11"
+        - "Wayland"
+        - "macOS (Metal)"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: input
+    id: compositor
+    attributes:
+      label: Desktop environment / compositor
+      description: "e.g. KDE Plasma 6, GNOME 46, Sway 1.9, Hyprland, macOS 15 Sequoia"
+      placeholder: "KDE Plasma 6.2 (Wayland)"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu_driver
+    attributes:
+      label: GPU and driver
+      description: |
+        Output of `glxinfo | grep 'OpenGL renderer'` (X11) or `vulkaninfo --summary 2>/dev/null | grep deviceName` (Vulkan), or GPU model + driver version.
+      placeholder: "Intel Arc (Arrow Lake) — Intel ANV Vulkan 1.3; or NVIDIA RTX 4080 — 550.120"
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Linux distro / macOS version
+      placeholder: "Ubuntu 24.04 LTS / Fedora 40 / macOS 15.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: "Describe the bug. What did you do, what did you expect, what did you get?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch JeTTY
+        2. Open settings with Ctrl+Shift+P
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: config.toml (optional)
+      description: "Contents of `~/.config/jetty/config.toml` if relevant."
+      render: toml
+
+  - type: textarea
+    id: console_output
+    attributes:
+      label: Console output / logs (optional)
+      description: |
+        Launch JeTTY from a terminal and paste any stderr output here.
+        `RUST_LOG=debug jetty 2>&1 | head -100`
+      render: text

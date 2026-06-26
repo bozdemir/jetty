@@ -6,9 +6,12 @@
 
 *Je**TTY** — a terminal (**TTY**) that moves like a **Jet**. Raw speed is its first priority, above everything else.*
 
+[![CI](https://github.com/bozdemir/JeTTY/actions/workflows/ci.yml/badge.svg)](https://github.com/bozdemir/JeTTY/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/bozdemir/JeTTY?sort=semver)](https://github.com/bozdemir/JeTTY/releases/latest)
 ![Rust](https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white)
-![GPU](https://img.shields.io/badge/Render-wgpu%20%2F%20Vulkan-4051B5)
+![GPU](https://img.shields.io/badge/Render-wgpu%20%2F%20Vulkan%20%2F%20Metal-4051B5)
 ![Platform](https://img.shields.io/badge/Linux-X11%20%7C%20Wayland-1f6feb?logo=linux&logoColor=white)
+![Platform](https://img.shields.io/badge/macOS-Metal-silver?logo=apple&logoColor=white)
 ![Desktop](https://img.shields.io/badge/Desktop-KDE%20%7C%20GNOME%20%7C%20any-2ea043)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Collaborators wanted](https://img.shields.io/badge/collaborators-wanted-ff5c8a)
@@ -21,6 +24,18 @@
 
 > 🤝 **JeTTY is young and looking for collaborators!** If you love terminals, Rust, or GPU rendering, come help shape a fast, beautiful terminal — see [Collaborators wanted](#-collaborators-wanted).
 
+## Contents
+
+- [Features](#-features)
+- [Screenshots](#-screenshots)
+- [Install](#-install)
+- [Keybindings](#️-keybindings)
+- [Performance](#-performance)
+- [Architecture](#-architecture)
+- [Collaborators wanted](#-collaborators-wanted)
+- [Roadmap](#️-roadmap)
+- [License](#-license)
+
 ## ✨ Features
 
 - 🚀 **Blazing fast** — GPU-rendered with [`wgpu`](https://github.com/gfx-rs/wgpu); ~5.5 ms full-screen frames (144 Hz-ready), **~0 % CPU when idle** (damage-driven redraw), 150+ MB/s VT throughput. See the [performance budget](docs/perf-budget.md).
@@ -29,11 +44,13 @@
   - **Dropdown** — slides down from the top edge, full screen width, Yakuake/Guake style, with adjustable width & height.
 - ✨ **Summon effects** — five self-written GPU reveal shaders, selectable in settings: **Phosphor Ignition** (default — CRT power-on), **Bayer Crystallize**, **Liquid Drop**, **Focus Pull**, or **None**.
 - 🗂️ **Tabs** — `Ctrl+Shift+T` new, `Ctrl+Shift+W` close (with confirm), `Ctrl+Tab` / `Ctrl+1‒9` switch, double-click to rename.
-- 🎨 **Beloved themes** — Catppuccin Mocha (default), Tokyo Night, Gruvbox Dark, Dracula, with exact community palettes. Every UI surface re-skins with the theme.
+- 🎨 **5 beloved themes** — Catppuccin Mocha (default), Tokyo Night, Gruvbox Dark, Dracula, and Onyx, with exact community palettes. Every UI surface (panel, menus, tab bar, welcome, confirm dialogs) re-skins with the active theme.
 - 🪟 **Custom-decorated window** — borderless client-side decorations, our own title bar, rounded corners (radius slider), runtime opacity.
 - 🔤 **Live font control** — change font **size** (`Ctrl + +/-/0`) and **family** (any installed monospace) at runtime, no restart.
 - 📋 **Selection & clipboard** — drag to select (auto-copies), right-click **Copy / Paste / Select All** menu, `Ctrl+Shift+C/V`, middle-click paste, bracketed-paste aware.
-- ⚙️ **Settings dialog** — `Ctrl+Shift+P` opens a movable dialog (theme, opacity, corner radius, summon effect, window mode, dropdown size, font) — all **persisted** to `~/.config/jetty/config.toml`.
+- ⚙️ **Settings dialog** — `Ctrl+Shift+P` opens a movable dialog (theme, opacity, corner radius, summon effect, window mode, dropdown size, tab-bar position, focus auto-hide, welcome splash, performance HUD, font) — all **persisted** to `~/.config/jetty/config.toml`.
+- 📊 **Live performance HUD** — an optional tab-bar overlay showing frame ms · fps · CPU% · VT MB/s in real time, and an honest "idle" state when the app settles (never forces a redraw — idle stays ~0% CPU). Toggle with `show_perf_hud`.
+- 👋 **Welcome overlay** — a neofetch-style splash on first launch (accent ASCII logo + version/backend), dismissed on the first key/click/Esc. Toggle with `show_welcome`.
 - 🖥️ **Desktop-independent** — X11 **and** Wayland, KDE / GNOME / any compositor, every distro. **No DE-specific code**, no compositor libraries.
 - ✅ **A real terminal** — true-color, answers host queries (DSR/DA), proper `TERM`, window resize with grid reflow, 10k-line scrollback, Ctrl+D closes cleanly.
 
@@ -44,10 +61,14 @@
 | <img src="assets/screenshots/catppuccin.png" width="400"> | <img src="assets/screenshots/tokyo-night.png" width="400"> |
 | **Gruvbox Dark** | **Dracula** |
 | <img src="assets/screenshots/gruvbox.png" width="400"> | <img src="assets/screenshots/dracula.png" width="400"> |
+| **Onyx** | **Settings (theme cards)** |
+| <img src="assets/screenshots/onyx.png" width="400"> | <img src="assets/screenshots/settings.png" width="400"> |
 
-| Settings dialog | Summon effect (Phosphor Ignition) |
+| Summon effect (Phosphor Ignition) | Live perf HUD |
 |:---:|:---:|
-| <img src="assets/screenshots/settings.png" width="400"> | <img src="assets/screenshots/phosphor.png" width="400"> |
+| <img src="assets/screenshots/phosphor.png" width="400"> | <img src="assets/screenshots/perf-hud.png" width="400"> |
+
+*(Screenshots pending regeneration for Onyx, perf-HUD, and updated settings panel — see `docs/perf-budget.md` for the regeneration commands.)*
 
 ## 🚀 Install
 
@@ -65,7 +86,7 @@ cargo build --release
 ./target/release/jetty
 ```
 
-Renders through **Metal**. Summon with **`fn`+`F9`** (plain F9 is macOS Mission Control), or bind a key to `jetty --toggle`. A locally built binary is not quarantined, so there's no Gatekeeper prompt. *(Prebuilt `.app` / `.dmg` are on the [roadmap](#-roadmap).)*
+Renders through **Metal**. Summon with **F9** — on Mac keyboards where the function-row keys default to media actions, press `fn`+`F9` so the OS delivers F9. You can also bind `jetty` to a shortcut via a launcher (the first press launches JeTTY; each subsequent press toggles the running instance via the single-instance socket — `jetty --toggle` and plain `jetty` behave identically). A locally built binary is not quarantined, so there's no Gatekeeper prompt. *(Prebuilt `.app` / `.dmg` are on the [roadmap](#-roadmap).)*
 
 ### 🐧 Linux — one-line installer (prebuilt, no toolchain)
 
@@ -73,7 +94,13 @@ Renders through **Metal**. Summon with **`fn`+`F9`** (plain F9 is macOS Mission 
 curl -fsSL https://raw.githubusercontent.com/bozdemir/JeTTY/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin` + a launcher entry. Or grab a `.deb` / **AppImage** from the [latest release](https://github.com/bozdemir/JeTTY/releases/latest):
+Installs to `~/.local/bin` by default. The script verifies the published `SHA256SUMS.txt` checksum before installing. For a system-wide install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bozdemir/JeTTY/main/install.sh | JETTY_PREFIX=/usr/local sudo -E sh
+```
+
+Also available: a launcher entry. Or grab a `.deb` / **AppImage** from the [latest release](https://github.com/bozdemir/JeTTY/releases/latest):
 
 ```bash
 sudo apt install ./jetty_*_amd64.deb                              # Debian / Ubuntu
@@ -92,23 +119,26 @@ cargo build --release && ./target/release/jetty
 ### Global summon hotkey
 
 - **X11** — `F9` works immediately, no setup.
-- **Wayland** — Wayland routes global shortcuts through the compositor, so bind a key to `jetty --toggle` (toggles the running instance via a single-instance socket). See [`docs/global-hotkey.md`](docs/global-hotkey.md). *(Note: in Dropdown mode, top-edge anchoring relies on window positioning, which the compositor controls on Wayland — it works fully on X11.)*
+- **Wayland** — Wayland routes global shortcuts through the compositor, so bind a key to `jetty` (the first press launches JeTTY, and each subsequent press toggles the running instance via the single-instance socket). See [`docs/global-hotkey.md`](docs/global-hotkey.md). The `--toggle` suffix is optional and behaves identically to plain `jetty`. *(Note: in Dropdown mode, top-edge anchoring relies on window positioning, which the compositor controls on Wayland — it works fully on X11.)*
 
 ## ⌨️ Keybindings
 
 | Key | Action |
 |---|---|
-| `F9` | Summon / hide JeTTY (global) |
+| `F9` | Summon / hide JeTTY (global; `fn`+`F9` on macOS) |
 | `Ctrl+Shift+P` | Open settings dialog |
-| `Ctrl+Shift+T` / `Ctrl+Shift+W` | New / close tab |
-| `Ctrl+Tab` / `Ctrl+1‒9` | Switch tab |
-| `Ctrl+Shift+T` | (in settings) cycle theme |
+| `Ctrl+Shift+T` | New tab |
+| `Ctrl+Shift+W` | Close tab (with confirm) |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+1`‒`9` | Jump to tab |
 | `Ctrl` + `+` / `-` / `0` | Font size up / down / reset |
 | `Ctrl+Shift` + `+` / `-` | Opacity up / down |
 | Left-drag | Select text (auto-copies) |
-| Right-click | Copy / Paste / Select All menu |
+| Right-click | Copy / Paste / Select All / Clear / Close Tab menu |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / Paste |
 | `Ctrl+D` | Close the shell (and window) |
+
+*Theme is chosen by clicking a theme card in the Settings dialog (`Ctrl+Shift+P`) — there is no theme keybinding.*
 
 ## ⚡ Performance
 
@@ -116,7 +146,7 @@ Measured headlessly on an Intel Arc iGPU at 1920×1200 (`cargo run --release -p 
 
 | Metric | JeTTY | Target |
 |---|---|---|
-| Frame render (full screen) | **5.5 ms** (180 fps) | ≤ 6.9 ms (144 Hz) |
+| Frame render (full screen) | **5.5 ms** (180 fps cap) | ≤ 6.9 ms (144 Hz) |
 | Idle CPU | **~0 %** | 0 % |
 | Per-frame snapshot (11k cells) | **0.047 ms** | ≤ 1 ms |
 | VT throughput | **154 MB/s** | ≥ 150 MB/s |

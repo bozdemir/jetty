@@ -1,0 +1,68 @@
+name: Feature request
+description: Propose a new feature or improvement for JeTTY.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before requesting a feature, please check the [roadmap](../../README.md#️-roadmap)
+        and open [issues](https://github.com/bozdemir/JeTTY/issues) to avoid duplicates.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: "What problem does this feature solve? What are you trying to do that JeTTY doesn't support?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: "Describe the feature or change you'd like to see."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - "Rendering / performance"
+        - "Terminal emulation / VT"
+        - "Summon hotkey / window modes"
+        - "Themes / visual polish"
+        - "Settings / configuration"
+        - "Tabs"
+        - "Clipboard / selection"
+        - "Fonts"
+        - "macOS"
+        - "Packaging / distribution"
+        - "Documentation"
+        - "Other"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: speed_check
+    attributes:
+      label: Speed check
+      description: |
+        JeTTY's #1 priority is raw speed. Please consider whether this feature
+        could affect the hot path (render loop, PTY drain, idle CPU). See
+        [docs/perf-budget.md](../../docs/perf-budget.md) for the performance gates.
+      options:
+        - label: "I've considered whether this feature could regress rendering performance, and I believe it can be implemented without doing so (or I'm open to discussing the tradeoff)."
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)
+      description: "Any alternative approaches you considered."
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context (optional)
+      description: "Screenshots, mockups, links to similar implementations in other terminals, etc."

@@ -3,7 +3,7 @@ use crate::Rect;
 /// The keyboard-shortcut rows shown in the Help overlay — ONE binding per line
 /// (single column) so a row's text can never overflow the panel's width. The
 /// panel width is computed from the longest row below.
-pub const HELP_ROWS: [&str; 16] = [
+pub const HELP_ROWS: [&str; 18] = [
     "F9 — Summon / hide",
     "Ctrl+Shift+T — New tab",
     "Ctrl+Shift+W — Close tab",
@@ -13,13 +13,15 @@ pub const HELP_ROWS: [&str; 16] = [
     "Double-click top bar — Maximize",
     "Ctrl+Shift+P — Settings",
     "Ctrl+= / Ctrl+- / Ctrl+0 — Font size",
+    "Ctrl+Shift+= / Ctrl+Shift+- — Transparency",
     "Ctrl+Shift+C / Ctrl+Shift+V — Copy / Paste",
-    "Right-click — Context menu (Copy/Paste/Clear/Close Tab)",
+    "Ctrl+L — Clear",
+    "PageUp / PageDown — Scroll",
+    "Right-click — Context menu (Copy/Paste/Select All/Clear/Close Tab)",
     "Drag top bar — Move window",
     "Drag edges/corners — Resize",
-    "Ctrl+D — Close tab",
+    "Ctrl+D — Close shell (sends EOF)",
     "Esc — Close this help",
-    "? — Toggle this help",
 ];
 
 /// Geometry + draw data for the Help overlay.
