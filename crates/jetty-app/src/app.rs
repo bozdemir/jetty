@@ -3016,7 +3016,33 @@ impl ApplicationHandler<AppEvent> for App {
                 // Escape in the main window never closes the settings window
                 // (that window handles its own Escape), so panel_open is always
                 // false here — Escape forwards an ESC byte to the PTY as normal.
-                let action = input::decide_key(ctrl, shift, alt, event.physical_key.clone(), &event.logical_key, false, app_cursor);
+                // macOS Option-compose (no OS gating — keyed on what the OS
+                // produced): Option is the primary compose key (Option+G → ©,
+                // Option+U U → ü). When Alt is held and the OS composed a printable
+                // NON-ASCII glyph in `event.text`, send that glyph to the PTY
+                // instead of letting decide_key ESC-prefix it (the Meta
+                // convention). Alt+ASCII stays Meta (ESC b for word-back, etc.),
+                // and Linux Alt+letter — which produces no composed non-ASCII text —
+                // is unaffected. (Dead-key sequences routed via Ime::Commit instead
+                // of event.text are a separate, larger path — deferred.)
+                let composed: Option<Vec<u8>> = if alt && !ctrl {
+                    event.text.as_ref().and_then(|t| {
+                        if !t.is_empty()
+                            && t.chars().all(|c| !c.is_control())
+                            && t.chars().any(|c| !c.is_ascii())
+                        {
+                            Some(t.as_bytes().to_vec())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                let action = match composed {
+                    Some(bytes) => input::KeyAction::Send(bytes),
+                    None => input::decide_key(ctrl, shift, alt, event.physical_key.clone(), &event.logical_key, false, app_cursor),
+                };
                 if self.debug {
                     let action_name = match &action {
                         input::KeyAction::TogglePanel => "TogglePanel",
