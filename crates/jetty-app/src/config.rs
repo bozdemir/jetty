@@ -20,6 +20,18 @@ pub struct Config {
     pub font_size: f32,
     /// Monospace font family name.
     pub font_family: String,
+    /// UI (chrome) font family — tab titles, status bar, menus, panel, help,
+    /// dialogs, welcome. SEPARATE from the terminal `font_family`. An empty
+    /// string means the platform's proportional sans (glyphon `Family::SansSerif`)
+    /// — the elegant out-of-box default that cannot collide with a real installed
+    /// family name and needs no special-casing in family lookup/validation.
+    #[serde(default = "default_ui_font_family")]
+    pub ui_font_family: String,
+    /// UI (chrome) font size in logical points. SEPARATE from the terminal
+    /// `font_size`. Clamped on load to [10.0, 28.0]; default 16.0 (== today's
+    /// chrome size, so the default look is unchanged).
+    #[serde(default = "default_ui_font_size")]
+    pub ui_font_size: f32,
     /// Window corner radius in logical px (0..=24).
     pub corner_radius: f32,
     /// Window-summon reveal effect: "none", "bayer", "phosphor", "liquid", or
@@ -89,6 +101,19 @@ fn default_show_perf_hud() -> bool {
     true
 }
 
+/// UI font default: empty string → platform proportional sans. Mirrors the
+/// terminal default look (tab titles already render in sans), so a config
+/// without this key renders chrome exactly as before.
+fn default_ui_font_family() -> String {
+    String::new()
+}
+
+/// UI font default size: 16pt == today's fixed chrome size, so an upgraded
+/// config without this key looks identical.
+fn default_ui_font_size() -> f32 {
+    16.0
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -96,6 +121,8 @@ impl Default for Config {
             opacity: 1.0,
             font_size: 16.0,
             font_family: "MesloLGS NF".to_string(),
+            ui_font_family: default_ui_font_family(),
+            ui_font_size: default_ui_font_size(),
             corner_radius: 10.0,
             summon_effect: default_summon_effect(),
             window_mode: default_window_mode(),
@@ -155,6 +182,10 @@ mod tests {
         assert_eq!(c.opacity, 1.0);
         assert_eq!(c.font_size, 16.0);
         assert_eq!(c.font_family, "MesloLGS NF");
+        // UI (chrome) font defaults: empty family (= platform sans) + 16pt, so
+        // the out-of-box chrome look is identical to the pre-feature default.
+        assert_eq!(c.ui_font_family, "");
+        assert_eq!(c.ui_font_size, 16.0);
         assert_eq!(c.corner_radius, 10.0);
         assert_eq!(c.summon_effect, "phosphor");
         assert_eq!(c.window_mode, "center");
@@ -190,6 +221,10 @@ mod tests {
         assert!(c.show_welcome);
         // An older config without show_perf_hud still loads as true.
         assert!(c.show_perf_hud);
+        // An older config without the UI-font keys still loads with the chrome
+        // defaults ("" = platform sans, 16pt), so an upgrade is visually a no-op.
+        assert_eq!(c.ui_font_family, "");
+        assert_eq!(c.ui_font_size, 16.0);
     }
 
     #[test]
@@ -199,6 +234,8 @@ mod tests {
             opacity: 0.85,
             font_size: 18.0,
             font_family: "Fira Code".to_string(),
+            ui_font_family: "Inter".to_string(),
+            ui_font_size: 20.0,
             corner_radius: 6.0,
             summon_effect: "phosphor".to_string(),
             window_mode: "dropdown".to_string(),
@@ -224,6 +261,8 @@ mod tests {
             opacity: 0.5,
             font_size: 14.0,
             font_family: "MesloLGS NF".to_string(),
+            ui_font_family: String::new(),
+            ui_font_size: 16.0,
             corner_radius: 12.0,
             summon_effect: "none".to_string(),
             window_mode: "center".to_string(),

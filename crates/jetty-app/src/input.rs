@@ -251,6 +251,20 @@ pub enum MouseAction {
     FontScrollUp,
     /// User clicked the ▼ font-list scroll button — scroll down (offset+1).
     FontScrollDown,
+    /// User clicked the UI (chrome) font-size decrement button ("−").
+    UiFontMinus,
+    /// User clicked the UI (chrome) font-size increment button ("+").
+    UiFontPlus,
+    /// User clicked the UI (chrome) font-size reset button ("rst").
+    UiFontReset,
+    /// User clicked a UI-font-family row. The index is
+    /// `geom.ui_font_scroll_offset + row_index` into the UI families list
+    /// (index 0 = the synthetic "System Sans (default)" row → "").
+    SetUiFont(usize),
+    /// User clicked the ▲ UI-font-list scroll button — scroll up (offset−1).
+    UiFontScrollUp,
+    /// User clicked the ▼ UI-font-list scroll button — scroll down (offset+1).
+    UiFontScrollDown,
     /// User clicked the summon-effect "‹" button — cycle to the previous effect.
     SummonPrev,
     /// User clicked the summon-effect "›" button — cycle to the next effect.
@@ -374,6 +388,30 @@ pub fn decide_mouse_press(
         for (i, row) in g.font_rows.iter().enumerate() {
             if point_in(row, cx, cy) {
                 return MouseAction::SetFont(g.font_scroll_offset + i);
+            }
+        }
+        // UI (chrome) font-size buttons.
+        if point_in(&g.ui_font_minus, cx, cy) {
+            return MouseAction::UiFontMinus;
+        }
+        if point_in(&g.ui_font_plus, cx, cy) {
+            return MouseAction::UiFontPlus;
+        }
+        if point_in(&g.ui_font_reset, cx, cy) {
+            return MouseAction::UiFontReset;
+        }
+        // UI-font-list scroll buttons.
+        if point_in(&g.ui_font_scroll_up, cx, cy) {
+            return MouseAction::UiFontScrollUp;
+        }
+        if point_in(&g.ui_font_scroll_down, cx, cy) {
+            return MouseAction::UiFontScrollDown;
+        }
+        // UI (chrome) font-family list rows. Row index 0 maps to the synthetic
+        // "System Sans (default)" entry (handled app-side as "").
+        for (i, row) in g.ui_font_rows.iter().enumerate() {
+            if point_in(row, cx, cy) {
+                return MouseAction::SetUiFont(g.ui_font_scroll_offset + i);
             }
         }
         // Title bar (top ~36px) — drag handle; must come before generic consume.
@@ -777,6 +815,86 @@ mod tests {
         assert_eq!(
             encode_mouse(MouseEvent::LeftPress, 5, 3, false),
             encode_x10_mouse(MouseEvent::LeftPress, 5, 3),
+        );
+    }
+
+    // ── UI-font panel hit-tests ──────────────────────────────────────────────
+    // Build a real panel (large screen so it isn't clamped) and verify clicks on
+    // the new UI-font widgets decode to the right MouseAction. Using build_panel
+    // keeps the geometry in lockstep with the renderer (no hand-rolled rects).
+
+    /// A representative panel with 5 UI-font families (incl. the synthetic
+    /// "System Sans" row) so the family list and its scroll math are exercised.
+    fn ui_panel() -> jetty_render::PanelView {
+        let theme = jetty_core::Theme::by_name("catppuccin_mocha");
+        let mono: Vec<String> = vec!["JetBrains Mono".into(), "Fira Code".into()];
+        let ui: Vec<String> = vec![
+            "System Sans (default)".into(),
+            "Inter".into(),
+            "Noto Sans".into(),
+            "DejaVu Sans".into(),
+            "Cantarell".into(),
+        ];
+        jetty_render::build_panel(
+            1920, 1280, 0.97, 0, 15.0, &mono, "JetBrains Mono", 0,
+            8.0, "Phosphor", "Center", "Top", 0.5, 1.0, false, true,
+            18.0, &ui, "", 0,
+            0.0, 0.0, &theme, 9.8, // char_w scale-1 fallback
+        )
+    }
+
+    /// Decode a click at the center of `rect` against the panel geometry.
+    fn click_rect(g: &jetty_render::PanelGeom, rect: &jetty_render::Rect) -> MouseAction {
+        decide_mouse_press(Some(g), None, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+    }
+
+    #[test]
+    fn ui_font_size_buttons_hit_test() {
+        let pv = ui_panel();
+        let g = &pv.geom;
+        assert_eq!(click_rect(g, &g.ui_font_minus), MouseAction::UiFontMinus);
+        assert_eq!(click_rect(g, &g.ui_font_plus), MouseAction::UiFontPlus);
+        assert_eq!(click_rect(g, &g.ui_font_reset), MouseAction::UiFontReset);
+    }
+
+    #[test]
+    fn ui_font_scroll_buttons_hit_test() {
+        let pv = ui_panel();
+        let g = &pv.geom;
+        assert_eq!(click_rect(g, &g.ui_font_scroll_up), MouseAction::UiFontScrollUp);
+        assert_eq!(click_rect(g, &g.ui_font_scroll_down), MouseAction::UiFontScrollDown);
+    }
+
+    #[test]
+    fn ui_font_rows_hit_test_to_offset_plus_index() {
+        let pv = ui_panel();
+        let g = &pv.geom;
+        // Row 0 maps to SetUiFont(offset+0) = SetUiFont(0) (the System Sans row).
+        let r0 = g.ui_font_rows[0].clone();
+        assert_eq!(
+            decide_mouse_press(Some(g), None, r0.x + 4.0, r0.y + r0.h / 2.0),
+            MouseAction::SetUiFont(g.ui_font_scroll_offset),
+        );
+        // Row 2 maps to SetUiFont(offset+2).
+        let r2 = g.ui_font_rows[2].clone();
+        assert_eq!(
+            decide_mouse_press(Some(g), None, r2.x + 4.0, r2.y + r2.h / 2.0),
+            MouseAction::SetUiFont(g.ui_font_scroll_offset + 2),
+        );
+    }
+
+    #[test]
+    fn terminal_font_widgets_still_hit_test_after_ui_insert() {
+        // Regression: the UI-font hit-tests are inserted AFTER the terminal-font
+        // ones, so the terminal-font widgets must still decode correctly.
+        let pv = ui_panel();
+        let g = &pv.geom;
+        assert_eq!(click_rect(g, &g.font_minus), MouseAction::FontMinus);
+        assert_eq!(click_rect(g, &g.font_plus), MouseAction::FontPlus);
+        let r0 = g.font_rows[0];
+        assert_eq!(
+            decide_mouse_press(Some(g), None, r0.x + 4.0, r0.y + r0.h / 2.0),
+            MouseAction::SetFont(g.font_scroll_offset),
         );
     }
 }

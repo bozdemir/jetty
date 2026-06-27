@@ -6,6 +6,10 @@
 ///   JETTY_SHOT_INPUT — ANSI bytes to feed the terminal (default: built-in sample)
 ///   JETTY_THEME      — theme name (picked up automatically via Terminal::new)
 ///   JETTY_OPACITY    — opacity 0.0..1.0 (picked up automatically via Terminal::new)
+///   JETTY_SHOT_UI_FONT_SIZE — UI (chrome) font size in logical pt (10..28,
+///                    default 16). Drives ALL chrome (tab bar/status/menu/panel/
+///                    help/confirm/welcome) and the panel's live "Aa" specimen.
+///   JETTY_SHOT_UI_FONT — UI (chrome) font family (default "" = platform sans).
 ///
 /// If the terminal bg alpha < 255, the rendered image is composited over a
 /// checkerboard (alternating 16px squares of [40,40,40] and [90,90,90]) so
@@ -85,18 +89,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("jetty-shot: JETTY_FONT_FAMILY={font_family:?}");
     }
 
+    // UI (chrome) font: size (10..28, default 16) + family ("" = platform sans).
+    // Mirrors the live app's separate UI font — drives ALL chrome and the panel
+    // "Aa" specimen, independent of the terminal grid font (JETTY_FONT_SIZE).
+    let ui_font_size: f32 = std::env::var("JETTY_SHOT_UI_FONT_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .map(|v| v.clamp(10.0, 28.0))
+        .unwrap_or(16.0);
+    let ui_font_family = std::env::var("JETTY_SHOT_UI_FONT").unwrap_or_default();
+    if std::env::var("JETTY_SHOT_UI_FONT_SIZE").is_ok() || std::env::var("JETTY_SHOT_UI_FONT").is_ok() {
+        eprintln!("jetty-shot: UI font size={ui_font_size}, family={ui_font_family:?}");
+    }
+
     // --- Build TextLayer ---
     let mut text = TextLayer::new_with_family(&device, &queue, format, font_size, &font_family);
-    // FIXED-size chrome layer (16px), mirroring the live app: ALL window chrome
-    // (tab bar, context menu, settings panel, help, confirm popups) renders
-    // through this, so chrome text is the SAME size regardless of JETTY_FONT_SIZE.
+    // Chrome layer at the UI font size, mirroring the live app: ALL window chrome
+    // (tab bar, status bar, context menu, settings panel, help, confirm, welcome)
+    // renders through this in the chosen UI family, independent of JETTY_FONT_SIZE.
     // The terminal grid renders through `text` (which scales with the font).
-    let mut chrome_text = TextLayer::new_with_family(&device, &queue, format, 16.0, &font_family);
+    let mut chrome_text = TextLayer::new_with_family(&device, &queue, format, ui_font_size, &font_family);
+    chrome_text.set_ui_family(if ui_font_family.is_empty() { None } else { Some(ui_font_family.as_str()) });
     // Measured chrome-font advance: used by all overlay builders for scale-correct
     // width reservations (HiDPI-aware). On a CI/scale-1 run this is ~9.6–9.8 px.
     let chrome_char_w = chrome_text.cell_size().0;
     let (cell_w, cell_h) = text.cell_size();
     let mono_families = text.monospace_families();
+    // UI-font candidates with the synthetic "System Sans (default)" row at index 0.
+    let ui_families: Vec<String> = std::iter::once("System Sans (default)".to_string())
+        .chain(chrome_text.proportional_families())
+        .collect();
     eprintln!("jetty-shot: {} monospace families found (e.g. {:?})", mono_families.len(), mono_families.first());
 
     let cols = (width as f32 / cell_w).floor().max(1.0) as usize;
@@ -245,6 +267,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rects.push(r);
         }
 
+        // Baseline for the live "Aa" UI-font specimen, set when the panel is built.
+        let mut ui_specimen_pos: Option<(f32, f32)> = None;
         let shot_panel = std::env::var("JETTY_SHOT_PANEL").unwrap_or_else(|_| "0".to_string());
         let mut panel_labels = if shot_panel == "1" {
             // Read opacity + theme_idx from env (same vars as the live app).
@@ -289,14 +313,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::env::var("JETTY_SHOT_PANEL_DW").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0),
                 std::env::var("JETTY_SHOT_PANEL_WINMODE").map(|m| m == "Dropdown").unwrap_or(false),
                 std::env::var("JETTY_SHOT_PANEL_AUTOHIDE").map(|s| s != "0").unwrap_or(true),
+                ui_font_size,
+                &ui_families,
+                ui_font_family.as_str(),
+                0,
                 panel_dx,
                 panel_dy,
                 terminal.theme(),
                 chrome_char_w,
             );
             rects.extend(pv.quads);
+            // The live "Aa" specimen is drawn at the TRUE UI size via chrome_text
+            // (here chrome_text IS at the UI size), so capture its baseline.
+            ui_specimen_pos = Some(pv.ui_specimen_pos);
             eprintln!(
-                "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx}, font_size={font_size}, offset=({panel_dx},{panel_dy}))"
+                "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx}, font_size={font_size}, ui_font_size={ui_font_size}, offset=({panel_dx},{panel_dy}))"
             );
             pv.labels
         } else {
@@ -433,13 +464,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quad.render(&device, &queue, &view, width, height, &rects);
 
         // Render chrome (panel/tabbar/menu/help/confirm) labels on top of the
-        // quads through the FIXED-size chrome layer, so they don't scale with the
-        // terminal font (this is what proves BUG 1 is fixed across JETTY_FONT_SIZE).
+        // quads through the chrome layer (at the UI size), so they don't scale with
+        // the terminal font (this is what proves BUG 1 is fixed across JETTY_FONT_SIZE).
         if !panel_labels.is_empty() {
             let _ = chrome_text.render_overlays(&device, &queue, &view, width, height, &panel_labels);
         }
         if !panel_title_labels.is_empty() {
             let _ = chrome_text.render_overlays_sans(&device, &queue, &view, width, height, &panel_title_labels);
+        }
+        // Live "Aa" specimen at the TRUE UI size (chrome_text is at the UI size in
+        // the harness), drawn over the capped panel-text pass — mirrors the app's
+        // dedicated specimen layer so the panel shot shows the honest preview. Use
+        // the TITLE path so the `""` default previews the platform sans.
+        if let Some((sx, sy)) = ui_specimen_pos {
+            let accent = terminal.theme().palette[4];
+            let _ = chrome_text.render_overlays_sans(
+                &device, &queue, &view, width, height,
+                &[("Aa".to_string(), sx, sy, [accent[0], accent[1], accent[2]])],
+            );
         }
     }
 

@@ -157,6 +157,23 @@ const DROPDOWN_SLIDE_SECS: f32 = 0.15;
 /// glyphs are rendered at physical-pixel resolution on HiDPI screens.
 const FONT_LOGICAL_DEFAULT: f32 = 16.0;
 
+/// UI (chrome) font-size range in logical points. The chrome — tab titles, the
+/// status bar, the right-click menu, help/confirm/welcome overlays — scales
+/// across this full range. SEPARATE from the terminal font (which uses its own
+/// [6, 48] clamp); a UI-font size change never reflows the grid.
+const UI_FONT_MIN: f32 = 10.0;
+const UI_FONT_MAX: f32 = 28.0;
+/// The Settings panel's OWN body text is CAPPED to this tighter range so the
+/// absolute-px panel layout never overflows its fixed window, while the rest of
+/// the chrome (and the live "Aa" specimen in the UI-FONT section) tracks the
+/// true `ui_font_logical`. The panel is a transient config sheet — the least
+/// important surface to scale — so capping it costs nothing the user lives in.
+const PANEL_TEXT_MIN: f32 = 13.0;
+const PANEL_TEXT_MAX: f32 = 17.0;
+/// Default UI font size: 16pt == today's fixed chrome size, so the out-of-box
+/// look is unchanged.
+const UI_FONT_LOGICAL_DEFAULT: f32 = 16.0;
+
 /// Fallback grid dimensions used only when computing cols/rows from the window
 /// is not yet possible (e.g. before `resumed` completes). In practice the
 /// derived grid replaces these immediately; they are never used for the actual
@@ -329,6 +346,19 @@ pub struct App {
     font_families: Vec<String>,
     /// Scroll offset into `font_families` for the panel's font-family list.
     font_scroll_offset: usize,
+    /// UI (chrome) font family — drives tab titles, status bar, menus, panel,
+    /// help/confirm/welcome. SEPARATE from `font_family` (the terminal grid font).
+    /// `""` = platform proportional sans (the default look).
+    ui_font_family: String,
+    /// UI (chrome) font size in logical points, clamped [10, 28]. SEPARATE from
+    /// `font_logical`; a change never reflows the grid (chrome size is orthogonal
+    /// to cols/rows), so there is no p10k-scatter risk and no debounce.
+    ui_font_logical: f32,
+    /// Cached PROPORTIONAL family list for the UI-font picker, with a synthetic
+    /// index-0 "System Sans (default)" row (→ "") prepended. Populated at init.
+    ui_font_families: Vec<String>,
+    /// Scroll offset into `ui_font_families` for the panel's UI-font list.
+    ui_font_scroll_offset: usize,
     /// Track held modifier keys so Ctrl+Shift combos can be detected.
     modifiers: winit::keyboard::ModifiersState,
     /// Last known cursor position in physical pixels.
@@ -345,6 +375,13 @@ pub struct App {
     settings_gpu: Option<GpuContext>,
     settings_text: Option<TextLayer>,
     settings_quad: Option<QuadLayer>,
+    /// A second text layer on the SETTINGS device, kept at the TRUE (uncapped) UI
+    /// size, used ONLY to draw the live "Aa" specimen in the UI-FONT section — so
+    /// the user sees an honest preview even though the panel body text is capped.
+    /// Created/dropped with the settings window (so no GPU layer leaks). Lives on
+    /// the settings device because `chrome_text` is bound to the MAIN window's
+    /// device and cannot render into the settings surface.
+    settings_specimen_text: Option<TextLayer>,
     /// Last known cursor position inside the settings window (physical px), used
     /// for hit-testing the panel in the settings window's own coordinate space.
     settings_cursor: (f64, f64),
@@ -616,6 +653,12 @@ impl App {
             font_family,
             font_families: Vec::new(),
             font_scroll_offset: 0,
+            // UI font defaults (overridden by config below): "" = platform sans,
+            // 16pt = today's chrome size, so the default look is unchanged.
+            ui_font_family: String::new(),
+            ui_font_logical: UI_FONT_LOGICAL_DEFAULT,
+            ui_font_families: Vec::new(),
+            ui_font_scroll_offset: 0,
             modifiers: winit::keyboard::ModifiersState::empty(),
             cursor: (0.0, 0.0),
             dragging_scrollbar: false,
@@ -624,6 +667,7 @@ impl App {
             settings_gpu: None,
             settings_text: None,
             settings_quad: None,
+            settings_specimen_text: None,
             settings_cursor: (0.0, 0.0),
             dragging_slider: false,
             dragging_radius: false,
@@ -676,6 +720,11 @@ impl App {
         app.opacity = cfg.opacity.clamp(0.1, 1.0);
         app.font_logical = cfg.font_size.clamp(6.0, 48.0);
         app.font_family = cfg.font_family;
+        // UI (chrome) font, clamped like the terminal font. "" = platform sans;
+        // a non-empty family is validated against the installed proportional
+        // faces later in `resumed` (a removed font falls back to "" / sans).
+        app.ui_font_logical = cfg.ui_font_size.clamp(UI_FONT_MIN, UI_FONT_MAX);
+        app.ui_font_family = cfg.ui_font_family;
         app.corner_radius = cfg.corner_radius.clamp(0.0, 24.0);
         app.summon_effect = SummonEffect::from_config(&cfg.summon_effect);
         app.window_mode = WindowMode::from_config(&cfg.window_mode);
@@ -702,6 +751,8 @@ impl App {
             opacity: self.opacity,
             font_size: self.font_logical,
             font_family: self.font_family.clone(),
+            ui_font_family: self.ui_font_family.clone(),
+            ui_font_size: self.ui_font_logical,
             corner_radius: self.corner_radius,
             summon_effect: self.summon_effect.to_config().to_string(),
             window_mode: self.window_mode.to_config().to_string(),
@@ -1099,6 +1150,18 @@ impl App {
         self.chrome_text.as_ref().map(|ct| ct.cell_size().0).unwrap_or(9.6)
     }
 
+    /// Measured advance of the SETTINGS panel's text layer (the CAPPED UI size),
+    /// used by `build_panel` so the panel's right-aligned values and family-row
+    /// truncation match the layer that actually draws those labels. Falls back to
+    /// the main chrome advance, then 9.6, before the settings layer exists.
+    #[inline]
+    fn settings_char_w(&self) -> f32 {
+        self.settings_text
+            .as_ref()
+            .map(|st| st.cell_size().0)
+            .unwrap_or_else(|| self.chrome_char_w())
+    }
+
     /// Convert the current cursor pixel position into 1-based terminal cell
     /// coordinates `(col, row)` using the renderer's cell size. Returns `None`
     /// when the renderer (and thus cell metrics) is not yet available.
@@ -1388,14 +1451,88 @@ impl App {
         if let Some(text) = &mut self.text {
             text.set_font_family(&self.font_family);
         }
-        // The chrome follows the selected font FAMILY too (but keeps its fixed
-        // size), so the tab bar / controls match the terminal typeface.
-        if let Some(ct) = &mut self.chrome_text {
-            ct.set_font_family(&self.font_family);
-        }
+        // The chrome is now DECOUPLED from the terminal font: it follows the
+        // separate `ui_font_family`/`ui_font_logical` (set via `set_ui_font_*`),
+        // NOT the terminal family. So a terminal-font change no longer touches
+        // chrome_text — leaving the chrome typeface stable while the grid font
+        // changes (and avoiding a chrome re-measure on every terminal-font pick).
         self.reflow();
         self.persist();
         if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Change the UI (chrome) font SIZE at runtime, clamped [10, 28]. Resizes the
+    /// chrome + settings text layers IN-PLACE (reusing their FontSystems — never
+    /// `new_with_family`, which would rescan fontconfig ~20ms). The settings panel
+    /// body text is CAPPED to [13, 17] so the absolute-px panel layout never
+    /// overflows, while the rest of the chrome (and the live "Aa" specimen) tracks
+    /// the true size. Crucially does NOT reflow the grid/PTY: chrome size has no
+    /// effect on cols/rows, so there is no p10k-scatter risk and no debounce — the
+    /// idle 0-CPU path is untouched.
+    fn set_ui_font_size(&mut self, new_logical: f32) {
+        self.ui_font_logical = new_logical.clamp(UI_FONT_MIN, UI_FONT_MAX);
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        if let Some(ct) = self.chrome_text.as_mut() {
+            ct.set_font_size(self.ui_font_logical * scale);
+        }
+        // The settings-window text layer uses its OWN scale_factor; cap its size.
+        let settings_scale = self
+            .settings_window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(scale);
+        if let Some(st) = self.settings_text.as_mut() {
+            let capped = self.ui_font_logical.clamp(PANEL_TEXT_MIN, PANEL_TEXT_MAX);
+            st.set_font_size(capped * settings_scale);
+        }
+        // The specimen layer tracks the TRUE (uncapped) size so the "Aa" preview is honest.
+        if let Some(sp) = self.settings_specimen_text.as_mut() {
+            sp.set_font_size(self.ui_font_logical * settings_scale);
+        }
+        self.persist();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        // Live preview in the settings window (specimen + readout) if it's open.
+        self.render_settings_window();
+        if let Some(w) = &self.settings_window {
+            w.request_redraw();
+        }
+    }
+
+    /// Change the UI (chrome) font FAMILY at runtime. `""` selects the platform
+    /// proportional sans. Swaps the chrome + settings layers' `ui_family` via the
+    /// no-rescan `set_ui_family` (the chrome FontSystem already holds every
+    /// installed family). Does NOT reflow the grid/PTY (chrome family is
+    /// orthogonal to cols/rows), so the hot/idle paths are untouched.
+    fn set_ui_font_family(&mut self, name: String) {
+        self.ui_font_family = name;
+        let fam = if self.ui_font_family.is_empty() {
+            None
+        } else {
+            Some(self.ui_font_family.as_str())
+        };
+        if let Some(ct) = self.chrome_text.as_mut() {
+            ct.set_ui_family(fam);
+        }
+        if let Some(st) = self.settings_text.as_mut() {
+            st.set_ui_family(fam);
+        }
+        if let Some(sp) = self.settings_specimen_text.as_mut() {
+            sp.set_ui_family(fam);
+        }
+        self.persist();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        self.render_settings_window();
+        if let Some(w) = &self.settings_window {
             w.request_redraw();
         }
     }
@@ -1484,14 +1621,30 @@ impl App {
         let scale = window.scale_factor() as f32;
         let gpu = GpuContext::new(window.clone(), size.width, size.height);
         if let Some(ref g) = gpu {
-            // FIXED chrome size (16 * scale), independent of the terminal font, so
-            // the settings panel text never overflows its fixed-size window when
-            // the user has grown/shrunk the terminal font.
-            let text = TextLayer::new_with_family(
-                &g.device, &g.queue, g.format, FONT_LOGICAL_DEFAULT * scale, &self.font_family,
+            // The settings panel body text renders at the CAPPED UI size ([13,17])
+            // so the absolute-px panel layout never overflows its fixed window,
+            // independent of the terminal font. The chosen UI family is applied via
+            // set_ui_family (no rescan). The true UI size is used only for the live
+            // "Aa" specimen, drawn separately via chrome_text.
+            let capped = self.ui_font_logical.clamp(PANEL_TEXT_MIN, PANEL_TEXT_MAX);
+            let mut text = TextLayer::new_with_family(
+                &g.device, &g.queue, g.format, capped * scale, &self.font_family,
             );
+            let ui_fam = if self.ui_font_family.is_empty() {
+                None
+            } else {
+                Some(self.ui_font_family.as_str())
+            };
+            text.set_ui_family(ui_fam);
+            // Dedicated TRUE-size specimen layer on the settings device for the
+            // live "Aa" preview (the panel body text above is capped).
+            let mut specimen = TextLayer::new_with_family(
+                &g.device, &g.queue, g.format, self.ui_font_logical * scale, &self.font_family,
+            );
+            specimen.set_ui_family(ui_fam);
             let quad = QuadLayer::new(&g.device, g.format);
             self.settings_text = Some(text);
+            self.settings_specimen_text = Some(specimen);
             self.settings_quad = Some(quad);
         }
         self.settings_gpu = gpu;
@@ -1522,6 +1675,7 @@ impl App {
         self.settings_window = None;
         self.settings_gpu = None;
         self.settings_text = None;
+        self.settings_specimen_text = None;
         self.settings_quad = None;
         // Clear BOTH drag flags so a drag in progress when the window closes
         // doesn't leave a stale flag set that misbehaves on reopen.
@@ -1547,7 +1701,9 @@ impl App {
             self.dropdown_height_pct,
             self.dropdown_width_pct,
             self.window_mode == WindowMode::Dropdown, self.focus_autohide,
-            0.0, 0.0, &theme, self.chrome_char_w(),
+            self.ui_font_logical, &self.ui_font_families, &self.ui_font_family,
+            self.ui_font_scroll_offset,
+            0.0, 0.0, &theme, self.settings_char_w(),
         )
     }
 
@@ -1569,11 +1725,24 @@ impl App {
         // stack mutably below without overlapping the immutable self borrows.
         let families = self.font_families.clone();
         let family = self.font_family.clone();
+        let ui_families = self.ui_font_families.clone();
+        let ui_family = self.ui_font_family.clone();
+        let ui_font_logical = self.ui_font_logical;
+        let ui_font_scroll_offset = self.ui_font_scroll_offset;
         let theme = self.current_theme();
-        let char_w = self.chrome_char_w();
-        let (Some(gpu), Some(text), Some(quad)) =
-            (&mut self.settings_gpu, &mut self.settings_text, &mut self.settings_quad)
-        else {
+        // Panel labels use the SETTINGS (capped) layer advance so right-align /
+        // truncation match the layer that draws them.
+        let char_w = self.settings_char_w();
+        // Specimen color: the theme's blue accent, so the preview pops against the
+        // panel surface (same accent the panel chrome uses for handles/selection).
+        let accent = theme.palette[4];
+        let specimen_rgb = [accent[0], accent[1], accent[2]];
+        let (Some(gpu), Some(text), Some(quad), Some(specimen)) = (
+            &mut self.settings_gpu,
+            &mut self.settings_text,
+            &mut self.settings_quad,
+            &mut self.settings_specimen_text,
+        ) else {
             return;
         };
         let width = gpu.config.width;
@@ -1582,6 +1751,7 @@ impl App {
             width, height, opacity, theme_idx, font_logical,
             &families, &family, font_scroll_offset, corner_radius, summon_name,
             window_mode_name, tab_bar_name, dropdown_height_pct, dropdown_width_pct, is_dropdown, focus_autohide,
+            ui_font_logical, &ui_families, &ui_family, ui_font_scroll_offset,
             0.0, 0.0, &theme, char_w,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
@@ -1606,6 +1776,20 @@ impl App {
                     &pv.labels,
                 );
             }
+            // Overdraw the live "Aa" specimen at the TRUE UI size via the dedicated
+            // specimen layer, AFTER the capped panel-text pass — so the user sees an
+            // honest big/small/typeface preview that tracks ui_font_size. Use the
+            // TITLE path so at the `""` default it previews the platform SANS (the
+            // actual default UI face), and a chosen family otherwise.
+            let (sx, sy) = pv.ui_specimen_pos;
+            let _ = specimen.render_overlays_sans(
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                width,
+                height,
+                &[("Aa".to_string(), sx, sy, specimen_rgb)],
+            );
             frame.present();
         }
     }
@@ -1662,6 +1846,33 @@ impl App {
                 const MAX_FONT_ROWS: usize = 5;
                 let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
                 self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
+            }
+            input::MouseAction::UiFontMinus => {
+                self.set_ui_font_size(self.ui_font_logical - 1.0);
+            }
+            input::MouseAction::UiFontPlus => {
+                self.set_ui_font_size(self.ui_font_logical + 1.0);
+            }
+            input::MouseAction::UiFontReset => {
+                self.set_ui_font_size(UI_FONT_LOGICAL_DEFAULT);
+            }
+            input::MouseAction::SetUiFont(idx) => {
+                // Index 0 is the synthetic "System Sans (default)" row → "".
+                if idx == 0 {
+                    self.set_ui_font_family(String::new());
+                } else if let Some(name) = self.ui_font_families.get(idx) {
+                    let name = name.clone();
+                    self.set_ui_font_family(name);
+                }
+            }
+            input::MouseAction::UiFontScrollUp => {
+                self.ui_font_scroll_offset = self.ui_font_scroll_offset.saturating_sub(1);
+            }
+            input::MouseAction::UiFontScrollDown => {
+                // 4-row visible cap (MAX_UI_FONT_ROWS in panel.rs).
+                const MAX_UI_FONT_ROWS: usize = 4;
+                let max_offset = self.ui_font_families.len().saturating_sub(MAX_UI_FONT_ROWS);
+                self.ui_font_scroll_offset = (self.ui_font_scroll_offset + 1).min(max_offset);
             }
             input::MouseAction::SummonPrev => {
                 self.set_summon_effect(self.summon_effect.cycle(false));
@@ -1747,11 +1958,17 @@ impl App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let scale = scale_factor as f32;
-                // FIXED chrome size (16 * scale); re-scale in place (reusing the
-                // FontSystem) so a settings-window DPI change doesn't rescan
-                // fontconfig (~20ms) on the main thread.
+                // CAPPED UI size ([13,17] * scale): the panel body text stays within
+                // the fixed window. Re-scale in place (reusing the FontSystem) so a
+                // settings-window DPI change doesn't rescan fontconfig (~20ms) on
+                // the main thread.
                 if let Some(t) = self.settings_text.as_mut() {
-                    t.set_font_size(FONT_LOGICAL_DEFAULT * scale);
+                    let capped = self.ui_font_logical.clamp(PANEL_TEXT_MIN, PANEL_TEXT_MAX);
+                    t.set_font_size(capped * scale);
+                }
+                // The specimen layer tracks the TRUE size (so its "Aa" stays honest).
+                if let Some(sp) = self.settings_specimen_text.as_mut() {
+                    sp.set_font_size(self.ui_font_logical * scale);
                 }
                 if let Some(w) = &self.settings_window {
                     w.request_redraw();
@@ -1830,9 +2047,9 @@ impl App {
                 self.handle_settings_action(action, Some(track), Some(radius_track), Some(dropdown_track), Some(dropdown_width_track));
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                // Wheel over the font-family list scrolls it (same as the old
-                // in-app panel behaviour), now in the settings window.
-                if self.font_families.is_empty() {
+                // Wheel over the terminal- OR UI-font list scrolls it (same as the
+                // old in-app panel behaviour), now in the settings window.
+                if self.font_families.is_empty() && self.ui_font_families.is_empty() {
                     return;
                 }
                 let lines = match delta {
@@ -1852,6 +2069,12 @@ impl App {
                         && cy >= pv.geom.font_rows.first().map(|r| r.y).unwrap_or(0.0)
                         && cy <= pv.geom.font_rows.last().map(|r| r.y + r.h).unwrap_or(0.0)
                 });
+                // Is the cursor over the UI (chrome) font list?
+                let over_ui_list = !pv.geom.ui_font_rows.is_empty() && pv.geom.ui_font_rows.iter().any(|r| {
+                    cx >= r.x && cx <= r.x + r.w
+                        && cy >= pv.geom.ui_font_rows.first().map(|r| r.y).unwrap_or(0.0)
+                        && cy <= pv.geom.ui_font_rows.last().map(|r| r.y + r.h).unwrap_or(0.0)
+                });
                 if over_list {
                     const MAX_FONT_ROWS: usize = 5;
                     let max_offset = self.font_families.len().saturating_sub(MAX_FONT_ROWS);
@@ -1859,6 +2082,17 @@ impl App {
                         self.font_scroll_offset = self.font_scroll_offset.saturating_sub(1);
                     } else {
                         self.font_scroll_offset = (self.font_scroll_offset + 1).min(max_offset);
+                    }
+                    if let Some(w) = &self.settings_window {
+                        w.request_redraw();
+                    }
+                } else if over_ui_list {
+                    const MAX_UI_FONT_ROWS: usize = 4;
+                    let max_offset = self.ui_font_families.len().saturating_sub(MAX_UI_FONT_ROWS);
+                    if lines > 0 {
+                        self.ui_font_scroll_offset = self.ui_font_scroll_offset.saturating_sub(1);
+                    } else {
+                        self.ui_font_scroll_offset = (self.ui_font_scroll_offset + 1).min(max_offset);
                     }
                     if let Some(w) = &self.settings_window {
                         w.request_redraw();
@@ -2110,14 +2344,43 @@ impl ApplicationHandler<AppEvent> for App {
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
         }
 
-        // Build the FIXED-size chrome TextLayer (tab bar / menus / overlays). It
-        // lives at FONT_LOGICAL_DEFAULT (16) * scale so its ~9.6px advance matches
-        // what build_tab_bar_ex assumes, and it is NEVER rebuilt on terminal font
-        // changes — only on scale changes — so chrome can't overflow the bar.
+        // Build the chrome TextLayer (tab bar / menus / overlays / status bar). It
+        // renders ALL window chrome at the UI font size (ui_font_logical * scale)
+        // in the UI family — decoupled from the terminal font, so chrome can't
+        // overflow when the terminal font changes. A UI-font SIZE change resizes it
+        // IN-PLACE; a FAMILY change swaps ui_family — neither rebuilds the layer.
         if let Some(ref g) = gpu {
-            self.chrome_text = Some(TextLayer::new_with_family(
-                &g.device, &g.queue, g.format, FONT_LOGICAL_DEFAULT * scale, &self.font_family,
-            ));
+            let mut chrome = TextLayer::new_with_family(
+                &g.device, &g.queue, g.format, self.ui_font_logical * scale, &self.font_family,
+            );
+            // Populate the UI-font picker list: a synthetic "System Sans (default)"
+            // row (→ "") first, then the installed proportional families.
+            self.ui_font_families = std::iter::once("System Sans (default)".to_string())
+                .chain(chrome.proportional_families())
+                .collect();
+            eprintln!(
+                "jetty: found {} proportional UI families",
+                self.ui_font_families.len().saturating_sub(1)
+            );
+            // Validate the persisted UI family: a non-empty family that is no
+            // longer installed falls back to "" (platform sans) so a removed font
+            // never leaves blank chrome.
+            if !self.ui_font_family.is_empty()
+                && !self.ui_font_families.iter().any(|f| f == &self.ui_font_family)
+            {
+                eprintln!(
+                    "jetty: configured UI font {:?} not found; falling back to system sans",
+                    self.ui_font_family
+                );
+                self.ui_font_family.clear();
+            }
+            // Apply the (validated) UI family to the chrome layer (no rescan).
+            chrome.set_ui_family(if self.ui_font_family.is_empty() {
+                None
+            } else {
+                Some(self.ui_font_family.as_str())
+            });
+            self.chrome_text = Some(chrome);
         }
 
         self.window = Some(window);
@@ -2291,8 +2554,9 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(t) = self.text.as_mut() {
                     t.set_font_size(self.font_logical * scale);
                 }
+                // Chrome scales with the UI font (not the terminal font).
                 if let Some(t) = self.chrome_text.as_mut() {
-                    t.set_font_size(FONT_LOGICAL_DEFAULT * scale);
+                    t.set_font_size(self.ui_font_logical * scale);
                 }
                 self.reflow_pending_at =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(120));
@@ -2758,6 +3022,12 @@ impl ApplicationHandler<AppEvent> for App {
                     | input::MouseAction::SetFont(_)
                     | input::MouseAction::FontScrollUp
                     | input::MouseAction::FontScrollDown
+                    | input::MouseAction::UiFontMinus
+                    | input::MouseAction::UiFontPlus
+                    | input::MouseAction::UiFontReset
+                    | input::MouseAction::SetUiFont(_)
+                    | input::MouseAction::UiFontScrollUp
+                    | input::MouseAction::UiFontScrollDown
                     | input::MouseAction::SummonPrev
                     | input::MouseAction::SummonNext
                     | input::MouseAction::WinModePrev

@@ -475,9 +475,13 @@ fn arrow_keys_app_cursor_mode_all_directions() {
 /// Build a real PanelGeom for a 1000×640 window at 70% opacity, theme index 1.
 fn make_panel_geom() -> jetty_render::PanelGeom {
     let theme = jetty_core::Theme::by_name("catppuccin_mocha");
+    // UI-font args: size 16, a single synthetic "System Sans" row, selected "".
+    let ui_families = ["System Sans (default)".to_string()];
     jetty_render::build_panel(
         1000, 640, 0.7, 1, 16.0, &[], "", 0, 10.0, "Bayer",
-        "Center", "Top", 0.50, 1.0, false, true, 0.0, 0.0, &theme, 9.8,
+        "Center", "Top", 0.50, 1.0, false, true,
+        16.0, &ui_families, "", 0,
+        0.0, 0.0, &theme, 9.8,
     )
     .geom
 }
