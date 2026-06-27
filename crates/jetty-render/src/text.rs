@@ -415,7 +415,7 @@ impl TextLayer {
     ///
     /// `labels` is a slice of `(text, x, y, rgb_color)` tuples.
     /// Returns `Ok(())` immediately when `labels` is empty.
-    pub fn render_overlays(
+    fn render_overlays_inner(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -423,6 +423,7 @@ impl TextLayer {
         width: u32,
         height: u32,
         labels: &[(String, f32, f32, [u8; 3])],
+        sans: bool,
     ) -> Result<(), PrepareError> {
         if labels.is_empty() {
             return Ok(());
@@ -447,7 +448,13 @@ impl TextLayer {
         for (i, (text, _x, _y, _rgb)) in labels.iter().enumerate() {
             let buf = &mut self.overlay_buffers[i];
             buf.set_size(&mut self.font_system, None, Some(height as f32));
-            let attrs = Attrs::new().family(Family::Name(&family_name));
+            // Tab titles render in the platform's default proportional sans
+            // (Family::SansSerif); all other chrome stays in the monospace family.
+            let attrs = if sans {
+                Attrs::new().family(Family::SansSerif)
+            } else {
+                Attrs::new().family(Family::Name(&family_name))
+            };
             buf.set_text(&mut self.font_system, text, &attrs, Shaping::Basic, None);
         }
 
@@ -503,6 +510,36 @@ impl TextLayer {
         }
         queue.submit(Some(encoder.finish()));
         Ok(())
+    }
+
+    /// Render chrome labels in the configured monospace chrome font.
+    pub fn render_overlays(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        labels: &[(String, f32, f32, [u8; 3])],
+    ) -> Result<(), PrepareError> {
+        self.render_overlays_inner(device, queue, view, width, height, labels, false)
+    }
+
+    /// Render chrome labels in the platform's default PROPORTIONAL sans-serif font
+    /// (`Family::SansSerif` → e.g. San Francisco on macOS, the system UI sans on
+    /// Linux). Used for tab titles so the strip reads as elegant UI text rather
+    /// than monospace "code". Width math is unaffected — callers left-align the
+    /// titles and the proportional text is narrower than the monospace reservation.
+    pub fn render_overlays_sans(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        labels: &[(String, f32, f32, [u8; 3])],
+    ) -> Result<(), PrepareError> {
+        self.render_overlays_inner(device, queue, view, width, height, labels, true)
     }
 
     /// Clears the frame to the terminal background color and renders the grid text.

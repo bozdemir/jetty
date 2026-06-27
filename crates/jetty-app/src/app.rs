@@ -3416,6 +3416,9 @@ impl ApplicationHandler<AppEvent> for App {
                     for l in &mut bar.labels {
                         l.2 += bar_offset;
                     }
+                    for l in &mut bar.title_labels {
+                        l.2 += bar_offset;
+                    }
                 }
                 if let Some((frame, view)) = gpu.acquire_frame() {
                     // Tier-B routing: when a Liquid/Focus effect is ACTIVELY
@@ -3472,6 +3475,14 @@ impl ApplicationHandler<AppEvent> for App {
                         // the terminal font (and never overflows the 36px bar).
                         let _ = chrome_text.render_overlays(
                             &gpu.device, &gpu.queue, scene_view, width, height, &bar.labels,
+                        );
+                    }
+                    if !bar.title_labels.is_empty() {
+                        // Tab TITLES in the platform's proportional sans-serif for an
+                        // elegant UI look — the close ×, "+", overflow hint, perf HUD
+                        // and window controls above stay in the monospace chrome font.
+                        let _ = chrome_text.render_overlays_sans(
+                            &gpu.device, &gpu.queue, scene_view, width, height, &bar.title_labels,
                         );
                     }
                     // Pass 4: scrollbar (spans the grid area below the bar).

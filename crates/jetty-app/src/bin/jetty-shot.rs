@@ -303,6 +303,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec::new()
         };
 
+        // Tab titles render in the proportional sans (Family::SansSerif); collect
+        // them separately so the harness renders them like the live app does.
+        let mut panel_title_labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
+
         // JETTY_SHOT_MENU — render the right-click context menu for visual checks.
         if std::env::var("JETTY_SHOT_MENU").is_ok() {
             let menu = jetty_render::build_context_menu(620.0, 120.0, width, height, Some(1), terminal.theme(), chrome_char_w);
@@ -356,9 +360,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for l in &mut bar.labels {
                     l.2 += bar_y;
                 }
+                for l in &mut bar.title_labels {
+                    l.2 += bar_y;
+                }
             }
             rects.extend(bar.quads);
             panel_labels.extend(bar.labels);
+            panel_title_labels.extend(bar.title_labels);
             eprintln!(
                 "jetty-shot: JETTY_SHOT_TABBAR rendered 3 sample tabs ({})",
                 if tab_bar_bottom { "BOTTOM" } else { "top" }
@@ -406,6 +414,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // terminal font (this is what proves BUG 1 is fixed across JETTY_FONT_SIZE).
         if !panel_labels.is_empty() {
             let _ = chrome_text.render_overlays(&device, &queue, &view, width, height, &panel_labels);
+        }
+        if !panel_title_labels.is_empty() {
+            let _ = chrome_text.render_overlays_sans(&device, &queue, &view, width, height, &panel_title_labels);
         }
     }
 

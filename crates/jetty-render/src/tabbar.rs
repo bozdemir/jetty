@@ -35,8 +35,12 @@ pub enum CtrlHover {
 pub struct TabBar {
     /// Quads in draw order: bar background, then per-tab backgrounds + plus button.
     pub quads: Vec<Rect>,
-    /// Text labels: (text, x, y, rgb) — tab titles, close glyphs, the plus glyph.
+    /// Monospace chrome labels: (text, x, y, rgb) — close glyphs, the plus glyph,
+    /// the overflow hint, the perf HUD, and the window controls.
     pub labels: Vec<(String, f32, f32, [u8; 3])>,
+    /// Tab TITLE labels, rendered separately in the platform's proportional
+    /// sans-serif so the strip reads as elegant UI text instead of monospace.
+    pub title_labels: Vec<(String, f32, f32, [u8; 3])>,
     /// One hit-test rect per tab (full tab area, for switching).
     pub tab_rects: Vec<Rect>,
     /// One hit-test rect per tab for its "×" close affordance.
@@ -150,6 +154,7 @@ pub fn build_tab_bar_ex(
 
     let mut quads: Vec<Rect> = Vec::new();
     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
+    let mut title_labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
     let mut tab_rects: Vec<Rect> = Vec::new();
     let mut close_rects: Vec<Rect> = Vec::new();
 
@@ -244,7 +249,7 @@ pub fn build_tab_bar_ex(
                 buf.to_string()
             };
             shown.push('▏');
-            labels.push((shown, title_x, 9.0, label_color));
+            title_labels.push((shown, title_x, 9.0, label_color));
         } else {
             let shown: String = if title.chars().count() > max_chars {
                 let mut s: String = title.chars().take(max_chars - 1).collect();
@@ -253,7 +258,7 @@ pub fn build_tab_bar_ex(
             } else {
                 title.clone()
             };
-            labels.push((shown, title_x, 9.0, label_color));
+            title_labels.push((shown, title_x, 9.0, label_color));
 
             // Close "×": recessive on inactive tabs, a touch brighter on the active.
             let close_x = x + tab_w - CLOSE_W - 4.0;
@@ -354,7 +359,7 @@ pub fn build_tab_bar_ex(
     labels.push(("✕".to_string(), close_x + 8.0, 9.0, close_fg));
 
     TabBar {
-        quads, labels, tab_rects, close_rects, plus_rect,
+        quads, labels, title_labels, tab_rects, close_rects, plus_rect,
         help_rect, settings_rect, min_rect, max_rect, close_rect,
     }
 }
@@ -431,9 +436,8 @@ mod tests {
     fn rename_shows_caret() {
         let tabs = [("Old".to_string(), true)];
         let bar = build_tab_bar_ex(800, &tabs, &theme(), Some((0, "New")), CtrlHover::None, None, CHROME_CHAR_W);
-        // Renaming shows the edit buffer + caret (a "❯" marker label precedes it,
-        // so check across labels rather than a fixed index).
-        let buf = bar.labels.iter().find(|l| l.0.contains('▏'));
+        // Renaming shows the edit buffer + caret in the sans TITLE labels.
+        let buf = bar.title_labels.iter().find(|l| l.0.contains('▏'));
         assert!(buf.is_some(), "no caret label found");
         assert!(buf.unwrap().0.starts_with("New"));
     }
