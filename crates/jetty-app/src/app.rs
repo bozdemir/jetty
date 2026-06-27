@@ -166,6 +166,9 @@ const FALLBACK_ROWS: usize = 24;
 
 /// Height of the tab bar (re-exported from the renderer so app.rs has one name).
 const TABBAR_H: f32 = jetty_render::TABBAR_H;
+/// Height of the bottom status bar (the live perf HUD lives here, OFF the tab
+/// row). Reserved from the grid only when `show_perf_hud` is on — see `status_h`.
+const STATUS_H: f32 = 22.0;
 /// Width reserved on the right of the grid for the scrollbar (a gutter), so the
 /// terminal never renders content underneath the scrollbar (which would cover the
 /// last column / p10k's right-aligned prompt at some window widths). Scrollbar
@@ -791,6 +794,7 @@ impl App {
     /// metrics, accounting for the tab bar. Falls back to the constants when the
     /// renderer is not yet available.
     fn grid_dims(&self) -> (usize, usize) {
+        let status_h = self.status_h();
         let (Some(gpu), Some(text)) = (&self.gpu, &self.text) else {
             return (FALLBACK_COLS, FALLBACK_ROWS);
         };
@@ -799,7 +803,7 @@ impl App {
             return (FALLBACK_COLS, FALLBACK_ROWS);
         }
         let cols = ((gpu.config.width as f32 - SCROLLBAR_GUTTER) / cw).floor().max(2.0) as usize;
-        let rows = ((gpu.config.height as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
+        let rows = ((gpu.config.height as f32 - TABBAR_H - status_h) / ch).floor().max(1.0) as usize;
         (cols, rows)
     }
 
@@ -811,10 +815,22 @@ impl App {
         if self.tab_bar_bottom { 0.0 } else { TABBAR_H }
     }
 
+    /// Pixel height reserved at the BOTTOM of the window for the status bar (the
+    /// perf HUD). `STATUS_H` when the HUD is enabled, else 0 (no bar, grid uses the
+    /// full height). The grid and the bottom-mode tab bar both sit above it.
+    fn status_h(&self) -> f32 {
+        if self.show_perf_hud { STATUS_H } else { 0.0 }
+    }
+
     /// Pixel Y of the tab bar's top edge for a surface of physical `height`.
-    /// 0 when the bar is at the top; `height - TABBAR_H` when at the bottom.
+    /// 0 when the bar is at the top; `height - TABBAR_H - status_h` at the bottom
+    /// (the status bar always sits below the bottom-mode tab bar).
     fn tabbar_y(&self, height: f32) -> f32 {
-        if self.tab_bar_bottom { (height - TABBAR_H).max(0.0) } else { 0.0 }
+        if self.tab_bar_bottom {
+            (height - TABBAR_H - self.status_h()).max(0.0)
+        } else {
+            0.0
+        }
     }
 
     /// Spawn a new tab sized to the current grid, themed like the others, make it
@@ -966,7 +982,7 @@ impl App {
         // end. Must match scrollbar_rect_geom so the drawn thumb and the drag map
         // agree.
         const GAP: f32 = 4.0;
-        let track_h = (h as f32 - TABBAR_H - GAP * 2.0).max(0.0);
+        let track_h = (h as f32 - TABBAR_H - self.status_h() - GAP * 2.0).max(0.0);
         // Recompute thumb height the same way as the geometry function.
         let rows = self.active_tab().terminal.rows();
         let total = rows + max;
@@ -1314,6 +1330,7 @@ impl App {
     /// Called from both `WindowEvent::Resized` and `set_font_size` so both
     /// features share one code path.
     fn reflow(&mut self) {
+        let status_h = self.status_h();
         let (Some(gpu), Some(text)) = (&self.gpu, &self.text) else { return };
         let (cw, ch) = text.cell_size();
         if cw <= 0.0 || ch <= 0.0 {
@@ -1322,8 +1339,8 @@ impl App {
         let w = gpu.config.width;
         let h = gpu.config.height;
         let cols = ((w as f32 - SCROLLBAR_GUTTER) / cw).floor().max(2.0) as usize;
-        // The grid occupies the area below the tab bar.
-        let rows = ((h as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
+        // The grid occupies the area below the tab bar and above the status bar.
+        let rows = ((h as f32 - TABBAR_H - status_h) / ch).floor().max(1.0) as usize;
         // Reflow every tab so background sessions stay in sync with the window.
         for tab in &mut self.tabs {
             tab.terminal.resize(cols, rows);
@@ -2041,7 +2058,7 @@ impl ApplicationHandler<AppEvent> for App {
             let (cw, ch) = text.cell_size();
             // Derive the grid from the physical pixel size and the physical cell size.
             let cols = ((size.width as f32 - SCROLLBAR_GUTTER) / cw).floor().max(2.0) as usize;
-            let rows = ((size.height as f32 - TABBAR_H) / ch).floor().max(1.0) as usize;
+            let rows = ((size.height as f32 - TABBAR_H - self.status_h()) / ch).floor().max(1.0) as usize;
             let quad = QuadLayer::new(&g.device, g.format);
             (Some(text), Some(quad), cols, rows)
         } else {
@@ -2721,7 +2738,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let scroll_offset = self.active_tab().terminal.scroll_offset();
                 let scroll_max = self.active_tab().terminal.scroll_max();
                 // Color is irrelevant for hit-test geometry; pass transparent.
-                let scrollbar = jetty_render::scrollbar_rect_geom(rows, scroll_offset, scroll_max, w, h, self.grid_top_offset(), [0, 0, 0, 0]);
+                let scrollbar = jetty_render::scrollbar_rect_geom(rows, scroll_offset, scroll_max, w, h, self.grid_top_offset(), self.status_h(), [0, 0, 0, 0]);
 
                 // The settings panel no longer lives in this window, so pass no
                 // panel geometry — only the scrollbar and terminal area are hit.
@@ -2879,13 +2896,14 @@ impl ApplicationHandler<AppEvent> for App {
                     // (clamped) keeps apps like less/htop responsive without
                     // flooding the PTY.
                     let grid_top = self.grid_top_offset();
+                    let status_h = self.status_h();
                     let over_scrollbar = {
                         let rows = self.active_tab().terminal.rows();
                         let off = self.active_tab().terminal.scroll_offset();
                         let max = self.active_tab().terminal.scroll_max();
                         if let Some(gpu) = &self.gpu {
                             let (w, h) = (gpu.config.width, gpu.config.height);
-                            jetty_render::scrollbar_rect_geom(rows, off, max, w, h, grid_top, [0, 0, 0, 0])
+                            jetty_render::scrollbar_rect_geom(rows, off, max, w, h, grid_top, status_h, [0, 0, 0, 0])
                                 .map(|r| {
                                     let cx = self.cursor.0 as f32;
                                     cx >= r.x && cx <= r.x + r.w
@@ -3369,6 +3387,9 @@ impl ApplicationHandler<AppEvent> for App {
                 // Tab-bar position + cursor captured before the mutable gpu/text
                 // borrow so the render below can place the bar at top or bottom.
                 let tab_bar_bottom = self.tab_bar_bottom;
+                // Status-bar height (perf HUD) reserved at the window bottom,
+                // captured before the mutable gpu/text borrow below.
+                let status_h = self.status_h();
                 let cursor = self.cursor;
                 // Theme accent for the reveal glow (captured before the mutable
                 // gpu/text/quad borrow below).
@@ -3397,14 +3418,18 @@ impl ApplicationHandler<AppEvent> for App {
                     .unwrap_or(0.0);
                 // Tab-bar geometry: the bar's pixel Y (0 at top, height-TABBAR_H at
                 // bottom) and the grid's pixel ORIGIN (TABBAR_H at top, 0 at bottom).
-                let bar_y = if tab_bar_bottom { (height as f32 - TABBAR_H).max(0.0) } else { 0.0 };
+                // Bottom-mode tab bar sits ABOVE the status bar (height - TABBAR_H
+                // - status_h); the status bar (perf HUD) takes the very bottom.
+                let bar_y = if tab_bar_bottom { (height as f32 - TABBAR_H - status_h).max(0.0) } else { 0.0 };
                 let grid_top = if tab_bar_bottom { 0.0 } else { TABBAR_H };
                 // Compute window-control hover from the last cursor position.
                 let ctrl_hover = ctrl_hover_at(cursor.0 as f32, cursor.1 as f32, width, bar_y);
                 let rename_ref = rename_state.as_ref().map(|(i, b)| (*i, b.as_str()));
                 let chrome_char_w = chrome_text.cell_size().0;
+                // The perf HUD now lives in the bottom STATUS BAR (off the tab row),
+                // so the tab bar is built WITHOUT it (None).
                 let mut bar = jetty_render::build_tab_bar_ex(
-                    width, &tabs_meta, &theme, rename_ref, ctrl_hover, perf_string.as_deref(), chrome_char_w,
+                    width, &tabs_meta, &theme, rename_ref, ctrl_hover, None, chrome_char_w,
                 );
                 // Translate the bar quads + labels to its actual y (bottom mode)
                 // PLUS the dropdown slide so it moves with the content.
@@ -3488,12 +3513,49 @@ impl ApplicationHandler<AppEvent> for App {
                     // Pass 4: scrollbar (spans the grid area below the bar).
                     let mut rects: Vec<jetty_render::Rect> = Vec::new();
                     if let Some(mut r) =
-                        jetty_render::scrollbar_rect(&snap, width, height, grid_top, scrollbar_thumb)
+                        jetty_render::scrollbar_rect(&snap, width, height, grid_top, status_h, scrollbar_thumb)
                     {
                         r.y += slide_y_offset;
                         rects.push(r);
                     }
                     quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &rects);
+
+                    // Pass 4a: bottom STATUS BAR (the perf HUD, OFF the tab row).
+                    // A slim strip at the very bottom with the perf metrics
+                    // right-aligned. Drawn only when show_perf_hud reserved the room
+                    // (status_h > 0). It rides the dropdown slide like the rest.
+                    if status_h > 0.0 {
+                        if let Some(perf) = perf_string.as_deref() {
+                            let sy = (height as f32 - status_h) + slide_y_offset;
+                            // Theme-derived: a faint lifted strip + dim text (same
+                            // bg→fg surface language as the rest of the chrome).
+                            let tb = theme.bg;
+                            let tf = theme.fg;
+                            let nl = |t: f32| -> [u8; 4] {
+                                [
+                                    (tb[0] as f32 + (tf[0] as f32 - tb[0] as f32) * t) as u8,
+                                    (tb[1] as f32 + (tf[1] as f32 - tb[1] as f32) * t) as u8,
+                                    (tb[2] as f32 + (tf[2] as f32 - tb[2] as f32) * t) as u8,
+                                    255,
+                                ]
+                            };
+                            let strip = jetty_render::Rect {
+                                x: 0.0, y: sy, w: width as f32, h: status_h,
+                                color: nl(0.05), ..Default::default()
+                            };
+                            quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &[strip]);
+                            // Right-align the perf text within the strip.
+                            let cw = chrome_text.cell_size().0;
+                            let perf_w = perf.chars().count() as f32 * cw;
+                            let px = (width as f32 - perf_w - 12.0).max(8.0);
+                            let dim = nl(0.5);
+                            let py = sy + (status_h - 16.0) / 2.0;
+                            let _ = chrome_text.render_overlays(
+                                &gpu.device, &gpu.queue, scene_view, width, height,
+                                &[(perf.to_string(), px, py, [dim[0], dim[1], dim[2]])],
+                            );
+                        }
+                    }
                     // Pass 4b: welcome splash — drawn over the grid but UNDER all
                     // modals (context menu, help, confirm popups). Only shown when
                     // welcome_open is true (dismissed on first PTY input/click/Esc).

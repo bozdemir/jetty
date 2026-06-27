@@ -437,6 +437,7 @@ pub fn scrollbar_rect_geom(
     screen_w: u32,
     screen_h: u32,
     top_offset: f32,
+    bottom_reserve: f32,
     thumb: [u8; 4],
 ) -> Option<Rect> {
     if scroll_max == 0 {
@@ -449,7 +450,10 @@ pub fn scrollbar_rect_geom(
     // (the ✕). A small GAP also keeps the thumb clear of the bar / controls.
     const GAP: f32 = 4.0; // keep in sync with apply_scroll_from_cursor
     let track_top = top_offset + GAP;
-    let track_h = (screen_h as f32 - crate::TABBAR_H - GAP * 2.0).max(0.0);
+    // `bottom_reserve` is the height reserved at the bottom for the status bar
+    // (the perf HUD) — the track must stop above it so the thumb never runs under
+    // the status bar. 0 when there is no status bar.
+    let track_h = (screen_h as f32 - crate::TABBAR_H - bottom_reserve - GAP * 2.0).max(0.0);
     let total = rows + scroll_max;
     let thumb_h = (track_h * rows as f32 / total as f32).max(24.0);
     let frac = (scroll_max - scroll_offset) as f32 / scroll_max as f32;
@@ -471,6 +475,7 @@ pub fn scrollbar_rect(
     screen_w: u32,
     screen_h: u32,
     top_offset: f32,
+    bottom_reserve: f32,
     thumb: [u8; 4],
 ) -> Option<Rect> {
     scrollbar_rect_geom(
@@ -480,6 +485,7 @@ pub fn scrollbar_rect(
         screen_w,
         screen_h,
         top_offset,
+        bottom_reserve,
         thumb,
     )
 }

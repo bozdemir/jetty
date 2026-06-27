@@ -241,7 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sb_fg = terminal.theme().fg;
         let sb_mix = |i: usize| (sb_bg[i] as f32 + (sb_fg[i] as f32 - sb_bg[i] as f32) * 0.35) as u8;
         let sb_thumb = [sb_mix(0), sb_mix(1), sb_mix(2), 210];
-        if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height, 0.0, sb_thumb) {
+        if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height, 0.0, 0.0, sb_thumb) {
             rects.push(r);
         }
 
@@ -345,7 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 terminal.theme(),
                 None,
                 jetty_render::CtrlHover::None,
-                perf_owned.as_deref(),
+                None, // perf HUD now lives in the bottom status bar, not the tab row
                 chrome_char_w,
             );
             // JETTY_TAB_BAR=bottom — place the bar flush at the window bottom.
@@ -367,6 +367,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rects.extend(bar.quads);
             panel_labels.extend(bar.labels);
             panel_title_labels.extend(bar.title_labels);
+
+            // Bottom STATUS BAR (perf HUD, off the tab row) — mirrors the live app.
+            if let Some(perf) = perf_owned.as_deref() {
+                const STATUS_H: f32 = 22.0;
+                let sy = (height as f32 - STATUS_H).max(0.0);
+                let tb = terminal.theme().bg;
+                let tf = terminal.theme().fg;
+                let nl = |t: f32| -> [u8; 4] {
+                    [
+                        (tb[0] as f32 + (tf[0] as f32 - tb[0] as f32) * t) as u8,
+                        (tb[1] as f32 + (tf[1] as f32 - tb[1] as f32) * t) as u8,
+                        (tb[2] as f32 + (tf[2] as f32 - tb[2] as f32) * t) as u8,
+                        255,
+                    ]
+                };
+                rects.push(jetty_render::Rect {
+                    x: 0.0, y: sy, w: width as f32, h: STATUS_H, color: nl(0.05), ..Default::default()
+                });
+                let perf_w = perf.chars().count() as f32 * chrome_char_w;
+                let px = (width as f32 - perf_w - 12.0).max(8.0);
+                let dim = nl(0.5);
+                panel_labels.push((perf.to_string(), px, sy + (STATUS_H - 16.0) / 2.0, [dim[0], dim[1], dim[2]]));
+            }
             eprintln!(
                 "jetty-shot: JETTY_SHOT_TABBAR rendered 3 sample tabs ({})",
                 if tab_bar_bottom { "BOTTOM" } else { "top" }
