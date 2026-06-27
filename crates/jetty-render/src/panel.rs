@@ -50,6 +50,22 @@ pub struct PanelGeom {
     pub dropdown_width_handle: Rect,
     /// "Auto-hide on focus loss" toggle pill.
     pub autohide_toggle: Rect,
+    // ── UI (chrome) FONT section ──────────────────────────────────────────────
+    /// UI-font-size decrement button ("−").
+    pub ui_font_minus: Rect,
+    /// UI-font-size increment button ("+").
+    pub ui_font_plus: Rect,
+    /// UI-font-size reset button ("rst").
+    pub ui_font_reset: Rect,
+    /// One Rect per visible UI-font-family row. Index i maps to
+    /// `ui_families[ui_font_scroll_offset + i]` (index 0 = "System Sans").
+    pub ui_font_rows: Vec<Rect>,
+    /// The scroll offset into the UI-families list at the time of rendering.
+    pub ui_font_scroll_offset: usize,
+    /// ▲ UI-font scroll button — decrements ui_font_scroll_offset.
+    pub ui_font_scroll_up: Rect,
+    /// ▼ UI-font scroll button — increments ui_font_scroll_offset.
+    pub ui_font_scroll_down: Rect,
 }
 
 /// Full description of how to draw the settings panel for one frame.
@@ -60,6 +76,11 @@ pub struct PanelView {
     pub labels: Vec<(String, f32, f32, [u8; 3])>,
     /// Pixel geometry for hit-testing (used by the next mouse-interaction task).
     pub geom: PanelGeom,
+    /// Baseline (x, y) at which the app overdraws the live "Aa" specimen at the
+    /// TRUE `ui_font_size` (not the capped panel-body size), after the capped
+    /// panel-text pass — so the user sees an honest big/small/typeface preview
+    /// even though the surrounding panel text is clamped.
+    pub ui_specimen_pos: (f32, f32),
 }
 
 /// Short display names for each preset, in PRESETS order.
@@ -68,6 +89,10 @@ const CHIP_NAMES: [&str; 5] = ["Mocha", "Tokyo", "Gruv", "Drac", "Onyx"];
 /// Maximum number of font-family rows displayed in the panel at once.
 /// If more families exist, the list scrolls via `font_scroll_offset`.
 const MAX_FONT_ROWS: usize = 5;
+
+/// Maximum number of UI-font-family rows shown at once. Kept to 4 (not 5) to
+/// bound the panel's vertical growth from the new section.
+const MAX_UI_FONT_ROWS: usize = 4;
 
 /// Fallback chrome-font character advance (px), used when a measured advance is
 /// not available. Passed in via the `char_w` parameter of `build_panel` on
@@ -85,8 +110,20 @@ pub(crate) const CHAR_W_FALLBACK: f32 = 9.8;
 /// PANEL_H was grown from 744→860 to accommodate the 2-column×3-row theme card
 /// grid (card_h=40, gap=8 → 3 rows = 136px) replacing the original single-row
 /// chips (36px). 860−744=116px delta (136−36=100px new content + 16px margin).
+///
+/// PANEL_H was then grown 860→1102 to insert the new "UI FONT" section (size
+/// band + live "Aa" specimen + 4-row family list) BETWEEN the terminal FONT list
+/// and the THEME band. The section is `UI_SECTION_SHIFT` (242px) tall; THEME and
+/// the theme cards shift down by exactly that, so the layout below is unchanged
+/// in relative terms (the pinned ordering/containment tests still hold). The old
+/// cards bottom (py+814) becomes py+1056, leaving the same ~46px bottom margin.
 pub const PANEL_W: f32 = 380.0;
-pub const PANEL_H: f32 = 860.0;
+pub const PANEL_H: f32 = 1102.0;
+
+/// Vertical size of the inserted "UI FONT" section. THEME + cards (everything
+/// below the terminal FONT list) shift down by exactly this. Keeping it a single
+/// named constant means the grow-and-shift is consistent in every offset below.
+const UI_SECTION_SHIFT: f32 = 242.0;
 
 // Compile-time lockstep: CHIP_NAMES must always have one entry per PRESETS entry.
 // This panics at build time if PRESETS grows without updating CHIP_NAMES (or vice versa).
@@ -120,6 +157,18 @@ pub fn build_panel(
     dropdown_width_pct: f32,
     is_dropdown: bool,
     focus_autohide: bool,
+    // ── UI (chrome) FONT section inputs ──
+    // `ui_font_size`: the TRUE UI font size in logical points (10..=28). Drives
+    //   the "Npt" readout and the live "Aa" specimen size; NOT clamped here (the
+    //   panel's own body text is clamped separately by the caller's capped layer).
+    // `ui_families`: proportional UI-font candidates, with a synthetic index-0
+    //   "System Sans (default)" row already prepended by the caller.
+    // `selected_ui_family`: the selected UI family ("" highlights index 0).
+    // `ui_font_scroll_offset`: scroll offset into `ui_families`.
+    ui_font_size: f32,
+    ui_families: &[String],
+    selected_ui_family: &str,
+    ui_font_scroll_offset: usize,
     dx: f32,
     dy: f32,
     theme: &jetty_core::Theme,
@@ -347,6 +396,58 @@ pub fn build_panel(
         font_row_rects.push(Rect::rounded(list_x, row_y, list_w, ROW_H, row_color, 3.0));
     }
 
+    // ── UI (chrome) FONT section (py+668 .. py+888) ──────────────────────────
+    // Inserted between the terminal FONT list (bottom py+646) and the THEME band.
+    // Styled identically to the terminal FONT section so they read as a matched
+    // pair. Everything below (THEME + cards) shifts down by UI_SECTION_SHIFT.
+    //
+    //  py+668  "UI FONT SIZE" CAPS header + right-aligned "Npt" readout
+    //  py+688  − / + / rst buttons (h=28 → bottom py+716)
+    //  py+726  live "Aa" specimen baseline (drawn at the TRUE ui_font_size)
+    //  py+770  "UI FONT" list header + ▲/▼ scroll arrows + "(shown/total)" hint
+    //  py+792  4 family rows × (22+2)=96 → list bottom py+888
+    // THEME then sits at py+(658+SHIFT)=py+900; cards at py+(678+SHIFT)=py+920.
+
+    // UI FONT SIZE band: − / + / rst buttons, mirroring the terminal FONT SIZE band.
+    let ui_font_btn_y = py + 688.0;
+    let ui_font_minus_x = px + 200.0;
+    let ui_font_plus_x = ui_font_minus_x + 36.0;
+    let ui_font_reset_x = ui_font_plus_x + 36.0;
+    let ui_font_minus = Rect::rounded(ui_font_minus_x, ui_font_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let ui_font_plus = Rect::rounded(ui_font_plus_x, ui_font_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let ui_font_reset = Rect::rounded(ui_font_reset_x, ui_font_btn_y, 44.0, 28.0, btn_fill, 4.0);
+
+    // Live "Aa" specimen baseline. The app overdraws "Aa" here at the TRUE UI size
+    // (PanelView.ui_specimen_pos) AFTER the capped panel-text pass, so the user
+    // sees the real big/small/typeface preview even though the panel body is capped.
+    let ui_specimen_pos = (px + 16.0, py + 726.0);
+
+    // UI FONT family list scroll buttons (▲ / ▼) on the "UI FONT" header row.
+    let ui_scroll_btn_y = py + 768.0;
+    let ui_scroll_down_x = px + PANEL_W - 16.0 - 20.0;
+    let ui_scroll_up_x = ui_scroll_down_x - 24.0;
+    let ui_font_scroll_up = Rect::rounded(ui_scroll_up_x, ui_scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
+    let ui_font_scroll_down = Rect::rounded(ui_scroll_down_x, ui_scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
+
+    // UI FONT family list — 4 rows. Index 0 of ui_families is "System Sans".
+    let ui_list_top = py + 792.0;
+    let ui_offset = ui_font_scroll_offset.min(ui_families.len().saturating_sub(1));
+    let ui_visible_count = (ui_families.len().saturating_sub(ui_offset)).min(MAX_UI_FONT_ROWS);
+    let mut ui_font_row_rects: Vec<Rect> = Vec::with_capacity(ui_visible_count);
+    for i in 0..ui_visible_count {
+        let row_y = ui_list_top + i as f32 * (ROW_H + ROW_GAP);
+        let family_idx = ui_offset + i;
+        // Index 0 = "System Sans (default)" → maps to "" (empty selection).
+        let row_value: &str = if family_idx == 0 {
+            ""
+        } else {
+            ui_families.get(family_idx).map(|n| n.as_str()).unwrap_or("")
+        };
+        let is_selected = row_value == selected_ui_family;
+        let row_color = if is_selected { row_sel } else { row_unsel };
+        ui_font_row_rects.push(Rect::rounded(list_x, row_y, list_w, ROW_H, row_color, 3.0));
+    }
+
     // --- Theme cards — 2-column × 3-row grid (py+678 .. py+854) ---
     // "THEME" label at py+658; cards start at py+678.
     // Each card: col_w = (348 − 8) / 2 = 170px; card_h = 40px; row_gap = 8px.
@@ -361,7 +462,8 @@ pub fn build_panel(
     const CARD_ROW_GAP: f32 = 8.0;
     const CARD_COL_GAP: f32 = 8.0;
     let card_w = (348.0 - (CARD_COLS as f32 - 1.0) * CARD_COL_GAP) / CARD_COLS as f32; // 170px
-    let card_top = py + 678.0;
+    // Cards shift down by UI_SECTION_SHIFT to make room for the new UI FONT section.
+    let card_top = py + 678.0 + UI_SECTION_SHIFT;
 
     let mut chip_rects: Vec<Rect> = Vec::with_capacity(num_presets);
     for i in 0..num_presets {
@@ -377,8 +479,9 @@ pub fn build_panel(
     }
 
     // Compute bottom of last card for PANEL_H sanity — last card row for 5 items:
-    // row = (4/2) = 2, bottom = card_top + 2*(40+8) + 40 = card_top + 136
-    // card_top = py+678, so bottom = py+814. PANEL_H=860 gives 46px margin. ✓
+    // row = (4/2) = 2, bottom = card_top + 2*(40+8) + 40 = card_top + 136.
+    // card_top = py+678+SHIFT(242) = py+920, so bottom = py+1056. PANEL_H=1102
+    // gives a 46px margin. ✓
 
     // --- Build quads in draw order ---
     // Order: dim, border, bg, buttons, filled-track portions, tracks, handles,
@@ -431,6 +534,14 @@ pub fn build_panel(
 
     // Font-family list background rows.
     quads.extend_from_slice(&font_row_rects);
+
+    // UI (chrome) FONT section: size buttons, scroll buttons, family rows.
+    quads.push(ui_font_minus);
+    quads.push(ui_font_plus);
+    quads.push(ui_font_reset);
+    quads.push(ui_font_scroll_up);
+    quads.push(ui_font_scroll_down);
+    quads.extend_from_slice(&ui_font_row_rects);
 
     // Selected-chip border highlight (pushed before chip fills so chip fill sits inside).
     if theme_idx < num_presets {
@@ -646,8 +757,53 @@ pub fn build_panel(
         labels.push((hint, hint_x, py + 504.0, text_dim));
     }
 
-    // THEME section header (py+658) — CAPS, 12px gap after font-list bottom (py+646).
-    labels.push(("THEME".to_string(), px + 16.0, py + 658.0, text_header));
+    // ── UI FONT section labels ──
+    // UI FONT SIZE header (py+668) + right-aligned "Npt" readout (TRUE size).
+    let ui_fs_display = ui_font_size.round() as i32;
+    let ui_fs_str = format!("{}pt", ui_fs_display);
+    labels.push(("UI FONT SIZE".to_string(), px + 16.0, py + 668.0, text_header));
+    labels.push((ui_fs_str.clone(), right_x(&ui_fs_str), py + 668.0, text_main));
+    labels.push(("-".to_string(),  ui_font_minus_x + 9.0, ui_font_btn_y + 6.0, text_btn));
+    labels.push(("+".to_string(),  ui_font_plus_x  + 8.0, ui_font_btn_y + 6.0, text_btn));
+    labels.push(("rst".to_string(), ui_font_reset_x + 6.0, ui_font_btn_y + 6.0, text_btn));
+
+    // UI FONT family list header (py+770) + scroll arrows.
+    labels.push(("UI FONT".to_string(), px + 16.0, py + 770.0, text_header));
+    labels.push(("^".to_string(), ui_scroll_up_x   + 6.0, ui_scroll_btn_y + 4.0, text_btn));
+    labels.push(("v".to_string(), ui_scroll_down_x + 6.0, ui_scroll_btn_y + 4.0, text_btn));
+
+    // UI-font-family row labels (row 0 = "System Sans (default)" → "").
+    for i in 0..ui_visible_count {
+        let family_idx = ui_offset + i;
+        let row_y = ui_list_top + i as f32 * (ROW_H + ROW_GAP) + 4.0;
+        let (name, row_value): (&str, &str) = if family_idx == 0 {
+            ("System Sans (default)", "")
+        } else {
+            let n = ui_families.get(family_idx).map(|s| s.as_str()).unwrap_or("");
+            (n, n)
+        };
+        let is_selected = row_value == selected_ui_family;
+        let text_color: [u8; 3] = if is_selected { text_main } else { text_dim };
+        let display = if name.chars().count() > 36 {
+            let truncated: String = name.chars().take(34).collect();
+            format!("{}…", truncated)
+        } else {
+            name.to_string()
+        };
+        labels.push((display, list_x + 6.0, row_y, text_color));
+    }
+
+    // Scroll hint for the UI-font list if more entries than visible rows.
+    if ui_families.len() > MAX_UI_FONT_ROWS {
+        let hint = format!("({}/{})", ui_offset + ui_visible_count, ui_families.len());
+        let scroll_up_left = px + PANEL_W - 60.0;
+        let hint_w = hint.chars().count() as f32 * char_w;
+        let hint_x = scroll_up_left - 6.0 - hint_w;
+        labels.push((hint, hint_x, py + 770.0, text_dim));
+    }
+
+    // THEME section header — CAPS, shifted down by UI_SECTION_SHIFT (now py+900).
+    labels.push(("THEME".to_string(), px + 16.0, py + 658.0 + UI_SECTION_SHIFT, text_header));
 
     // Theme card name labels and color-dot labels.
     for i in 0..num_presets {
@@ -701,9 +857,16 @@ pub fn build_panel(
         dropdown_width_track,
         dropdown_width_handle,
         autohide_toggle,
+        ui_font_minus,
+        ui_font_plus,
+        ui_font_reset,
+        ui_font_rows: ui_font_row_rects,
+        ui_font_scroll_offset: ui_offset,
+        ui_font_scroll_up,
+        ui_font_scroll_down,
     };
 
-    PanelView { quads, labels, geom }
+    PanelView { quads, labels, geom, ui_specimen_pos }
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -723,6 +886,14 @@ mod tests {
             "Inconsolata".to_string(),
             "Cascadia Code".to_string(),
         ];
+        // UI-font candidates with the synthetic "System Sans (default)" row at 0.
+        let ui_families: Vec<String> = vec![
+            "System Sans (default)".to_string(),
+            "Inter".to_string(),
+            "Noto Sans".to_string(),
+            "DejaVu Sans".to_string(),
+            "Cantarell".to_string(),
+        ];
         build_panel(
             screen_w,
             screen_h,
@@ -740,6 +911,10 @@ mod tests {
             0.7,             // dropdown_width_pct
             true,            // is_dropdown
             false,           // focus_autohide
+            18.0,            // ui_font_size (true, not capped)
+            &ui_families,
+            "",              // selected_ui_family ("" = System Sans)
+            0,               // ui_font_scroll_offset
             0.0, 0.0,        // dx, dy
             &theme,
             CHAR_W_FALLBACK, // char_w (scale-1 default for tests)
@@ -748,11 +923,12 @@ mod tests {
 
     #[test]
     fn panel_fits_on_screen_at_various_sizes() {
-        // Screen sizes that can fully contain the panel (PANEL_H = 860, PANEL_W = 380).
-        // Very small screens (< PANEL_H in height) clamp to y=0, which is correct
-        // but means panel_bottom > screen_h — we only assert the panel stays ≥0
-        // for those cases to avoid a false-failure on tiny displays.
-        for (w, h) in [(1920u32, 1080u32), (1280, 900), (1440, 900), (2560, 1440)] {
+        // Screen sizes that can fully contain the panel (PANEL_H = 1102, PANEL_W = 380).
+        // After the UI-FONT section grew PANEL_H 860→1102, a "fully contains" check
+        // needs ≥1102px of height; screens shorter than that clamp to y=0 (asserted
+        // non-negative below) — the live Settings window is sized to PANEL_H+4 so the
+        // panel always fits its OWN window regardless of the desktop resolution.
+        for (w, h) in [(1920u32, 1200u32), (1600, 1150), (2560, 1440), (1440, 1102)] {
             let pv = default_panel(w, h);
             let g = &pv.geom;
             let sw = w as f32;
@@ -780,8 +956,9 @@ mod tests {
                 sh
             );
         }
-        // Smaller screens: panel is clamped to y=0, x=0. Just assert non-negative.
-        for (w, h) in [(1024u32, 768u32), (800, 600)] {
+        // Smaller screens (now including 900px-tall ones, since PANEL_H=1102):
+        // panel is clamped to y=0, x=0. Just assert non-negative.
+        for (w, h) in [(1280u32, 900u32), (1440, 900), (1024, 768), (800, 600)] {
             let pv = default_panel(w, h);
             let g = &pv.geom;
             assert!(g.panel.x >= 0.0, "panel.x < 0 at {w}×{h}");
@@ -870,6 +1047,9 @@ mod tests {
             (&g.dropdown_track, &g.dropdown_width_track, "dropdown_h_track vs dropdown_w_track"),
             (&g.autohide_toggle, &g.font_minus, "autohide vs font_minus"),
             (&g.font_minus, &g.font_scroll_up, "font_minus vs font_scroll_up"),
+            // Terminal font list → new UI FONT section → theme cards, in order.
+            (&g.font_scroll_up, &g.ui_font_minus, "font_scroll_up vs ui_font_minus"),
+            (&g.ui_font_minus, &g.ui_font_scroll_up, "ui_font_minus vs ui_font_scroll_up"),
         ];
         for (a, b, label) in pairs {
             let a_bottom = a.y + a.h;
@@ -879,6 +1059,20 @@ mod tests {
                 "{label}: a_bottom={a_bottom} > b_top={b_top} (overlap)"
             );
         }
+        // The UI-font rows must sit below the terminal-font rows and above the
+        // first theme card — verifying the grow-and-shift kept everything ordered.
+        let term_rows_bottom = g.font_rows.last().map(|r| r.y + r.h).unwrap();
+        let ui_rows_top = g.ui_font_rows.first().map(|r| r.y).unwrap();
+        let ui_rows_bottom = g.ui_font_rows.last().map(|r| r.y + r.h).unwrap();
+        let first_card_top = g.chips.first().map(|r| r.y).unwrap();
+        assert!(
+            ui_rows_top > term_rows_bottom,
+            "ui_font rows ({ui_rows_top}) not below terminal-font rows ({term_rows_bottom})"
+        );
+        assert!(
+            first_card_top >= ui_rows_bottom - 0.5,
+            "theme cards ({first_card_top}) overlap the ui_font rows ({ui_rows_bottom})"
+        );
     }
 
     #[test]
@@ -913,7 +1107,8 @@ mod tests {
         for expected in &[
             "OPACITY", "CORNER RADIUS", "SUMMON EFFECT", "WINDOW MODE",
             "TAB BAR", "DROPDOWN HEIGHT", "DROPDOWN WIDTH",
-            "AUTO-HIDE ON FOCUS LOSS", "FONT SIZE", "FONT", "THEME",
+            "AUTO-HIDE ON FOCUS LOSS", "FONT SIZE", "FONT",
+            "UI FONT SIZE", "UI FONT", "THEME",
         ] {
             assert!(
                 all_text.iter().any(|s| s == expected),
@@ -933,5 +1128,42 @@ mod tests {
         assert!(all_text.iter().any(|s| s == "8px"),  "missing corner radius value label");
         assert!(all_text.iter().any(|s| s == "15pt"), "missing font size value label");
         assert!(all_text.iter().any(|s| s == "50%"),  "missing dropdown height value label");
+    }
+
+    #[test]
+    fn ui_font_section_present_and_well_formed() {
+        let pv = default_panel(1920, 1200);
+        let g = &pv.geom;
+        // The UI-font widgets exist and are inside the panel rect.
+        let panel = &g.panel;
+        for (r, name) in [
+            (&g.ui_font_minus, "ui_font_minus"),
+            (&g.ui_font_plus, "ui_font_plus"),
+            (&g.ui_font_reset, "ui_font_reset"),
+            (&g.ui_font_scroll_up, "ui_font_scroll_up"),
+            (&g.ui_font_scroll_down, "ui_font_scroll_down"),
+        ] {
+            assert!(
+                r.y >= panel.y && r.y + r.h <= panel.y + panel.h + 0.5,
+                "{name} outside panel vertically"
+            );
+        }
+        // 4-row cap: with 5 ui_families and offset 0, exactly 4 rows are visible.
+        assert_eq!(g.ui_font_rows.len(), 4, "expected 4 visible UI-font rows (cap)");
+        // The true ui_font_size (18) shows as "18pt", and the "System Sans" row
+        // and the "UI FONT SIZE" header are present.
+        let all_text: Vec<String> = pv.labels.iter().map(|l| l.0.clone()).collect();
+        assert!(all_text.iter().any(|s| s == "18pt"), "missing UI font size value label");
+        assert!(
+            all_text.iter().any(|s| s == "System Sans (default)"),
+            "missing synthetic System Sans row"
+        );
+        // The specimen baseline is below the UI-font-size buttons and within bounds.
+        let (sx, sy) = pv.ui_specimen_pos;
+        assert!(sx >= panel.x && sx <= panel.x + panel.w, "specimen x out of panel");
+        assert!(
+            sy > g.ui_font_minus.y + g.ui_font_minus.h && sy < g.ui_font_rows[0].y,
+            "specimen baseline ({sy}) not between the size buttons and the family list"
+        );
     }
 }
