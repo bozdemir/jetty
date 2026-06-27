@@ -289,6 +289,12 @@ pub struct App {
     /// shown window can take a beat to present — starting the clock at
     /// set_visible() time would let the whole effect elapse unseen (effectless).
     summon_pending: bool,
+    /// Until this instant, suppress focus-loss auto-hide. A summon maps/focuses the
+    /// window, which X11 can answer with a SYNTHETIC Focused(false); for a fast
+    /// effect (None/Bayer) summon_anim has already ended by then, so without this
+    /// bound the window could auto-hide the very frame it appears. ~300ms gate,
+    /// independent of the effect duration.
+    summon_settle_until: Option<std::time::Instant>,
     /// While `now < this`, the freshly-opened settings window is kept repainting
     /// under Poll. macOS can't present to a brand-new window's surface until the
     /// run loop has displayed it a few times, so a SINGLE redraw on open is
@@ -372,6 +378,10 @@ pub struct App {
     /// keypress, any mouse click in the grid area, or Esc. A single bool — the
     /// check and the clear are both O(1) so the idle path is unaffected.
     welcome_open: bool,
+    /// The persisted `show_welcome` startup preference (distinct from the runtime
+    /// `welcome_open` dismissal state). Cached at startup so `persist()` can write
+    /// it back WITHOUT re-reading the config file on every settings change.
+    cfg_show_welcome: bool,
 
     // --- Live performance HUD (tab bar: ⚡ ms · fps · CPU% · VT MB/s) ---
     // CRITICAL: none of these fields ever force or schedule a redraw. They are
@@ -591,6 +601,7 @@ impl App {
             wayland_warned: false,
             summon_anim: None,
             summon_pending: false,
+            summon_settle_until: None,
             settings_paint_until: None,
             corner_radius,
             tabs: Vec::new(),
@@ -623,6 +634,7 @@ impl App {
             last_strip_click: None,
             resize_cursor: ResizeZone::None,
             welcome_open: true, // overridden below by config.show_welcome
+            cfg_show_welcome: true, // overridden below by config.show_welcome
             show_perf_hud: true, // overridden below by config.show_perf_hud
             last_frame_at: None,
             perf_ms: 0.0,
@@ -669,6 +681,7 @@ impl App {
         app.dropdown_width_pct = cfg.dropdown_width_pct.clamp(0.2, 1.0);
         app.focus_autohide = cfg.focus_autohide;
         app.welcome_open = cfg.show_welcome;
+        app.cfg_show_welcome = cfg.show_welcome;
         app.show_perf_hud = cfg.show_perf_hud;
 
         // Apply the initial theme+opacity so Terminal::new env defaults are
@@ -693,14 +706,14 @@ impl App {
             dropdown_width_pct: self.dropdown_width_pct,
             focus_autohide: self.focus_autohide,
             tab_bar_position: if self.tab_bar_bottom { "bottom" } else { "top" }.to_string(),
-            // show_welcome persists the startup preference, not the session
-            // dismissal state. We re-read the on-disk value so a user who has
-            // manually set show_welcome = false in their TOML keeps that choice
-            // even when persist() is called for an unrelated setting change.
-            show_welcome: crate::config::Config::load().show_welcome,
-            // show_perf_hud is a startup preference too; preserve the on-disk
-            // value so an unrelated persist() never clobbers the user's choice.
-            show_perf_hud: crate::config::Config::load().show_perf_hud,
+            // show_welcome/show_perf_hud are startup preferences (no runtime UI
+            // toggles them), cached at startup — write them back from memory so a
+            // settings change never re-reads the config file (persist() used to do
+            // TWO full Config::load() reads per call, i.e. 2–4 disk reads per
+            // settings click). The cached values preserve a user's manual TOML
+            // choice exactly as the on-disk read did.
+            show_welcome: self.cfg_show_welcome,
+            show_perf_hud: self.show_perf_hud,
         }
         .save();
     }
@@ -1403,6 +1416,8 @@ impl App {
                 // on macOS the window can take a beat to present, which would
                 // otherwise let the whole effect elapse unseen (effectless).
                 self.summon_pending = true;
+                self.summon_settle_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
                 win.request_redraw();
             } else {
                 // Remember the current spot before hiding so the next Center
@@ -2061,6 +2076,8 @@ impl ApplicationHandler<AppEvent> for App {
             self.liquid = Some(jetty_render::LiquidDrop::new(&g.device, g.format));
             self.focus = Some(jetty_render::FocusPull::new(&g.device, g.format));
             self.summon_pending = true;
+            self.summon_settle_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
         }
 
         // Build the FIXED-size chrome TextLayer (tab bar / menus / overlays). It
@@ -2280,6 +2297,12 @@ impl ApplicationHandler<AppEvent> for App {
                     && self.visible
                     && self.summon_anim.is_none()
                     && !self.summon_pending
+                    // Don't auto-hide within the post-summon settle window: a
+                    // synthetic Focused(false) right after the window maps would
+                    // otherwise dismiss a fast (None/Bayer) summon as it appears.
+                    && self
+                        .summon_settle_until
+                        .map_or(true, |d| std::time::Instant::now() >= d)
                     && !to_settings
                 {
                     if let Some(win) = &self.window {
