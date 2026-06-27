@@ -2094,10 +2094,10 @@ impl ApplicationHandler<AppEvent> for App {
         self.gpu = gpu;
         self.text = text;
         self.quad = quad;
-        // Allocate the Tier-B offscreen scene texture now that the GPU exists.
-        if let Some(g) = &self.gpu {
-            self.offscreen = Some(Self::make_offscreen(g));
-        }
+        // The Tier-B offscreen scene texture is allocated LAZILY (on the first
+        // frame of an actual Liquid/Focus summon) rather than eagerly here — it is
+        // a full-surface GPU texture used only by those two effects, so most
+        // sessions never need it. See the lazy (re)alloc in the render path.
 
         // Build the first tab with the derived grid size so the PTY and terminal
         // agree with the actual window layout. The on_data callback wakes the
@@ -2225,11 +2225,12 @@ impl ApplicationHandler<AppEvent> for App {
                 if let (Some(gpu), Some(text)) = (&self.gpu, &mut self.text) {
                     text.resize(gpu);
                 }
-                // Re-create the Tier-B offscreen scene texture at the new size so
-                // a later Tier-B summon samples a correctly-sized frame.
-                if let Some(gpu) = &self.gpu {
-                    self.offscreen = Some(Self::make_offscreen(gpu));
-                }
+                // Invalidate the Tier-B offscreen scene texture (now the wrong
+                // size). It is rebuilt LAZILY at the correct size on the next
+                // Tier-B summon frame — previously it was eagerly re-created on
+                // EVERY Resized event (a full-surface GPU texture freed+rebuilt per
+                // drag-frame) though it is never sampled mid-resize.
+                self.offscreen = None;
                 // DEBOUNCE the grid+PTY reflow (same reasoning as set_font_size): a
                 // corner-drag fires many Resized events; reflowing + a SIGWINCH on
                 // each bombards p10k with redraws and scatters its prompt across the
@@ -2325,9 +2326,15 @@ impl ApplicationHandler<AppEvent> for App {
                 let prev = self.cursor;
                 self.cursor = (position.x, position.y);
                 // --- Resize-edge cursor feedback (borderless window) ---
-                // Only update the cursor when the zone changes, and never while a
-                // host drag (scrollbar / selection) is in progress.
-                if !self.dragging_scrollbar && !self.selecting {
+                // Only update the cursor when the zone changes, never while a host
+                // drag (scrollbar / selection) is in progress, and never while a
+                // modal (confirm / help / context menu) is open — a press there is
+                // consumed by the modal, so a resize-edge cursor under it is wrong.
+                let modal_open = self.confirm_quit
+                    || self.confirm_close.is_some()
+                    || self.help_open
+                    || self.context_menu.is_some();
+                if !self.dragging_scrollbar && !self.selecting && !modal_open {
                     if let Some(gpu) = &self.gpu {
                         let (w, h) = (gpu.config.width, gpu.config.height);
                         let zone = resize_zone_at(position.x as f32, position.y as f32, w, h);
@@ -2337,6 +2344,12 @@ impl ApplicationHandler<AppEvent> for App {
                                 win.set_cursor(zone.cursor_icon());
                             }
                         }
+                    }
+                } else if modal_open && self.resize_cursor != ResizeZone::None {
+                    // A modal opened while an edge cursor was showing — reset it.
+                    self.resize_cursor = ResizeZone::None;
+                    if let Some(win) = &self.window {
+                        win.set_cursor(ResizeZone::None.cursor_icon());
                     }
                 }
                 // Repaint when the window-control hover state changes so the
@@ -3304,6 +3317,24 @@ impl ApplicationHandler<AppEvent> for App {
                             .unwrap_or(false);
                 }
                 let top_flush = self.cached_top_flush;
+                // Lazily (re)allocate the Tier-B offscreen scene texture ONLY when a
+                // Tier-B effect (Liquid/Focus) is actively summoning and the texture
+                // is missing or stale (wrong size) — instead of eagerly on startup
+                // and on every Resized event. Done before the `as_ref()` captures
+                // below so `offscreen` picks up the freshly-sized texture.
+                if self.summon_effect.is_tier_b() && self.summon_anim.is_some() {
+                    if let Some((gw, gh)) = self.gpu.as_ref().map(|g| (g.config.width, g.config.height)) {
+                        let stale = self
+                            .offscreen
+                            .as_ref()
+                            .map_or(true, |(t, _)| t.width() != gw || t.height() != gh);
+                        if stale {
+                            if let Some(g) = &self.gpu {
+                                self.offscreen = Some(Self::make_offscreen(g));
+                            }
+                        }
+                    }
+                }
                 let corner_mask = self.corner_mask.as_ref();
                 let bayer_reveal = self.bayer_reveal.as_ref();
                 let phosphor = self.phosphor.as_ref();
@@ -3450,7 +3481,7 @@ impl ApplicationHandler<AppEvent> for App {
                         && confirm_close.is_none()
                         && !confirm_quit
                     {
-                        let splash = jetty_render::build_welcome_overlay(
+                        let mut splash = jetty_render::build_welcome_overlay(
                             width,
                             height,
                             grid_top + slide_y_offset,
@@ -3458,6 +3489,22 @@ impl ApplicationHandler<AppEvent> for App {
                             &gpu_backend_name,
                             &theme,
                         );
+                        // Clip the splash to the grid area so it never draws over a
+                        // bottom tab bar (e.g. on a very short window): drop swatch
+                        // quads / label rows below the grid bottom and trim a quad
+                        // that straddles the edge.
+                        let grid_bottom = if tab_bar_bottom {
+                            (height as f32 - TABBAR_H).max(0.0)
+                        } else {
+                            height as f32
+                        };
+                        splash.quads.retain(|q| q.y < grid_bottom);
+                        for q in &mut splash.quads {
+                            if q.y + q.h > grid_bottom {
+                                q.h = (grid_bottom - q.y).max(0.0);
+                            }
+                        }
+                        splash.labels.retain(|l| l.2 + 18.0 <= grid_bottom);
                         if !splash.quads.is_empty() {
                             quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &splash.quads);
                         }
