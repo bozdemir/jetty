@@ -3787,6 +3787,25 @@ fn center_window(win: &Arc<Window>) {
 fn dock_window_top(win: &Arc<Window>, width_pct: f32, height_pct: f32) {
     let mon = win
         .current_monitor()
+        // A HIDDEN window (the dropdown between summons) reports no
+        // current_monitor, so this used to fall straight through to the PRIMARY
+        // monitor — re-summoning the dropdown on the wrong screen for multi-monitor
+        // users. Prefer the monitor that contains the window's last outer position
+        // so it re-appears on the SAME monitor. (If the position is unavailable —
+        // e.g. never shown, or Wayland — we fall back to the primary as before, so
+        // there is no regression.)
+        .or_else(|| {
+            win.outer_position().ok().and_then(|a| {
+                win.available_monitors().find(|m| {
+                    let p = m.position();
+                    let s = m.size();
+                    a.x >= p.x
+                        && a.x < p.x + s.width as i32
+                        && a.y >= p.y
+                        && a.y < p.y + s.height as i32
+                })
+            })
+        })
         .or_else(|| win.available_monitors().next());
     if let Some(mon) = mon {
         let mon_pos = mon.position();
