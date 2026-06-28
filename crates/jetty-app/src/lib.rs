@@ -2,6 +2,10 @@ mod app;
 mod config;
 pub mod clipboard;
 pub mod input;
+// Native Wayland global summon shortcut (XDG GlobalShortcuts portal). Linux-only:
+// portals do not exist on macOS, which keeps the `global-hotkey` F9 path.
+#[cfg(target_os = "linux")]
+mod portal_hotkey;
 
 use app::AppEvent;
 use winit::event_loop::{ControlFlow, EventLoop};

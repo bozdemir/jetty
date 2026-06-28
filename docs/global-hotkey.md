@@ -15,14 +15,43 @@ in Dropdown mode), takes keyboard focus, and replays the reveal effect.
 
 ## Wayland
 
-Global key grabs are not available to regular apps on Wayland. Instead, Jetty
-uses a single-instance IPC toggle: bind the `jetty` command to a key in your
-compositor.
+Old-style global key grabs (`XGrabKey`) are not available to regular apps on
+Wayland. Jetty handles this in two layers — a **native portal shortcut** first,
+with the **IPC toggle** as a universal fallback.
 
-When a Jetty instance is already running, launching `jetty` again connects to
-the running instance over a Unix socket (`$XDG_RUNTIME_DIR/jetty.sock`, falling
-back to `/tmp/jetty.sock` if `XDG_RUNTIME_DIR` is unset), sends a toggle
-message, and exits immediately — so the running window shows or hides instantly.
+### Native: the XDG GlobalShortcuts portal (preferred)
+
+On a Wayland session Jetty registers a global shortcut through the freedesktop
+`org.freedesktop.portal.GlobalShortcuts` portal — the standard, desktop-
+environment-independent way for an unprivileged app to claim a system-wide key.
+No `jetty` re-launch and no manual binding script is needed; the shortcut is
+delivered straight to the running instance over D-Bus.
+
+The preferred trigger is **F9**, but the **compositor owns the final binding**:
+the first time Jetty registers, your desktop may show the shortcut in its
+keyboard-settings UI for you to confirm or rebind (KDE: System Settings →
+Shortcuts; GNOME: Settings → Keyboard). After that it just works, globally.
+
+This path needs `xdg-desktop-portal` plus a backend that implements the
+GlobalShortcuts interface — e.g. **KDE Plasma** (`xdg-desktop-portal-kde`),
+**GNOME 45+** (`xdg-desktop-portal-gnome`), or **Hyprland**
+(`xdg-desktop-portal-hyprland`). If the portal or a GlobalShortcuts backend is
+missing, Jetty logs one line at startup and falls back to the IPC toggle below —
+it never fails hard.
+
+> Window **positioning** is a separate matter: in Dropdown mode, top-edge
+> anchoring relies on the app placing its own window, which Wayland does not
+> permit for ordinary `xdg-toplevel` surfaces (it needs `wlr-layer-shell`, not
+> yet implemented — see the roadmap). The summon **shortcut** above works
+> regardless; the dropdown **dock geometry** is still X11-only for now.
+
+### Fallback: single-instance IPC toggle
+
+When the portal is unavailable, bind the `jetty` command to a key in your
+compositor. When a Jetty instance is already running, launching `jetty` again
+connects to it over a Unix socket (`$XDG_RUNTIME_DIR/jetty.sock`, falling back to
+`/tmp/jetty.sock` if `XDG_RUNTIME_DIR` is unset), sends a toggle message, and
+exits immediately — so the running window shows or hides instantly.
 
 If no instance is running, `jetty` starts a fresh instance (so the first key
 press launches Jetty; subsequent presses toggle it).
@@ -81,5 +110,10 @@ as on Wayland.
   automatically removed at next startup.
 - The built-in global grab uses the `global-hotkey` crate, which supports a
   system-wide grab on X11, macOS, and Windows. On Wayland the crate cannot
-  register a grab, which is why the compositor-binding + IPC fallback is required
-  there. (Jetty targets Linux and macOS; Windows is untested.)
+  register a grab; instead Jetty uses the **XDG GlobalShortcuts portal** for a
+  native global shortcut, with the compositor-binding + IPC toggle as the
+  fallback when no portal backend is present. (Jetty targets Linux and macOS;
+  Windows is untested.)
+- The portal worker runs on its own thread and only wakes the event loop when the
+  shortcut actually fires (it blocks on a D-Bus signal — no polling), so it does
+  not affect the ~0% idle CPU.

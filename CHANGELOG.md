@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Native Wayland global summon shortcut** — JeTTY now claims F9 (preferred
+  trigger) through the freedesktop **XDG GlobalShortcuts portal**
+  (`org.freedesktop.portal.GlobalShortcuts`) on Wayland sessions, instead of
+  relying solely on a compositor-bound `jetty` command. The portal runs on a
+  dedicated worker thread and forwards activations into the same toggle path the
+  X11 grab and IPC socket already use; it blocks on the D-Bus signal (no polling),
+  so idle CPU stays ~0%. Falls back to the IPC toggle when no GlobalShortcuts
+  backend is present, and never fails hard. Linux-only (`ashpd`, `cfg`-gated so
+  macOS is unchanged); no new system/CI build dependencies (zbus is pure-Rust).
+
+### Notes
+- Wayland window **positioning/docking** (Dropdown mode top-edge anchoring) is
+  still X11-only: it needs `wlr-layer-shell`, which winit cannot provide
+  ([winit #2582](https://github.com/rust-windowing/winit/issues/2582)). Tracked on
+  the roadmap as a follow-up `smithay-client-toolkit` backend.
+
+---
+
 ## [0.2.0] — 2026-06-27
 
 A polish + correctness release: a redesigned, elegant tab bar, a proper bottom

@@ -217,6 +217,11 @@ pub struct App {
     /// is kept alive inside that worker thread (it never returns), so we only need
     /// a launched-once sentinel here rather than holding the manager on the App.
     hotkey_manager: Option<()>,
+    /// Launch-once guard for the Wayland GlobalShortcuts portal worker. `resumed`
+    /// can fire more than once over a process lifetime, so we spawn the portal
+    /// thread at most once. Linux-only (portals don't exist on macOS).
+    #[cfg(target_os = "linux")]
+    portal_started: bool,
     gpu: Option<GpuContext>,
     text: Option<TextLayer>,
     /// FIXED-size TextLayer used for ALL window chrome (tab bar labels, context
@@ -611,6 +616,8 @@ impl App {
             window: None,
             visible: true,
             hotkey_manager: None,
+            #[cfg(target_os = "linux")]
+            portal_started: false,
             gpu: None,
             text: None,
             chrome_text: None,
@@ -2462,6 +2469,20 @@ impl ApplicationHandler<AppEvent> for App {
             });
         }
 
+        // Native Wayland global summon shortcut via the XDG GlobalShortcuts portal.
+        // Only on a Wayland session: on X11 the global-hotkey grab above already
+        // handles F9 (and an X11 session normally has no GlobalShortcuts backend),
+        // so registering a portal shortcut there would be redundant. Branching on
+        // the *display server* (not the desktop environment) keeps the
+        // DE-independence rule. Spawned at most once per process.
+        #[cfg(target_os = "linux")]
+        if !self.portal_started
+            && is_wayland_session(std::env::var_os("WAYLAND_DISPLAY").as_deref())
+        {
+            self.portal_started = true;
+            crate::portal_hotkey::spawn(self.proxy.clone());
+        }
+
         // Slow safety heartbeat — 100ms is enough for any future time-based UI
         // while virtually eliminating idle CPU waste. Real responsiveness now
         // comes from the on_data wake above, not from this tick.
@@ -4188,6 +4209,34 @@ fn dock_window_top(win: &Arc<Window>, width_pct: f32, height_pct: f32) {
             win_w.round() as u32,
             win_h.round() as u32,
         ));
+    }
+}
+
+/// Whether we are running under a Wayland session, decided purely from the
+/// `WAYLAND_DISPLAY` value so the gate is unit-testable without touching
+/// process-global env. A set, non-empty value means Wayland → the GlobalShortcuts
+/// portal is the native summon path; `None`/empty means X11 (or no display), where
+/// the `global-hotkey` `XGrabKey` path is used and the portal worker is skipped.
+#[cfg(target_os = "linux")]
+fn is_wayland_session(wayland_display: Option<&std::ffi::OsStr>) -> bool {
+    wayland_display.is_some_and(|v| !v.is_empty())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod portal_gate_tests {
+    use super::is_wayland_session;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn wayland_display_set_is_wayland() {
+        assert!(is_wayland_session(Some(OsStr::new("wayland-0"))));
+        assert!(is_wayland_session(Some(OsStr::new("wayland-1"))));
+    }
+
+    #[test]
+    fn unset_or_empty_is_not_wayland() {
+        assert!(!is_wayland_session(None));
+        assert!(!is_wayland_session(Some(OsStr::new(""))));
     }
 }
 

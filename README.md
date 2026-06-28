@@ -39,7 +39,7 @@
 ## ✨ Features
 
 - 🚀 **Blazing fast** — GPU-rendered with [`wgpu`](https://github.com/gfx-rs/wgpu); ~5.5 ms full-screen frames (144 Hz-ready), **~0 % CPU when idle** (damage-driven redraw), 150+ MB/s VT throughput. See the [performance budget](docs/perf-budget.md).
-- 🎯 **Global summon hotkey** — press **F9** anywhere to bring JeTTY up. Two modes (switchable in settings):
+- 🎯 **Global summon hotkey** — press **F9** anywhere to bring JeTTY up. Native everywhere: an `XGrabKey` grab on X11, the **XDG GlobalShortcuts portal** on Wayland (with a single-instance IPC toggle as the universal fallback). Two modes (switchable in settings):
   - **Center** — drops into the middle of your screen.
   - **Dropdown** — slides down from the top edge, full screen width, Yakuake/Guake style, with adjustable width & height.
 - ✨ **Summon effects** — five self-written GPU reveal shaders, selectable in settings: **Phosphor Ignition** (default — CRT power-on), **Bayer Crystallize**, **Liquid Drop**, **Focus Pull**, or **None**.
@@ -119,7 +119,7 @@ cargo build --release && ./target/release/jetty
 ### Global summon hotkey
 
 - **X11** — `F9` works immediately, no setup.
-- **Wayland** — Wayland routes global shortcuts through the compositor, so bind a key to `jetty` (the first press launches JeTTY, and each subsequent press toggles the running instance via the single-instance socket). See [`docs/global-hotkey.md`](docs/global-hotkey.md). The `--toggle` suffix is optional and behaves identically to plain `jetty`. *(Note: in Dropdown mode, top-edge anchoring relies on window positioning, which the compositor controls on Wayland — it works fully on X11.)*
+- **Wayland** — JeTTY registers a **native** global shortcut via the XDG GlobalShortcuts portal (preferred trigger F9); your desktop may surface it in its keyboard settings to confirm/rebind the first time. Needs `xdg-desktop-portal` + a GlobalShortcuts backend (KDE, GNOME 45+, Hyprland …). If that's unavailable, fall back to binding the `jetty` command to a key (it toggles the running instance via the single-instance socket). See [`docs/global-hotkey.md`](docs/global-hotkey.md). *(Note: in Dropdown mode, top-edge anchoring relies on window positioning, which ordinary Wayland surfaces can't do — it needs `wlr-layer-shell` (roadmap) and works fully on X11 today.)*
 
 ## ⌨️ Keybindings
 
@@ -170,7 +170,7 @@ JeTTY is in active early development and **we're looking for collaborators.** Wh
 
 Great places to jump in right now:
 
-- Native Wayland global shortcut (XDG GlobalShortcuts portal)
+- Native Wayland dropdown docking via `wlr-layer-shell` (the summon shortcut is already native via the portal; window *positioning* still needs a layer-shell backend)
 - Multi-monitor awareness & per-monitor dropdown placement
 - More summon effects / themes / visual polish
 - Faster cold start
@@ -180,7 +180,7 @@ Great places to jump in right now:
 
 ## 🗺️ Roadmap
 
-- Native Wayland global shortcut via the XDG GlobalShortcuts portal
+- Native Wayland dropdown docking via `wlr-layer-shell` (top-anchored overlay surface) — the summon shortcut already lands natively through the XDG GlobalShortcuts portal
 - Multi-monitor awareness
 - Launchpad PPA (`apt install jetty`) + AUR package
 - Faster cold start
