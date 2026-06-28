@@ -21,6 +21,20 @@ impl GpuContext {
         width: u32,
         height: u32,
     ) -> Option<Self> {
+        // GPU power preference. Default LowPower → the integrated GPU: a terminal
+        // needs no discrete power, and on some hybrid setups driving the dGPU via
+        // Vulkan can destabilize the compositor. BUT on machines where the
+        // compositor/display is driven by the DISCRETE GPU (e.g. an NVIDIA-primary
+        // laptop), the integrated adapter cannot present to the compositor's
+        // surface — `Surface::configure` fails ("does not support the adapter's
+        // queue family") with dmabuf-import errors. Set JETTY_GPU=high (aliases
+        // `discrete`, `dgpu`) to select HighPerformance → the discrete GPU, which
+        // fixes presentation on those systems. (`JETTY_BENCH_GPU` is the headless
+        // analogue used only by jetty-bench.)
+        let power = match std::env::var("JETTY_GPU").as_deref() {
+            Ok("high") | Ok("discrete") | Ok("dgpu") => wgpu::PowerPreference::HighPerformance,
+            _ => wgpu::PowerPreference::LowPower,
+        };
         // Try a Vulkan-only instance first: this skips the GLES libEGL dlopen /
         // eglInitialize + GL adapter enumeration that Backends::all() pays on every
         // cold start, even though the Vulkan adapter is what gets selected anyway.
@@ -33,11 +47,12 @@ impl GpuContext {
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
             });
             let surface = instance.create_surface(window.clone()).ok()?;
-            // Prefer the integrated (Intel) GPU. On hybrid Intel+NVIDIA systems
-            // under X11, driving the discrete NVIDIA GPU via Vulkan can crash the
-            // KWin/X compositor — and a terminal has no need for discrete power.
+            // Default: prefer the integrated GPU (LowPower) — a terminal needs no
+            // discrete power, and on hybrid X11 setups driving the dGPU via Vulkan
+            // can crash the compositor. JETTY_GPU=high overrides to the discrete
+            // GPU for dGPU-primary systems (see `power` above).
             let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
+                power_preference: power,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })).ok()?;
