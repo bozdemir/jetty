@@ -210,6 +210,28 @@ struct Tab {
 const SETTINGS_WIN_W: u32 = jetty_render::PANEL_W as u32 + 4;
 const SETTINGS_WIN_H: u32 = jetty_render::PANEL_H as u32 + 4;
 
+/// Identifies which Effects-tab slider is currently being dragged. One variant
+/// per draggable slider; `None` stored in `App::active_fx_drag` when no drag is
+/// in progress. Mirrors the `dragging_slider` / `dragging_radius` bool pattern
+/// but consolidates 13 sliders into a single optional enum so the struct stays
+/// compact and the `CursorMoved` handler stays readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FxSlider {
+    CrtCurvature,
+    CrtScanline,
+    CrtMask,
+    CrtBloom,
+    CrtChromatic,
+    CrtVignette,
+    CaretDur,
+    TintR,
+    TintG,
+    TintB,
+    CaretColorR,
+    CaretColorG,
+    CaretColorB,
+}
+
 pub struct App {
     proxy: EventLoopProxy<AppEvent>,
     window: Option<Arc<Window>>,
@@ -415,6 +437,9 @@ pub struct App {
     dragging_slider: bool,
     /// Whether the user is currently dragging the corner-radius slider.
     dragging_radius: bool,
+    /// Which Effects-tab slider (if any) is currently being dragged. `None` when
+    /// no effects slider drag is in progress. Mirrors `dragging_slider` etc.
+    active_fx_drag: Option<FxSlider>,
     /// Whether the user is currently dragging a text selection with the mouse.
     selecting: bool,
     /// Whether JETTY_DEBUG is set — enables input/panel state logging to stderr.
@@ -705,6 +730,7 @@ impl App {
             settings_cursor: (0.0, 0.0),
             dragging_slider: false,
             dragging_radius: false,
+            active_fx_drag: None,
             selecting: false,
             debug,
             context_menu: None,
@@ -1168,6 +1194,12 @@ impl App {
     fn dropdown_width_pct_from_cursor(&self, cx: f32, track: &jetty_render::Rect) -> f32 {
         let frac = ((cx - track.x) / track.w).clamp(0.0, 1.0);
         (0.2 + frac * 0.8).clamp(0.2, 1.0)
+    }
+
+    /// Compute a [0, 1] fraction from cursor x relative to a slider track rect.
+    /// Used for all Effects-tab sliders whose value range maps linearly to 0..1.
+    fn fx_frac_from_cursor(&self, cx: f32, track: &jetty_render::Rect) -> f32 {
+        ((cx - track.x) / track.w).clamp(0.0, 1.0)
     }
 
     /// Select a new window mode: persist it, and apply it live. Switching to
@@ -1780,12 +1812,13 @@ impl App {
         self.settings_text = None;
         self.settings_specimen_text = None;
         self.settings_quad = None;
-        // Clear BOTH drag flags so a drag in progress when the window closes
+        // Clear all drag flags so any in-progress drag when the window closes
         // doesn't leave a stale flag set that misbehaves on reopen.
         self.dragging_slider = false;
         self.dragging_radius = false;
         self.dragging_dropdown = false;
         self.dragging_dropdown_width = false;
+        self.active_fx_drag = None;
         if self.debug {
             eprintln!("SETTINGS window closed");
         }
@@ -1949,25 +1982,18 @@ impl App {
     fn handle_settings_action(
         &mut self,
         action: input::MouseAction,
-        track: Option<jetty_render::Rect>,
-        radius_track: Option<jetty_render::Rect>,
-        dropdown_track: Option<jetty_render::Rect>,
-        dropdown_width_track: Option<jetty_render::Rect>,
+        geom: &jetty_render::PanelGeom,
     ) {
         let cx = self.settings_cursor.0 as f32;
         match action {
             input::MouseAction::StartSliderDrag => {
                 self.dragging_slider = true;
-                if let Some(track_rect) = track {
-                    self.opacity = self.opacity_from_cursor(cx, &track_rect);
-                    self.apply_theme();
-                }
+                self.opacity = self.opacity_from_cursor(cx, &geom.slider_track);
+                self.apply_theme();
             }
             input::MouseAction::StartRadiusDrag => {
                 self.dragging_radius = true;
-                if let Some(track_rect) = radius_track {
-                    self.corner_radius = self.radius_from_cursor(cx, &track_rect);
-                }
+                self.corner_radius = self.radius_from_cursor(cx, &geom.radius_track);
             }
             input::MouseAction::SetTheme(i) => {
                 self.theme_idx = i;
@@ -2049,21 +2075,92 @@ impl App {
                 // No-op in Center mode (the slider is grayed/disabled there).
                 if self.window_mode == WindowMode::Dropdown {
                     self.dragging_dropdown = true;
-                    if let Some(track_rect) = dropdown_track {
-                        self.dropdown_height_pct =
-                            self.dropdown_pct_from_cursor(cx, &track_rect);
-                    }
+                    self.dropdown_height_pct =
+                        self.dropdown_pct_from_cursor(cx, &geom.dropdown_track);
                 }
             }
             input::MouseAction::StartDropdownWidthDrag => {
                 // No-op in Center mode (the slider is grayed/disabled there).
                 if self.window_mode == WindowMode::Dropdown {
                     self.dragging_dropdown_width = true;
-                    if let Some(track_rect) = dropdown_width_track {
-                        self.dropdown_width_pct =
-                            self.dropdown_width_pct_from_cursor(cx, &track_rect);
-                    }
+                    self.dropdown_width_pct =
+                        self.dropdown_width_pct_from_cursor(cx, &geom.dropdown_width_track);
                 }
+            }
+            // Effects tab toggles: flip the corresponding bool in self.fx.
+            input::MouseAction::ToggleCrt => {
+                self.fx.crt_enabled = !self.fx.crt_enabled;
+            }
+            input::MouseAction::ToggleCrtRoll => {
+                self.fx.crt_animate_roll = !self.fx.crt_animate_roll;
+            }
+            input::MouseAction::ToggleCrtFlicker => {
+                self.fx.crt_flicker = !self.fx.crt_flicker;
+            }
+            input::MouseAction::ToggleCrtJitter => {
+                self.fx.crt_jitter = !self.fx.crt_jitter;
+            }
+            input::MouseAction::ToggleCaretFlash => {
+                self.fx.caret_flash_enabled = !self.fx.caret_flash_enabled;
+            }
+            input::MouseAction::ToggleCaretGlow => {
+                self.fx.caret_glow_enabled = !self.fx.caret_glow_enabled;
+            }
+            // Effects tab sliders: mark the active drag and apply initial value.
+            // The CursorMoved handler updates the value on every subsequent move;
+            // MouseInput::Released clears active_fx_drag and persists the final value.
+            input::MouseAction::StartCrtCurvatureDrag => {
+                self.active_fx_drag = Some(FxSlider::CrtCurvature);
+                self.fx.crt_curvature = self.fx_frac_from_cursor(cx, &geom.crt_curvature_track);
+            }
+            input::MouseAction::StartScanlineDrag => {
+                self.active_fx_drag = Some(FxSlider::CrtScanline);
+                self.fx.crt_scanline = self.fx_frac_from_cursor(cx, &geom.crt_scanline_track);
+            }
+            input::MouseAction::StartMaskDrag => {
+                self.active_fx_drag = Some(FxSlider::CrtMask);
+                self.fx.crt_mask = self.fx_frac_from_cursor(cx, &geom.crt_mask_track);
+            }
+            input::MouseAction::StartBloomDrag => {
+                self.active_fx_drag = Some(FxSlider::CrtBloom);
+                self.fx.crt_bloom = self.fx_frac_from_cursor(cx, &geom.crt_bloom_track);
+            }
+            input::MouseAction::StartChromaticDrag => {
+                self.active_fx_drag = Some(FxSlider::CrtChromatic);
+                self.fx.crt_chromatic = self.fx_frac_from_cursor(cx, &geom.crt_chromatic_track);
+            }
+            input::MouseAction::StartVignetteDrag => {
+                self.active_fx_drag = Some(FxSlider::CrtVignette);
+                self.fx.crt_vignette = self.fx_frac_from_cursor(cx, &geom.crt_vignette_track);
+            }
+            input::MouseAction::StartCaretDurDrag => {
+                self.active_fx_drag = Some(FxSlider::CaretDur);
+                let frac = self.fx_frac_from_cursor(cx, &geom.caret_dur_track);
+                self.fx.caret_flash_ms = (60.0 + frac * 340.0).clamp(60.0, 400.0);
+            }
+            input::MouseAction::StartTintRDrag => {
+                self.active_fx_drag = Some(FxSlider::TintR);
+                self.fx.crt_scanline_tint[0] = self.fx_frac_from_cursor(cx, &geom.crt_tint_r_track);
+            }
+            input::MouseAction::StartTintGDrag => {
+                self.active_fx_drag = Some(FxSlider::TintG);
+                self.fx.crt_scanline_tint[1] = self.fx_frac_from_cursor(cx, &geom.crt_tint_g_track);
+            }
+            input::MouseAction::StartTintBDrag => {
+                self.active_fx_drag = Some(FxSlider::TintB);
+                self.fx.crt_scanline_tint[2] = self.fx_frac_from_cursor(cx, &geom.crt_tint_b_track);
+            }
+            input::MouseAction::StartCaretColorRDrag => {
+                self.active_fx_drag = Some(FxSlider::CaretColorR);
+                self.fx.caret_flash_color[0] = self.fx_frac_from_cursor(cx, &geom.caret_color_r_track);
+            }
+            input::MouseAction::StartCaretColorGDrag => {
+                self.active_fx_drag = Some(FxSlider::CaretColorG);
+                self.fx.caret_flash_color[1] = self.fx_frac_from_cursor(cx, &geom.caret_color_g_track);
+            }
+            input::MouseAction::StartCaretColorBDrag => {
+                self.active_fx_drag = Some(FxSlider::CaretColorB);
+                self.fx.caret_flash_color[2] = self.fx_frac_from_cursor(cx, &geom.caret_color_b_track);
             }
             input::MouseAction::SetSettingsTab(i) => {
                 // Session-only tab switch: change the active tab and redraw the
@@ -2148,8 +2245,8 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.settings_cursor = (position.x, position.y);
-                // Continue an opacity-, radius-, dropdown-height- or -width drag started here.
-                if self.dragging_slider || self.dragging_radius || self.dragging_dropdown || self.dragging_dropdown_width {
+                // Continue an opacity-, radius-, dropdown-height/-width, or Effects slider drag.
+                if self.dragging_slider || self.dragging_radius || self.dragging_dropdown || self.dragging_dropdown_width || self.active_fx_drag.is_some() {
                     if let Some(gpu) = &self.settings_gpu {
                         let (w, h) = (gpu.config.width, gpu.config.height);
                         let pv = self.settings_panel_view(w, h);
@@ -2169,6 +2266,26 @@ impl App {
                             self.dropdown_width_pct =
                                 self.dropdown_width_pct_from_cursor(cx, &pv.geom.dropdown_width_track);
                         }
+                        if let Some(fx_slider) = self.active_fx_drag {
+                            match fx_slider {
+                                FxSlider::CrtCurvature => self.fx.crt_curvature = self.fx_frac_from_cursor(cx, &pv.geom.crt_curvature_track),
+                                FxSlider::CrtScanline  => self.fx.crt_scanline  = self.fx_frac_from_cursor(cx, &pv.geom.crt_scanline_track),
+                                FxSlider::CrtMask      => self.fx.crt_mask      = self.fx_frac_from_cursor(cx, &pv.geom.crt_mask_track),
+                                FxSlider::CrtBloom     => self.fx.crt_bloom     = self.fx_frac_from_cursor(cx, &pv.geom.crt_bloom_track),
+                                FxSlider::CrtChromatic => self.fx.crt_chromatic = self.fx_frac_from_cursor(cx, &pv.geom.crt_chromatic_track),
+                                FxSlider::CrtVignette  => self.fx.crt_vignette  = self.fx_frac_from_cursor(cx, &pv.geom.crt_vignette_track),
+                                FxSlider::CaretDur => {
+                                    let frac = self.fx_frac_from_cursor(cx, &pv.geom.caret_dur_track);
+                                    self.fx.caret_flash_ms = (60.0 + frac * 340.0).clamp(60.0, 400.0);
+                                }
+                                FxSlider::TintR => self.fx.crt_scanline_tint[0] = self.fx_frac_from_cursor(cx, &pv.geom.crt_tint_r_track),
+                                FxSlider::TintG => self.fx.crt_scanline_tint[1] = self.fx_frac_from_cursor(cx, &pv.geom.crt_tint_g_track),
+                                FxSlider::TintB => self.fx.crt_scanline_tint[2] = self.fx_frac_from_cursor(cx, &pv.geom.crt_tint_b_track),
+                                FxSlider::CaretColorR => self.fx.caret_flash_color[0] = self.fx_frac_from_cursor(cx, &pv.geom.caret_color_r_track),
+                                FxSlider::CaretColorG => self.fx.caret_flash_color[1] = self.fx_frac_from_cursor(cx, &pv.geom.caret_color_g_track),
+                                FxSlider::CaretColorB => self.fx.caret_flash_color[2] = self.fx_frac_from_cursor(cx, &pv.geom.caret_color_b_track),
+                            }
+                        }
                     }
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -2179,9 +2296,11 @@ impl App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                // Persist the final opacity/corner-radius after a drag settles
-                // (the drag itself only updates live state to keep writes cheap).
-                if self.dragging_slider || self.dragging_radius || self.dragging_dropdown || self.dragging_dropdown_width {
+                // Persist the final value after any drag settles (opacity, radius,
+                // dropdown, or Effects slider). The live updates during drag are
+                // cheap writes to self.* fields; the final persist here is the
+                // authoritative flush to disk.
+                if self.dragging_slider || self.dragging_radius || self.dragging_dropdown || self.dragging_dropdown_width || self.active_fx_drag.is_some() {
                     self.persist();
                 }
                 // Live-apply a dropdown height/width change on RELEASE only (never
@@ -2203,20 +2322,17 @@ impl App {
                 self.dragging_radius = false;
                 self.dragging_dropdown = false;
                 self.dragging_dropdown_width = false;
+                self.active_fx_drag = None;
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 let Some(gpu) = &self.settings_gpu else { return };
                 let (w, h) = (gpu.config.width, gpu.config.height);
                 let pv = self.settings_panel_view(w, h);
-                let track = pv.geom.slider_track;
-                let radius_track = pv.geom.radius_track;
-                let dropdown_track = pv.geom.dropdown_track;
-                let dropdown_width_track = pv.geom.dropdown_width_track;
                 let cx = self.settings_cursor.0 as f32;
                 let cy = self.settings_cursor.1 as f32;
                 // Hit-test the panel only (no scrollbar in the settings window).
                 let action = input::decide_mouse_press(Some(&pv.geom), None, cx, cy);
-                self.handle_settings_action(action, Some(track), Some(radius_track), Some(dropdown_track), Some(dropdown_width_track));
+                self.handle_settings_action(action, &pv.geom);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Wheel over the terminal- OR UI-font list scrolls it (same as the
@@ -3232,6 +3348,25 @@ impl ApplicationHandler<AppEvent> for App {
                     | input::MouseAction::ToggleLaunchAtLogin
                     | input::MouseAction::CycleShellPrev
                     | input::MouseAction::CycleShellNext
+                    | input::MouseAction::ToggleCrt
+                    | input::MouseAction::ToggleCrtRoll
+                    | input::MouseAction::ToggleCrtFlicker
+                    | input::MouseAction::ToggleCrtJitter
+                    | input::MouseAction::ToggleCaretFlash
+                    | input::MouseAction::ToggleCaretGlow
+                    | input::MouseAction::StartCrtCurvatureDrag
+                    | input::MouseAction::StartScanlineDrag
+                    | input::MouseAction::StartMaskDrag
+                    | input::MouseAction::StartBloomDrag
+                    | input::MouseAction::StartChromaticDrag
+                    | input::MouseAction::StartVignetteDrag
+                    | input::MouseAction::StartCaretDurDrag
+                    | input::MouseAction::StartTintRDrag
+                    | input::MouseAction::StartTintGDrag
+                    | input::MouseAction::StartTintBDrag
+                    | input::MouseAction::StartCaretColorRDrag
+                    | input::MouseAction::StartCaretColorGDrag
+                    | input::MouseAction::StartCaretColorBDrag
                     | input::MouseAction::SetSettingsTab(_)
                     | input::MouseAction::StartDialogDrag
                     | input::MouseAction::ConsumePanel => {}

@@ -289,6 +289,45 @@ pub enum MouseAction {
     CycleShellPrev,
     /// User clicked the shell-picker "›" button — cycle to the next shell.
     CycleShellNext,
+    // ── Effects tab widgets ────────────────────────────────────────────────────
+    /// User clicked the "CRT enabled" master toggle pill.
+    ToggleCrt,
+    /// User clicked the "CRT roll" animation toggle pill.
+    ToggleCrtRoll,
+    /// User clicked the "CRT flicker" animation toggle pill.
+    ToggleCrtFlicker,
+    /// User clicked the "CRT jitter" animation toggle pill.
+    ToggleCrtJitter,
+    /// User clicked the "caret flash" enabled toggle pill.
+    ToggleCaretFlash,
+    /// User clicked the "caret glow" enabled toggle pill.
+    ToggleCaretGlow,
+    /// User pressed on the CRT curvature slider handle or track — start drag.
+    StartCrtCurvatureDrag,
+    /// User pressed on the CRT scanline-intensity slider handle or track — start drag.
+    StartScanlineDrag,
+    /// User pressed on the CRT shadow-mask slider handle or track — start drag.
+    StartMaskDrag,
+    /// User pressed on the CRT bloom slider handle or track — start drag.
+    StartBloomDrag,
+    /// User pressed on the CRT chromatic-aberration slider handle or track — start drag.
+    StartChromaticDrag,
+    /// User pressed on the CRT vignette slider handle or track — start drag.
+    StartVignetteDrag,
+    /// User pressed on the caret flash-duration slider handle or track — start drag.
+    StartCaretDurDrag,
+    /// User pressed on the CRT scanline-tint R-channel mini-slider — start drag.
+    StartTintRDrag,
+    /// User pressed on the CRT scanline-tint G-channel mini-slider — start drag.
+    StartTintGDrag,
+    /// User pressed on the CRT scanline-tint B-channel mini-slider — start drag.
+    StartTintBDrag,
+    /// User pressed on the caret color R-channel mini-slider — start drag.
+    StartCaretColorRDrag,
+    /// User pressed on the caret color G-channel mini-slider — start drag.
+    StartCaretColorGDrag,
+    /// User pressed on the caret color B-channel mini-slider — start drag.
+    StartCaretColorBDrag,
     /// User clicked one of the 4 settings tab labels — switch the active tab.
     /// The index is 0..=3 (Look / Fonts / Window / Shell).
     SetSettingsTab(usize),
@@ -441,6 +480,69 @@ pub fn decide_mouse_press(
             if point_in(row, cx, cy) {
                 return MouseAction::SetUiFont(g.ui_font_scroll_offset + i);
             }
+        }
+        // Effects tab toggle pills. Rects are at 1e6 when the Effects tab is not
+        // active, so these tests are effectively no-ops on every other tab.
+        if point_in(&g.crt_enabled_toggle, cx, cy) {
+            return MouseAction::ToggleCrt;
+        }
+        if point_in(&g.crt_roll_toggle, cx, cy) {
+            return MouseAction::ToggleCrtRoll;
+        }
+        if point_in(&g.crt_flicker_toggle, cx, cy) {
+            return MouseAction::ToggleCrtFlicker;
+        }
+        if point_in(&g.crt_jitter_toggle, cx, cy) {
+            return MouseAction::ToggleCrtJitter;
+        }
+        if point_in(&g.caret_flash_toggle, cx, cy) {
+            return MouseAction::ToggleCaretFlash;
+        }
+        if point_in(&g.caret_glow_toggle, cx, cy) {
+            return MouseAction::ToggleCaretGlow;
+        }
+        // Effects tab sliders: handle OR track → start drag.
+        if point_in(&g.crt_curvature_handle, cx, cy) || point_in(&g.crt_curvature_track, cx, cy) {
+            return MouseAction::StartCrtCurvatureDrag;
+        }
+        if point_in(&g.crt_scanline_handle, cx, cy) || point_in(&g.crt_scanline_track, cx, cy) {
+            return MouseAction::StartScanlineDrag;
+        }
+        if point_in(&g.crt_mask_handle, cx, cy) || point_in(&g.crt_mask_track, cx, cy) {
+            return MouseAction::StartMaskDrag;
+        }
+        if point_in(&g.crt_bloom_handle, cx, cy) || point_in(&g.crt_bloom_track, cx, cy) {
+            return MouseAction::StartBloomDrag;
+        }
+        if point_in(&g.crt_chromatic_handle, cx, cy) || point_in(&g.crt_chromatic_track, cx, cy) {
+            return MouseAction::StartChromaticDrag;
+        }
+        if point_in(&g.crt_vignette_handle, cx, cy) || point_in(&g.crt_vignette_track, cx, cy) {
+            return MouseAction::StartVignetteDrag;
+        }
+        // CRT scanline-tint RGB mini-sliders.
+        if point_in(&g.crt_tint_r_handle, cx, cy) || point_in(&g.crt_tint_r_track, cx, cy) {
+            return MouseAction::StartTintRDrag;
+        }
+        if point_in(&g.crt_tint_g_handle, cx, cy) || point_in(&g.crt_tint_g_track, cx, cy) {
+            return MouseAction::StartTintGDrag;
+        }
+        if point_in(&g.crt_tint_b_handle, cx, cy) || point_in(&g.crt_tint_b_track, cx, cy) {
+            return MouseAction::StartTintBDrag;
+        }
+        // Caret flash-duration slider.
+        if point_in(&g.caret_dur_handle, cx, cy) || point_in(&g.caret_dur_track, cx, cy) {
+            return MouseAction::StartCaretDurDrag;
+        }
+        // Caret flash-color RGB mini-sliders.
+        if point_in(&g.caret_color_r_handle, cx, cy) || point_in(&g.caret_color_r_track, cx, cy) {
+            return MouseAction::StartCaretColorRDrag;
+        }
+        if point_in(&g.caret_color_g_handle, cx, cy) || point_in(&g.caret_color_g_track, cx, cy) {
+            return MouseAction::StartCaretColorGDrag;
+        }
+        if point_in(&g.caret_color_b_handle, cx, cy) || point_in(&g.caret_color_b_track, cx, cy) {
+            return MouseAction::StartCaretColorBDrag;
         }
         // Title bar (top ~36px) — drag handle; must come before generic consume.
         if point_in(&g.title_bar, cx, cy) {

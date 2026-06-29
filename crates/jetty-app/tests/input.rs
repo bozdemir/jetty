@@ -695,3 +695,122 @@ fn shift_tab_sends_back_tab() {
     let plain = decide_key(false, false, false, phys(KeyCode::Tab), &named(NamedKey::Tab), false, false);
     assert_eq!(plain, send(b"\t"));
 }
+
+// ---------------------------------------------------------------------------
+// Effects tab (tab index 4) hit-tests
+// ---------------------------------------------------------------------------
+
+/// Build PanelGeom for the Effects tab (index 4).
+fn effects_panel_geom() -> jetty_render::PanelGeom {
+    make_panel_geom_tab(4)
+}
+
+/// Click the center of `rect` against the Effects panel and return the action.
+fn click(g: &jetty_render::PanelGeom, r: &jetty_render::Rect) -> MouseAction {
+    decide_mouse_press(Some(g), None, r.x + r.w / 2.0, r.y + r.h / 2.0)
+}
+
+#[test]
+fn effects_crt_enabled_toggle_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.crt_enabled_toggle), MouseAction::ToggleCrt);
+}
+
+#[test]
+fn effects_crt_curvature_track_hit_test() {
+    let g = effects_panel_geom();
+    // Click the slider TRACK center.
+    assert_eq!(click(&g, &g.crt_curvature_track), MouseAction::StartCrtCurvatureDrag);
+}
+
+#[test]
+fn effects_crt_curvature_handle_hit_test() {
+    let g = effects_panel_geom();
+    // Click the slider HANDLE — should also start a drag.
+    assert_eq!(click(&g, &g.crt_curvature_handle), MouseAction::StartCrtCurvatureDrag);
+}
+
+#[test]
+fn effects_scanline_drag_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.crt_scanline_track), MouseAction::StartScanlineDrag);
+}
+
+#[test]
+fn effects_mask_drag_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.crt_mask_track), MouseAction::StartMaskDrag);
+}
+
+#[test]
+fn effects_bloom_drag_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.crt_bloom_track), MouseAction::StartBloomDrag);
+}
+
+#[test]
+fn effects_chromatic_drag_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.crt_chromatic_track), MouseAction::StartChromaticDrag);
+}
+
+#[test]
+fn effects_vignette_drag_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.crt_vignette_track), MouseAction::StartVignetteDrag);
+}
+
+#[test]
+fn effects_tint_rgb_drag_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.crt_tint_r_track), MouseAction::StartTintRDrag);
+    assert_eq!(click(&g, &g.crt_tint_g_track), MouseAction::StartTintGDrag);
+    assert_eq!(click(&g, &g.crt_tint_b_track), MouseAction::StartTintBDrag);
+}
+
+#[test]
+fn effects_animation_toggles_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.crt_roll_toggle),    MouseAction::ToggleCrtRoll);
+    assert_eq!(click(&g, &g.crt_flicker_toggle), MouseAction::ToggleCrtFlicker);
+    assert_eq!(click(&g, &g.crt_jitter_toggle),  MouseAction::ToggleCrtJitter);
+}
+
+#[test]
+fn effects_caret_flash_toggle_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.caret_flash_toggle), MouseAction::ToggleCaretFlash);
+}
+
+#[test]
+fn effects_caret_glow_toggle_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.caret_glow_toggle), MouseAction::ToggleCaretGlow);
+}
+
+#[test]
+fn effects_caret_dur_drag_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.caret_dur_track), MouseAction::StartCaretDurDrag);
+}
+
+#[test]
+fn effects_caret_color_rgb_drag_hit_test() {
+    let g = effects_panel_geom();
+    assert_eq!(click(&g, &g.caret_color_r_track), MouseAction::StartCaretColorRDrag);
+    assert_eq!(click(&g, &g.caret_color_g_track), MouseAction::StartCaretColorGDrag);
+    assert_eq!(click(&g, &g.caret_color_b_track), MouseAction::StartCaretColorBDrag);
+}
+
+/// Regression: Effects widgets must NOT fire on tab 0 (Look) — their rects are
+/// parked at 1e6 when not on the Effects tab, so any real cursor position misses.
+#[test]
+fn effects_widgets_inactive_on_look_tab() {
+    let g = make_panel_geom_tab(0);
+    // Spot-check: the crt_enabled_toggle rect is at 1e6 on tab 0, so a center
+    // click at (1e6 + w/2, 1e6 + h/2) is outside any real screen — but we can
+    // verify it doesn't decode as ToggleCrt for any realistic cursor position.
+    let action = decide_mouse_press(Some(&g), None, 400.0, 400.0);
+    // A click at (400,400) on tab 0 (Look) should NOT be a ToggleCrt.
+    assert_ne!(action, MouseAction::ToggleCrt);
+}
