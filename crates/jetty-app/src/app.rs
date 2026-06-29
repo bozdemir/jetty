@@ -370,6 +370,9 @@ pub struct App {
     ui_font_families: Vec<String>,
     /// Scroll offset into `ui_font_families` for the panel's UI-font list.
     ui_font_scroll_offset: usize,
+    /// Active settings tab (0=Look, 1=Fonts, 2=Window, 3=Shell). Session-only:
+    /// NOT persisted to config, so it resets to 0 each launch.
+    settings_tab: usize,
     /// Track held modifier keys so Ctrl+Shift combos can be detected.
     modifiers: winit::keyboard::ModifiersState,
     /// Last known cursor position in physical pixels.
@@ -681,6 +684,7 @@ impl App {
             ui_font_logical: UI_FONT_LOGICAL_DEFAULT,
             ui_font_families: Vec::new(),
             ui_font_scroll_offset: 0,
+            settings_tab: 0,
             modifiers: winit::keyboard::ModifiersState::empty(),
             cursor: (0.0, 0.0),
             mouse_grab_press: None,
@@ -1798,6 +1802,7 @@ impl App {
             self.ui_font_scroll_offset,
             0.0, 0.0, &theme, self.settings_char_w(),
             &self.shell_display(),
+            self.settings_tab,
         )
     }
 
@@ -1825,6 +1830,7 @@ impl App {
         let ui_font_logical = self.ui_font_logical;
         let ui_font_scroll_offset = self.ui_font_scroll_offset;
         let shell_display = self.shell_display();
+        let settings_tab = self.settings_tab;
         let theme = self.current_theme();
         // Panel labels use the SETTINGS (capped) layer advance so right-align /
         // truncation match the layer that draws them.
@@ -1851,6 +1857,7 @@ impl App {
             ui_font_logical, &ui_families, &ui_family, ui_font_scroll_offset,
             0.0, 0.0, &theme, char_w,
             &shell_display,
+            settings_tab,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
             // Clear the window background to the panel border color, then paint the
@@ -2013,6 +2020,17 @@ impl App {
                             self.dropdown_width_pct_from_cursor(cx, &track_rect);
                     }
                 }
+            }
+            input::MouseAction::SetSettingsTab(i) => {
+                // Session-only tab switch: change the active tab and redraw the
+                // settings window. Not persisted (resets to Look on restart).
+                self.settings_tab = i.min(3);
+                if let Some(w) = &self.settings_window {
+                    w.request_redraw();
+                }
+                // Nothing to persist for a tab switch; return early so we don't
+                // write config or redraw the main terminal needlessly.
+                return;
             }
             input::MouseAction::ToggleFocusAutoHide => {
                 self.focus_autohide = !self.focus_autohide;
@@ -3162,6 +3180,7 @@ impl ApplicationHandler<AppEvent> for App {
                     | input::MouseAction::ToggleLaunchAtLogin
                     | input::MouseAction::CycleShellPrev
                     | input::MouseAction::CycleShellNext
+                    | input::MouseAction::SetSettingsTab(_)
                     | input::MouseAction::StartDialogDrag
                     | input::MouseAction::ConsumePanel => {}
                     input::MouseAction::StartScrollbarDrag { grab_dy } => {

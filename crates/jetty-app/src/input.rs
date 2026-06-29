@@ -289,6 +289,9 @@ pub enum MouseAction {
     CycleShellPrev,
     /// User clicked the shell-picker "›" button — cycle to the next shell.
     CycleShellNext,
+    /// User clicked one of the 4 settings tab labels — switch the active tab.
+    /// The index is 0..=3 (Look / Fonts / Window / Shell).
+    SetSettingsTab(usize),
     /// User pressed on the title bar (not on any widget) — start dialog drag.
     StartDialogDrag,
     /// User clicked inside the panel but not on any widget — swallow the event.
@@ -326,6 +329,14 @@ pub fn decide_mouse_press(
     cy: f32,
 ) -> MouseAction {
     if let Some(g) = panel {
+        // Tab strip — tested FIRST so a tab switch always wins over any band
+        // widget (the inactive tabs' widgets are offscreen anyway, but the active
+        // tab's first band sits just below the strip, so order still matters).
+        for (i, tab) in g.tab_rects.iter().enumerate() {
+            if point_in(tab, cx, cy) {
+                return MouseAction::SetSettingsTab(i);
+            }
+        }
         // Opacity slider handle or track → start drag.
         if point_in(&g.slider_handle, cx, cy) || point_in(&g.slider_track, cx, cy) {
             return MouseAction::StartSliderDrag;
@@ -842,7 +853,7 @@ mod tests {
 
     /// A representative panel with 5 UI-font families (incl. the synthetic
     /// "System Sans" row) so the family list and its scroll math are exercised.
-    fn ui_panel() -> jetty_render::PanelView {
+    fn panel_for_tab(active_tab: usize) -> jetty_render::PanelView {
         let theme = jetty_core::Theme::by_name("catppuccin_mocha");
         let mono: Vec<String> = vec!["JetBrains Mono".into(), "Fira Code".into()];
         let ui: Vec<String> = vec![
@@ -859,7 +870,13 @@ mod tests {
             18.0, &ui, "", 0,
             0.0, 0.0, &theme, 9.8, // char_w scale-1 fallback
             "System default", // shell_display
+            active_tab,
         )
+    }
+
+    /// The Fonts tab (1): font + UI-font widgets are laid out here.
+    fn ui_panel() -> jetty_render::PanelView {
+        panel_for_tab(1)
     }
 
     /// Decode a click at the center of `rect` against the panel geometry.
@@ -904,10 +921,22 @@ mod tests {
 
     #[test]
     fn shell_cycle_buttons_hit_test() {
-        let pv = ui_panel();
+        // The shell band lives on the Shell tab (3).
+        let pv = panel_for_tab(3);
         let g = &pv.geom;
         assert_eq!(click_rect(g, &g.shell_prev), MouseAction::CycleShellPrev);
         assert_eq!(click_rect(g, &g.shell_next), MouseAction::CycleShellNext);
+    }
+
+    #[test]
+    fn tab_strip_clicks_select_tab() {
+        // A click on tab label i decodes to SetSettingsTab(i), regardless of which
+        // tab is currently active.
+        let pv = panel_for_tab(0);
+        let g = &pv.geom;
+        for i in 0..4 {
+            assert_eq!(click_rect(g, &g.tab_rects[i]), MouseAction::SetSettingsTab(i));
+        }
     }
 
     #[test]

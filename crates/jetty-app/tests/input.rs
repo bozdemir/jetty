@@ -473,7 +473,7 @@ fn arrow_keys_app_cursor_mode_all_directions() {
 // ---------------------------------------------------------------------------
 
 /// Build a real PanelGeom for a 1000×640 window at 70% opacity, theme index 1.
-fn make_panel_geom() -> jetty_render::PanelGeom {
+fn make_panel_geom_tab(active_tab: usize) -> jetty_render::PanelGeom {
     let theme = jetty_core::Theme::by_name("catppuccin_mocha");
     // UI-font args: size 16, a single synthetic "System Sans" row, selected "".
     let ui_families = ["System Sans (default)".to_string()];
@@ -484,8 +484,14 @@ fn make_panel_geom() -> jetty_render::PanelGeom {
         16.0, &ui_families, "", 0,
         0.0, 0.0, &theme, 9.8,
         "System default", // shell_display
+        active_tab,
     )
     .geom
+}
+
+/// Tab-0 ("Look") panel geometry: opacity slider, theme chips, etc.
+fn make_panel_geom() -> jetty_render::PanelGeom {
+    make_panel_geom_tab(0)
 }
 
 /// Build a scrollbar rect that is non-None (requires scroll_max > 0).
@@ -518,7 +524,7 @@ fn click_slider_handle_starts_drag() {
 
 #[test]
 fn click_dropdown_height_track_starts_drag() {
-    let geom = make_panel_geom();
+    let geom = make_panel_geom_tab(2); // Window tab
     let t = &geom.dropdown_track;
     let cx = t.x + t.w / 2.0;
     let cy = t.y + t.h / 2.0;
@@ -528,7 +534,7 @@ fn click_dropdown_height_track_starts_drag() {
 
 #[test]
 fn click_dropdown_width_track_starts_width_drag() {
-    let geom = make_panel_geom();
+    let geom = make_panel_geom_tab(2); // Window tab
     let t = &geom.dropdown_width_track;
     let cx = t.x + t.w / 2.0;
     let cy = t.y + t.h / 2.0;
@@ -538,7 +544,7 @@ fn click_dropdown_width_track_starts_width_drag() {
 
 #[test]
 fn click_dropdown_width_handle_starts_width_drag() {
-    let geom = make_panel_geom();
+    let geom = make_panel_geom_tab(2); // Window tab
     let h = &geom.dropdown_width_handle;
     let cx = h.x + h.w / 2.0;
     let cy = h.y + h.h / 2.0;

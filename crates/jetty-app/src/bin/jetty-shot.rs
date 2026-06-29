@@ -327,6 +327,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::env::var("JETTY_SHOT_PANEL_SHELL")
                     .unwrap_or_else(|_| "System default".to_string())
                     .as_str(),
+                // JETTY_SHOT_PANEL_TAB (0..=3) selects the active settings tab
+                // (test-only; defaults to 0 = "Look").
+                std::env::var("JETTY_SHOT_PANEL_TAB")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0),
             );
             rects.extend(pv.quads);
             // The live "Aa" specimen is drawn at the TRUE UI size via chrome_text
