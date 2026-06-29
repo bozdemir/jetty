@@ -3966,7 +3966,11 @@ impl ApplicationHandler<AppEvent> for App {
                         let _ = w.write_all(&bytes);
                         let _ = w.flush();
                         // Trigger caret flash+pulse on printable keystrokes.
-                        if self.fx.caret_flash_enabled && is_printable_keystroke(&bytes) {
+                        // Arm the shared burst clock when EITHER caret effect is on;
+                        // each consumer is independently gated on its own toggle.
+                        if (self.fx.caret_flash_enabled || self.fx.caret_glow_enabled)
+                            && is_printable_keystroke(&bytes)
+                        {
                             self.caret_anim = Some(std::time::Instant::now());
                             if let Some(w) = &self.window {
                                 w.request_redraw();
@@ -4171,6 +4175,11 @@ impl ApplicationHandler<AppEvent> for App {
                 if caret_t == Some(1.0) {
                     self.caret_anim = None;
                 }
+                // Gate the CPU flash independently: pass None to the text renderer
+                // when flash is disabled so glow-only mode never triggers the
+                // color/scale modulation in text.rs, even if caret_anim is armed.
+                let caret_t_for_flash =
+                    if self.fx.caret_flash_enabled { caret_t } else { None };
                 let (Some(gpu), Some(text), Some(chrome_text), Some(quad)) =
                     (&mut self.gpu, &mut self.text, &mut self.chrome_text, &mut self.quad)
                 else {
@@ -4276,7 +4285,7 @@ impl ApplicationHandler<AppEvent> for App {
                         &snap,
                         false,
                         grid_top + slide_y_offset,
-                        caret_t,
+                        caret_t_for_flash,
                         caret_flash_color,
                     );
                     // Pass 3: the tab bar (translated to its actual y) over the grid.
