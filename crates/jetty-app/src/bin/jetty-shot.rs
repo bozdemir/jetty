@@ -333,6 +333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .ok()
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(0),
+                &jetty_render::EffectsParams::default(),
             );
             rects.extend(pv.quads);
             // The live "Aa" specimen is drawn at the TRUE UI size via chrome_text

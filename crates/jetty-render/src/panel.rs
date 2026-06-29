@@ -1,5 +1,50 @@
 use crate::Rect;
 
+/// Visual-effects parameters forwarded from `App.fx` (the `EffectsConfig`
+/// runtime mirror). Defined here so `jetty-render` (which cannot depend on
+/// `jetty-app`) can receive the full effects state through `build_panel`.
+/// All fields mirror the corresponding `EffectsConfig` fields exactly.
+#[derive(Debug, Clone)]
+pub struct EffectsParams {
+    pub crt_enabled: bool,
+    pub crt_curvature: f32,
+    pub crt_scanline: f32,
+    pub crt_mask: f32,
+    pub crt_bloom: f32,
+    pub crt_chromatic: f32,
+    pub crt_vignette: f32,
+    pub crt_scanline_tint: [f32; 3],
+    pub crt_animate_roll: bool,
+    pub crt_flicker: bool,
+    pub crt_jitter: bool,
+    pub caret_flash_enabled: bool,
+    pub caret_glow_enabled: bool,
+    pub caret_flash_ms: f32,
+    pub caret_flash_color: [f32; 3],
+}
+
+impl Default for EffectsParams {
+    fn default() -> Self {
+        EffectsParams {
+            crt_enabled: false,
+            crt_curvature: 0.30,
+            crt_scanline: 0.50,
+            crt_mask: 0.30,
+            crt_bloom: 0.40,
+            crt_chromatic: 0.20,
+            crt_vignette: 0.40,
+            crt_scanline_tint: [1.0, 1.0, 1.0],
+            crt_animate_roll: false,
+            crt_flicker: false,
+            crt_jitter: false,
+            caret_flash_enabled: true,
+            caret_glow_enabled: false,
+            caret_flash_ms: 130.0,
+            caret_flash_color: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
 /// Hit-testing geometry exposed for the upcoming mouse-interaction task.
 pub struct PanelGeom {
     pub panel: Rect,
@@ -76,6 +121,59 @@ pub struct PanelGeom {
     pub ui_font_scroll_up: Rect,
     /// ▼ UI-font scroll button — increments ui_font_scroll_offset.
     pub ui_font_scroll_down: Rect,
+
+    // ── Effects-tab geometry ──────────────────────────────────────────────────
+    // All rects are OFF (1e6) when the Effects tab is not active.
+    /// "CRT ENABLED" master toggle pill.
+    pub crt_enabled_toggle: Rect,
+    /// CRT curvature slider track and handle.
+    pub crt_curvature_track: Rect,
+    pub crt_curvature_handle: Rect,
+    /// CRT scanline-intensity slider track and handle.
+    pub crt_scanline_track: Rect,
+    pub crt_scanline_handle: Rect,
+    /// CRT shadow-mask slider track and handle.
+    pub crt_mask_track: Rect,
+    pub crt_mask_handle: Rect,
+    /// CRT bloom slider track and handle.
+    pub crt_bloom_track: Rect,
+    pub crt_bloom_handle: Rect,
+    /// CRT chromatic-aberration slider track and handle.
+    pub crt_chromatic_track: Rect,
+    pub crt_chromatic_handle: Rect,
+    /// CRT vignette slider track and handle.
+    pub crt_vignette_track: Rect,
+    pub crt_vignette_handle: Rect,
+    /// CRT scanline-tint RGB mini-sliders — one track+handle per channel.
+    pub crt_tint_r_track: Rect,
+    pub crt_tint_r_handle: Rect,
+    pub crt_tint_g_track: Rect,
+    pub crt_tint_g_handle: Rect,
+    pub crt_tint_b_track: Rect,
+    pub crt_tint_b_handle: Rect,
+    /// CRT animation toggle pills (roll / flicker / jitter), three on one band.
+    pub crt_roll_toggle: Rect,
+    pub crt_flicker_toggle: Rect,
+    pub crt_jitter_toggle: Rect,
+    /// Caret flash-enabled toggle pill.
+    pub caret_flash_toggle: Rect,
+    /// Caret glow-enabled toggle pill.
+    pub caret_glow_toggle: Rect,
+    /// Caret flash-duration slider track and handle (maps 60..=400 ms → 0..1).
+    pub caret_dur_track: Rect,
+    pub caret_dur_handle: Rect,
+    /// Caret flash-color RGB mini-sliders — one track+handle per channel.
+    pub caret_color_r_track: Rect,
+    pub caret_color_r_handle: Rect,
+    pub caret_color_g_track: Rect,
+    pub caret_color_g_handle: Rect,
+    pub caret_color_b_track: Rect,
+    pub caret_color_b_handle: Rect,
+    /// Total pixel height of the Effects tab's content region:
+    /// `last_band_bottom − content_top`. Stored for the scroll task (Task 6).
+    /// Independent of screen size; always 652.0 (14 bands × 44 px pitch + 36 px
+    /// for the last slider handle's bottom offset).
+    pub effects_content_h: f32,
 }
 
 /// Full description of how to draw the settings panel for one frame.
@@ -208,6 +306,10 @@ pub fn build_panel(
     // `active_tab`: 0..=4 — which tab's bands are laid out (see TAB_NAMES). Values
     //   above 4 are clamped to 4. Session-only; not persisted.
     active_tab: usize,
+    // `effects`: visual-effect parameters from the app's runtime `EffectsConfig`
+    //   mirror (`App.fx`). Used on the Effects tab (4) to position widget handles
+    //   and toggle pill states. Ignored on other tabs (bands are at OFF).
+    effects: &EffectsParams,
 ) -> PanelView {
     let active_tab = active_tab.min(4);
 
@@ -285,6 +387,14 @@ pub fn build_panel(
     let (mut t_summon, mut t_winmode, mut t_droph, mut t_dropw, mut t_tabbar, mut t_autohide) =
         (OFF, OFF, OFF, OFF, OFF, OFF);
     let (mut t_shell, mut t_launch) = (OFF, OFF);
+    // Effects-tab band tops (15 bands, 44 px pitch each).
+    // Naming: t_fx_<widget>. OFF when tab 4 is not active.
+    let (mut t_fx_crt_hdr, mut t_fx_crt_en, mut t_fx_curv, mut t_fx_scan,
+         mut t_fx_mask,    mut t_fx_bloom,  mut t_fx_chroma, mut t_fx_vignette,
+         mut t_fx_tint,    mut t_fx_anim,
+         mut t_fx_caret_hdr, mut t_fx_flash, mut t_fx_glow,
+         mut t_fx_dur,    mut t_fx_color) =
+        (OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF, OFF);
     match active_tab {
         0 => {
             t_opacity = content_top;
@@ -309,7 +419,24 @@ pub fn build_panel(
             t_shell = content_top;
             t_launch = content_top + 48.0;
         }
-        4 => { /* Effects: filled in Task 4 */ }
+        4 => {
+            // 15 bands × 44 px pitch, top-to-bottom from content_top.
+            t_fx_crt_hdr  = content_top;                      // band 0: "CRT" section header
+            t_fx_crt_en   = content_top +  1.0 * 44.0;       // band 1: crt_enabled toggle
+            t_fx_curv     = content_top +  2.0 * 44.0;       // band 2: crt_curvature slider
+            t_fx_scan     = content_top +  3.0 * 44.0;       // band 3: crt_scanline slider
+            t_fx_mask     = content_top +  4.0 * 44.0;       // band 4: crt_mask slider
+            t_fx_bloom    = content_top +  5.0 * 44.0;       // band 5: crt_bloom slider
+            t_fx_chroma   = content_top +  6.0 * 44.0;       // band 6: crt_chromatic slider
+            t_fx_vignette = content_top +  7.0 * 44.0;       // band 7: crt_vignette slider
+            t_fx_tint     = content_top +  8.0 * 44.0;       // band 8: crt_scanline_tint RGB
+            t_fx_anim     = content_top +  9.0 * 44.0;       // band 9: roll/flicker/jitter pills
+            t_fx_caret_hdr= content_top + 10.0 * 44.0;      // band 10: "CARET" section header
+            t_fx_flash    = content_top + 11.0 * 44.0;      // band 11: caret_flash_enabled toggle
+            t_fx_glow     = content_top + 12.0 * 44.0;      // band 12: caret_glow_enabled toggle
+            t_fx_dur      = content_top + 13.0 * 44.0;      // band 13: caret_flash_ms slider
+            t_fx_color    = content_top + 14.0 * 44.0;      // band 14: caret_flash_color RGB
+        }
         _ => {
             t_shell = content_top;
             t_launch = content_top + 48.0;
@@ -556,6 +683,108 @@ pub fn build_panel(
     let shell_prev = Rect::rounded(cycle_prev_x, shell_btn_y, 28.0, 28.0, btn_fill, 4.0);
     let shell_next = Rect::rounded(cycle_next_x, shell_btn_y, 28.0, 28.0, btn_fill, 4.0);
 
+    // ── Effects tab (tab 4) widget geometry ───────────────────────────────────
+    // Patterns reused from existing bands:
+    //   • Full-width slider (348 px track): opacity slider pattern (lines above).
+    //   • Toggle pill (56×28, radius 14): autohide_toggle / launch_login_toggle.
+    //   • RGB mini-slider triple: three 108 px tracks + 12 px gaps = 348 px total.
+    //     3×108 + 2×12 = 324 + 24 = 348. Handle: 14×18 (same as full slider).
+    //
+    // When active_tab ≠ 4, all band tops are OFF so every derived rect lands
+    // far offscreen and can never be hit-tested or seen.
+
+    // ── Helper values ──
+    let fx_track_x = px + 16.0;        // left edge of full-width slider track
+    let fx_pill_x  = px + PANEL_W - 16.0 - 56.0; // right-aligned single toggle pill
+
+    // RGB mini-track x positions: R at fx_track_x, G and B offset by 120 px each.
+    //   108 px track + 12 px gap = 120 px per column; 3 × 108 + 2 × 12 = 348. ✓
+    let rgb_r_x = fx_track_x;
+    let rgb_g_x = fx_track_x + 120.0;
+    let rgb_b_x = fx_track_x + 240.0;
+
+    // ── CRT ENABLED toggle (band 1) ──
+    let crt_en_col = if effects.crt_enabled { accent_col } else { btn_fill };
+    let crt_enabled_toggle = Rect::rounded(fx_pill_x, t_fx_crt_en, 56.0, 28.0, crt_en_col, 14.0);
+
+    // ── Macro-like inline for a full-width [0,1] slider ──
+    // Returns (track, fill, handle). Track at band_y+24; handle at band_y+18.
+    macro_rules! fx_slider {
+        ($band_y:expr, $frac:expr) => {{
+            let frac = ($frac as f32).clamp(0.0, 1.0);
+            let track  = Rect::rounded(fx_track_x, $band_y + 24.0, 348.0, 6.0, slider_track_col, 3.0);
+            let fill_w = (frac * (348.0 - 14.0) + 7.0).max(6.0).min(348.0);
+            let fill   = Rect::rounded(fx_track_x, $band_y + 24.0, fill_w, 6.0, accent_fill, 3.0);
+            let hx     = fx_track_x + frac * (348.0 - 14.0);
+            let handle = Rect::rounded(hx, $band_y + 18.0, 14.0, 18.0, accent_col, 4.0);
+            (track, fill, handle)
+        }};
+    }
+
+    // ── Macro-like inline for a 108-px RGB mini-slider ──
+    macro_rules! fx_mini_slider {
+        ($bx:expr, $band_y:expr, $frac:expr) => {{
+            let frac = ($frac as f32).clamp(0.0, 1.0);
+            let track  = Rect::rounded($bx, $band_y + 24.0, 108.0, 6.0, slider_track_col, 3.0);
+            let fill_w = (frac * (108.0 - 14.0) + 7.0).max(6.0).min(108.0);
+            let fill   = Rect::rounded($bx, $band_y + 24.0, fill_w, 6.0, accent_fill, 3.0);
+            let hx     = $bx + frac * (108.0 - 14.0);
+            let handle = Rect::rounded(hx, $band_y + 18.0, 14.0, 18.0, accent_col, 4.0);
+            (track, fill, handle)
+        }};
+    }
+
+    // CRT sliders (bands 2–7): curvature, scanline, mask, bloom, chromatic, vignette.
+    let (crt_curvature_track,  crt_curvature_fill,  crt_curvature_handle)  = fx_slider!(t_fx_curv,     effects.crt_curvature);
+    let (crt_scanline_track,   crt_scanline_fill,   crt_scanline_handle)   = fx_slider!(t_fx_scan,     effects.crt_scanline);
+    let (crt_mask_track,       crt_mask_fill,       crt_mask_handle)       = fx_slider!(t_fx_mask,     effects.crt_mask);
+    let (crt_bloom_track,      crt_bloom_fill,      crt_bloom_handle)      = fx_slider!(t_fx_bloom,    effects.crt_bloom);
+    let (crt_chromatic_track,  crt_chromatic_fill,  crt_chromatic_handle)  = fx_slider!(t_fx_chroma,   effects.crt_chromatic);
+    let (crt_vignette_track,   crt_vignette_fill,   crt_vignette_handle)   = fx_slider!(t_fx_vignette, effects.crt_vignette);
+
+    // CRT scanline tint RGB mini-sliders (band 8).
+    let (crt_tint_r_track, crt_tint_r_fill, crt_tint_r_handle) = fx_mini_slider!(rgb_r_x, t_fx_tint, effects.crt_scanline_tint[0]);
+    let (crt_tint_g_track, crt_tint_g_fill, crt_tint_g_handle) = fx_mini_slider!(rgb_g_x, t_fx_tint, effects.crt_scanline_tint[1]);
+    let (crt_tint_b_track, crt_tint_b_fill, crt_tint_b_handle) = fx_mini_slider!(rgb_b_x, t_fx_tint, effects.crt_scanline_tint[2]);
+
+    // CRT animation toggle pills (band 9): ROLL / FLKR / JITR
+    // Three pills evenly spaced across the 348 px track area:
+    //   3 × 56 px pills + 2 × 90 px gaps = 348 px. ✓
+    let roll_col    = if effects.crt_animate_roll { accent_col } else { btn_fill };
+    let flicker_col = if effects.crt_flicker      { accent_col } else { btn_fill };
+    let jitter_col  = if effects.crt_jitter       { accent_col } else { btn_fill };
+    let crt_roll_toggle    = Rect::rounded(fx_track_x,                t_fx_anim, 56.0, 28.0, roll_col,    14.0);
+    let crt_flicker_toggle = Rect::rounded(fx_track_x + 56.0 + 90.0, t_fx_anim, 56.0, 28.0, flicker_col, 14.0);
+    let crt_jitter_toggle  = Rect::rounded(fx_track_x + 292.0,       t_fx_anim, 56.0, 28.0, jitter_col,  14.0);
+
+    // Caret toggles (bands 11, 12): caret_flash_enabled, caret_glow_enabled.
+    let caret_flash_col = if effects.caret_flash_enabled { accent_col } else { btn_fill };
+    let caret_glow_col  = if effects.caret_glow_enabled  { accent_col } else { btn_fill };
+    let caret_flash_toggle = Rect::rounded(fx_pill_x, t_fx_flash, 56.0, 28.0, caret_flash_col, 14.0);
+    let caret_glow_toggle  = Rect::rounded(fx_pill_x, t_fx_glow,  56.0, 28.0, caret_glow_col,  14.0);
+
+    // Caret flash-duration slider (band 13): maps 60..=400 ms → 0..1.
+    let caret_dur_frac = ((effects.caret_flash_ms - 60.0) / (400.0 - 60.0)).clamp(0.0, 1.0);
+    let (caret_dur_track, caret_dur_fill, caret_dur_handle) = {
+        let frac   = caret_dur_frac;
+        let track  = Rect::rounded(fx_track_x, t_fx_dur + 24.0, 348.0, 6.0, slider_track_col, 3.0);
+        let fill_w = (frac * (348.0 - 14.0) + 7.0).max(6.0).min(348.0);
+        let fill   = Rect::rounded(fx_track_x, t_fx_dur + 24.0, fill_w, 6.0, accent_fill, 3.0);
+        let hx     = fx_track_x + frac * (348.0 - 14.0);
+        let handle = Rect::rounded(hx, t_fx_dur + 18.0, 14.0, 18.0, accent_col, 4.0);
+        (track, fill, handle)
+    };
+
+    // Caret flash-color RGB mini-sliders (band 14).
+    let (caret_color_r_track, caret_color_r_fill, caret_color_r_handle) = fx_mini_slider!(rgb_r_x, t_fx_color, effects.caret_flash_color[0]);
+    let (caret_color_g_track, caret_color_g_fill, caret_color_g_handle) = fx_mini_slider!(rgb_g_x, t_fx_color, effects.caret_flash_color[1]);
+    let (caret_color_b_track, caret_color_b_fill, caret_color_b_handle) = fx_mini_slider!(rgb_b_x, t_fx_color, effects.caret_flash_color[2]);
+
+    // Effects content height: last band bottom − content_top.
+    // Last band (14, caret_flash_color RGB) has handle bottom at +36 from band top.
+    // 14 × 44 + 36 = 616 + 36 = 652 px. Independent of screen size.
+    let effects_content_h: f32 = 14.0 * 44.0 + 36.0; // = 652.0
+
     // --- Build quads in draw order ---
     let mut quads: Vec<Rect> = Vec::new();
     quads.push(dim_rect);
@@ -617,6 +846,28 @@ pub fn build_panel(
     // Shell-picker cycle buttons.
     quads.push(shell_prev);
     quads.push(shell_next);
+
+    // ── Effects-tab quads (all offscreen when tab ≠ 4) ──────────────────────
+    // Draw order per slider band: track → fill → handle (same as opacity slider).
+    quads.push(crt_enabled_toggle);
+    quads.push(crt_curvature_track);  quads.push(crt_curvature_fill);  quads.push(crt_curvature_handle);
+    quads.push(crt_scanline_track);   quads.push(crt_scanline_fill);   quads.push(crt_scanline_handle);
+    quads.push(crt_mask_track);       quads.push(crt_mask_fill);       quads.push(crt_mask_handle);
+    quads.push(crt_bloom_track);      quads.push(crt_bloom_fill);      quads.push(crt_bloom_handle);
+    quads.push(crt_chromatic_track);  quads.push(crt_chromatic_fill);  quads.push(crt_chromatic_handle);
+    quads.push(crt_vignette_track);   quads.push(crt_vignette_fill);   quads.push(crt_vignette_handle);
+    quads.push(crt_tint_r_track);     quads.push(crt_tint_r_fill);     quads.push(crt_tint_r_handle);
+    quads.push(crt_tint_g_track);     quads.push(crt_tint_g_fill);     quads.push(crt_tint_g_handle);
+    quads.push(crt_tint_b_track);     quads.push(crt_tint_b_fill);     quads.push(crt_tint_b_handle);
+    quads.push(crt_roll_toggle);
+    quads.push(crt_flicker_toggle);
+    quads.push(crt_jitter_toggle);
+    quads.push(caret_flash_toggle);
+    quads.push(caret_glow_toggle);
+    quads.push(caret_dur_track);      quads.push(caret_dur_fill);      quads.push(caret_dur_handle);
+    quads.push(caret_color_r_track);  quads.push(caret_color_r_fill);  quads.push(caret_color_r_handle);
+    quads.push(caret_color_g_track);  quads.push(caret_color_g_fill);  quads.push(caret_color_g_handle);
+    quads.push(caret_color_b_track);  quads.push(caret_color_b_fill);  quads.push(caret_color_b_handle);
 
     // Font-size buttons.
     quads.push(font_minus);
@@ -929,6 +1180,80 @@ pub fn build_panel(
     labels.push(("<".to_string(), cycle_prev_x + 9.0, shell_btn_y + 6.0, text_btn));
     labels.push((">".to_string(), cycle_next_x + 9.0, shell_btn_y + 6.0, text_btn));
 
+    // ── Effects-tab labels (all offscreen when tab ≠ 4) ─────────────────────
+    // Section header "CRT" (band 0).
+    labels.push(("CRT".to_string(), px + 16.0, t_fx_crt_hdr, text_header));
+
+    // CRT ENABLED band (band 1) — header + pill ON/OFF label.
+    labels.push(("CRT ENABLED".to_string(), px + 16.0, t_fx_crt_en, text_header));
+    {
+        let (txt, col) = if effects.crt_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
+        labels.push((txt.to_string(), crt_enabled_toggle.x + 16.0, crt_enabled_toggle.y + 6.0, col));
+    }
+
+    // CRT slider bands (2–7): CAPS header + right-aligned "N%" value.
+    macro_rules! fx_slider_label {
+        ($label:expr, $band_y:expr, $val:expr) => {
+            labels.push(($label.to_string(), px + 16.0, $band_y, text_header));
+            let pct = ($val * 100.0).round() as i32;
+            let pct_str = format!("{}%", pct);
+            labels.push((pct_str.clone(), right_x(&pct_str), $band_y, text_main));
+        };
+    }
+    fx_slider_label!("CURVATURE", t_fx_curv,     effects.crt_curvature);
+    fx_slider_label!("SCANLINE",  t_fx_scan,     effects.crt_scanline);
+    fx_slider_label!("MASK",      t_fx_mask,     effects.crt_mask);
+    fx_slider_label!("BLOOM",     t_fx_bloom,    effects.crt_bloom);
+    fx_slider_label!("CHROMATIC", t_fx_chroma,   effects.crt_chromatic);
+    fx_slider_label!("VIGNETTE",  t_fx_vignette, effects.crt_vignette);
+
+    // CRT scanline-tint RGB triple (band 8): section header + "R"/"G"/"B" sub-labels.
+    labels.push(("TINT".to_string(), px + 16.0, t_fx_tint, text_header));
+    labels.push(("R".to_string(), rgb_r_x,        t_fx_tint, text_dim));
+    labels.push(("G".to_string(), rgb_g_x,        t_fx_tint, text_dim));
+    labels.push(("B".to_string(), rgb_b_x,        t_fx_tint, text_dim));
+
+    // CRT animation pills (band 9): header + three pill labels.
+    labels.push(("ANIMATE".to_string(), px + 16.0, t_fx_anim, text_header));
+    {
+        let (rt, rc) = if effects.crt_animate_roll { ("ROLL",  [20u8, 20, 20]) } else { ("ROLL",  text_btn) };
+        let (ft, fc) = if effects.crt_flicker      { ("FLKR",  [20u8, 20, 20]) } else { ("FLKR",  text_btn) };
+        let (jt, jc) = if effects.crt_jitter       { ("JITR",  [20u8, 20, 20]) } else { ("JITR",  text_btn) };
+        labels.push((rt.to_string(), crt_roll_toggle.x    + 8.0, crt_roll_toggle.y    + 6.0, rc));
+        labels.push((ft.to_string(), crt_flicker_toggle.x + 8.0, crt_flicker_toggle.y + 6.0, fc));
+        labels.push((jt.to_string(), crt_jitter_toggle.x  + 8.0, crt_jitter_toggle.y  + 6.0, jc));
+    }
+
+    // Section header "CARET" (band 10).
+    labels.push(("CARET".to_string(), px + 16.0, t_fx_caret_hdr, text_header));
+
+    // CARET FLASH ENABLED toggle (band 11).
+    labels.push(("FLASH".to_string(), px + 16.0, t_fx_flash, text_header));
+    {
+        let (txt, col) = if effects.caret_flash_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
+        labels.push((txt.to_string(), caret_flash_toggle.x + 16.0, caret_flash_toggle.y + 6.0, col));
+    }
+
+    // CARET GLOW ENABLED toggle (band 12).
+    labels.push(("GLOW".to_string(), px + 16.0, t_fx_glow, text_header));
+    {
+        let (txt, col) = if effects.caret_glow_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
+        labels.push((txt.to_string(), caret_glow_toggle.x + 16.0, caret_glow_toggle.y + 6.0, col));
+    }
+
+    // FLASH MS slider (band 13): maps 60..=400 → shows raw ms value.
+    labels.push(("FLASH MS".to_string(), px + 16.0, t_fx_dur, text_header));
+    {
+        let ms_str = format!("{}ms", effects.caret_flash_ms.round() as i32);
+        labels.push((ms_str.clone(), right_x(&ms_str), t_fx_dur, text_main));
+    }
+
+    // CARET flash-color RGB triple (band 14): section header + "R"/"G"/"B" sub-labels.
+    labels.push(("COLOR".to_string(), px + 16.0, t_fx_color, text_header));
+    labels.push(("R".to_string(), rgb_r_x, t_fx_color, text_dim));
+    labels.push(("G".to_string(), rgb_g_x, t_fx_color, text_dim));
+    labels.push(("B".to_string(), rgb_b_x, t_fx_color, text_dim));
+
     // --- PanelGeom for hit-testing ---
     let panel_rect = Rect {
         x: px,
@@ -975,6 +1300,40 @@ pub fn build_panel(
         ui_font_scroll_offset: ui_offset,
         ui_font_scroll_up,
         ui_font_scroll_down,
+        // Effects-tab geometry.
+        crt_enabled_toggle,
+        crt_curvature_track,
+        crt_curvature_handle,
+        crt_scanline_track,
+        crt_scanline_handle,
+        crt_mask_track,
+        crt_mask_handle,
+        crt_bloom_track,
+        crt_bloom_handle,
+        crt_chromatic_track,
+        crt_chromatic_handle,
+        crt_vignette_track,
+        crt_vignette_handle,
+        crt_tint_r_track,
+        crt_tint_r_handle,
+        crt_tint_g_track,
+        crt_tint_g_handle,
+        crt_tint_b_track,
+        crt_tint_b_handle,
+        crt_roll_toggle,
+        crt_flicker_toggle,
+        crt_jitter_toggle,
+        caret_flash_toggle,
+        caret_glow_toggle,
+        caret_dur_track,
+        caret_dur_handle,
+        caret_color_r_track,
+        caret_color_r_handle,
+        caret_color_g_track,
+        caret_color_g_handle,
+        caret_color_b_track,
+        caret_color_b_handle,
+        effects_content_h,
     };
 
     PanelView { quads, labels, geom, ui_specimen_pos }
@@ -1032,6 +1391,7 @@ mod tests {
             CHAR_W_FALLBACK, // char_w (scale-1 default for tests)
             "zsh",           // shell_display
             active_tab,
+            &EffectsParams::default(), // effects (defaults: CRT off, caret flash on)
         )
     }
 
@@ -1124,6 +1484,12 @@ mod tests {
                 tab == 3,
                 "shell_prev visibility wrong on tab {tab}"
             );
+            // crt_enabled_toggle lives on tab 4 only.
+            assert_eq!(
+                is_visible(&g.crt_enabled_toggle),
+                tab == 4,
+                "crt_enabled_toggle visibility wrong on tab {tab}"
+            );
         }
     }
 
@@ -1209,8 +1575,22 @@ mod tests {
             ],
             // Tab 3 "Shell": shell cycler, launch toggle.
             vec![|g| g.shell_prev, |g| g.launch_login_toggle],
-            // Tab 4 "Effects": no widgets yet (Task 4).
-            vec![],
+            // Tab 4 "Effects": CRT-section bands (0–9) fit within the 560 px panel
+            // at 1920×1080 (py=260, content_top=360, panel bottom=820).
+            // Caret bands (11–14) overflow past 820 px — that is expected and
+            // handled by the scroll task (Task 6). Only the CRT bands are listed
+            // here so the "fits within panel" assertion holds.
+            vec![
+                |g: &PanelGeom| g.crt_enabled_toggle,   // band 1
+                |g: &PanelGeom| g.crt_curvature_track,  // band 2
+                |g: &PanelGeom| g.crt_scanline_track,   // band 3
+                |g: &PanelGeom| g.crt_mask_track,       // band 4
+                |g: &PanelGeom| g.crt_bloom_track,      // band 5
+                |g: &PanelGeom| g.crt_chromatic_track,  // band 6
+                |g: &PanelGeom| g.crt_vignette_track,   // band 7
+                |g: &PanelGeom| g.crt_tint_r_track,     // band 8 (RGB triple – leftmost)
+                |g: &PanelGeom| g.crt_roll_toggle,      // band 9 (leftmost pill)
+            ],
         ];
 
         for (tab, reps) in representatives.iter().enumerate() {
@@ -1269,7 +1649,12 @@ mod tests {
                 "DROPDOWN WIDTH", "AUTO-HIDE ON FOCUS LOSS",
             ],
             &["SHELL", "LAUNCH AT LOGIN"],
-            &[], // Tab 4 "Effects": no CAPS headers yet (widgets land in Task 4).
+            // Tab 4 "Effects": section headers + every widget CAPS label.
+            &[
+                "CRT", "CRT ENABLED", "CURVATURE", "SCANLINE", "MASK",
+                "BLOOM", "CHROMATIC", "VIGNETTE", "TINT", "ANIMATE",
+                "CARET", "FLASH", "GLOW", "FLASH MS", "COLOR",
+            ],
         ];
         for (tab, headers) in expected.iter().enumerate() {
             let pv = panel_tab(1920, 1080, tab);

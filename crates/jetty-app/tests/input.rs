@@ -485,6 +485,7 @@ fn make_panel_geom_tab(active_tab: usize) -> jetty_render::PanelGeom {
         0.0, 0.0, &theme, 9.8,
         "System default", // shell_display
         active_tab,
+        &jetty_render::EffectsParams::default(),
     )
     .geom
 }

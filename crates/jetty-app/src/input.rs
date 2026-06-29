@@ -871,6 +871,7 @@ mod tests {
             0.0, 0.0, &theme, 9.8, // char_w scale-1 fallback
             "System default", // shell_display
             active_tab,
+            &jetty_render::EffectsParams::default(),
         )
     }
 

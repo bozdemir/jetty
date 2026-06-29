@@ -1795,6 +1795,23 @@ impl App {
     /// (the panel is centred to fill the fixed-size window; no drag offset).
     fn settings_panel_view(&self, w: u32, h: u32) -> jetty_render::PanelView {
         let theme = self.current_theme();
+        let fx = jetty_render::EffectsParams {
+            crt_enabled: self.fx.crt_enabled,
+            crt_curvature: self.fx.crt_curvature,
+            crt_scanline: self.fx.crt_scanline,
+            crt_mask: self.fx.crt_mask,
+            crt_bloom: self.fx.crt_bloom,
+            crt_chromatic: self.fx.crt_chromatic,
+            crt_vignette: self.fx.crt_vignette,
+            crt_scanline_tint: self.fx.crt_scanline_tint,
+            crt_animate_roll: self.fx.crt_animate_roll,
+            crt_flicker: self.fx.crt_flicker,
+            crt_jitter: self.fx.crt_jitter,
+            caret_flash_enabled: self.fx.caret_flash_enabled,
+            caret_glow_enabled: self.fx.caret_glow_enabled,
+            caret_flash_ms: self.fx.caret_flash_ms,
+            caret_flash_color: self.fx.caret_flash_color,
+        };
         jetty_render::build_panel(
             w, h, self.opacity, self.theme_idx, self.font_logical,
             &self.font_families, &self.font_family, self.font_scroll_offset,
@@ -1810,6 +1827,7 @@ impl App {
             0.0, 0.0, &theme, self.settings_char_w(),
             &self.shell_display(),
             self.settings_tab,
+            &fx,
         )
     }
 
@@ -1846,6 +1864,24 @@ impl App {
         // panel surface (same accent the panel chrome uses for handles/selection).
         let accent = theme.palette[4];
         let specimen_rgb = [accent[0], accent[1], accent[2]];
+        // Clone Effects params before the mutable borrow of the render stack below.
+        let fx = jetty_render::EffectsParams {
+            crt_enabled: self.fx.crt_enabled,
+            crt_curvature: self.fx.crt_curvature,
+            crt_scanline: self.fx.crt_scanline,
+            crt_mask: self.fx.crt_mask,
+            crt_bloom: self.fx.crt_bloom,
+            crt_chromatic: self.fx.crt_chromatic,
+            crt_vignette: self.fx.crt_vignette,
+            crt_scanline_tint: self.fx.crt_scanline_tint,
+            crt_animate_roll: self.fx.crt_animate_roll,
+            crt_flicker: self.fx.crt_flicker,
+            crt_jitter: self.fx.crt_jitter,
+            caret_flash_enabled: self.fx.caret_flash_enabled,
+            caret_glow_enabled: self.fx.caret_glow_enabled,
+            caret_flash_ms: self.fx.caret_flash_ms,
+            caret_flash_color: self.fx.caret_flash_color,
+        };
         let (Some(gpu), Some(text), Some(quad), Some(specimen)) = (
             &mut self.settings_gpu,
             &mut self.settings_text,
@@ -1865,6 +1901,7 @@ impl App {
             0.0, 0.0, &theme, char_w,
             &shell_display,
             settings_tab,
+            &fx,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
             // Clear the window background to the panel border color, then paint the
