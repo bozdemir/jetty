@@ -88,7 +88,7 @@ cargo build --release
 
 Renders through **Metal**. Summon with **F9** — on Mac keyboards where the function-row keys default to media actions, press `fn`+`F9` so the OS delivers F9. You can also bind `jetty --toggle` to a shortcut via a launcher (the first press launches JeTTY; each subsequent press toggles the running instance via the single-instance socket). A locally built binary is not quarantined, so there's no Gatekeeper prompt. *(Prebuilt `.app` / `.dmg` are on the [roadmap](#-roadmap).)*
 
-### macOS (.app bundle with Dock icon)
+### 🍎 macOS (.app bundle with Dock icon)
 
 ```bash
 cargo build --release

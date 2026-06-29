@@ -260,19 +260,20 @@ pub struct App {
     /// Tier-B FocusPull summon effect (samples the offscreen frame).
     focus: Option<jetty_render::FocusPull>,
     /// CRT post-effect: when enabled the whole scene is rendered to `offscreen`
-    /// and this pass blits it to the surface (passthrough for now). Built in
-    /// `resumed` with the surface format; `None` until then.
+    /// and this pass applies the full CRT effect pipeline, writing to the surface.
+    /// Built in `resumed` with the surface format; `None` until then.
     crt: Option<jetty_render::Crt>,
     /// Optional GPU caret glow/ripple pass (Task 12). Additive halo + expanding
     /// ring around the cursor cell on each keystroke burst. Built in `resumed`
     /// with the surface format; dispatched only when `fx.caret_glow_enabled` AND
     /// `caret_anim.is_some()` AND the cursor is visible — zero cost otherwise.
     caret_fx: Option<jetty_render::CaretFx>,
-    /// Surface-sized offscreen color texture used ONLY while a Tier-B effect is
-    /// summoning: the scene is rendered into this, then the effect samples it and
-    /// writes the displaced/blurred result to the surface. `None` until built in
-    /// `resumed`; re-created on `Resized`. The normal (Tier-A / no-summon) hot
-    /// path never touches it — it renders straight to the surface as before.
+    /// Surface-sized offscreen color texture used while a Tier-B effect is
+    /// summoning OR while CRT is enabled: the scene is rendered into this, then
+    /// the effect (Liquid/Focus) or the CRT pass samples it and writes to the
+    /// surface. `None` until built in `resumed`; re-created on `Resized`. The
+    /// normal (Tier-A / no-summon / CRT-off) hot path renders straight to the
+    /// surface as before.
     offscreen: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// The currently selected window-summon reveal effect.
     summon_effect: SummonEffect,
@@ -2208,7 +2209,7 @@ impl App {
             input::MouseAction::StartCaretDurDrag => {
                 self.active_fx_drag = Some(FxSlider::CaretDur);
                 let frac = self.fx_frac_from_cursor(cx, &geom.caret_dur_track);
-                self.fx.caret_flash_ms = (60.0 + frac * 340.0).clamp(60.0, 400.0);
+                self.fx.caret_flash_ms = 60.0 + frac * 340.0;
             }
             input::MouseAction::StartTintRDrag => {
                 self.active_fx_drag = Some(FxSlider::TintR);
@@ -2348,7 +2349,7 @@ impl App {
                                 FxSlider::CrtVignette  => self.fx.crt_vignette  = self.fx_frac_from_cursor(cx, &pv.geom.crt_vignette_track),
                                 FxSlider::CaretDur => {
                                     let frac = self.fx_frac_from_cursor(cx, &pv.geom.caret_dur_track);
-                                    self.fx.caret_flash_ms = (60.0 + frac * 340.0).clamp(60.0, 400.0);
+                                    self.fx.caret_flash_ms = 60.0 + frac * 340.0;
                                 }
                                 FxSlider::TintR => self.fx.crt_scanline_tint[0] = self.fx_frac_from_cursor(cx, &pv.geom.crt_tint_r_track),
                                 FxSlider::TintG => self.fx.crt_scanline_tint[1] = self.fx_frac_from_cursor(cx, &pv.geom.crt_tint_g_track),
@@ -2724,7 +2725,8 @@ impl ApplicationHandler<AppEvent> for App {
             self.phosphor = Some(jetty_render::PhosphorIgnition::new(&g.device, g.format));
             // Tier-B effects + their surface-sized offscreen scene texture. The
             // texture is allocated up front (cheap) but only WRITTEN/SAMPLED while
-            // a Tier-B effect is summoning; Tier-A and normal frames never use it.
+            // a Tier-B effect is summoning or CRT is enabled; Tier-A and normal
+            // (CRT-off) frames never use it.
             self.liquid = Some(jetty_render::LiquidDrop::new(&g.device, g.format));
             self.focus = Some(jetty_render::FocusPull::new(&g.device, g.format));
             // CRT post-effect (passthrough for now). Same surface format as the
@@ -4473,10 +4475,9 @@ impl ApplicationHandler<AppEvent> for App {
                     // Tier-B summon it's the offscreen frame, so the rounded corners
                     // are baked in before the effect samples it.
                     //
-                    // When CRT is active (crt_active) the CRT pass will own the
-                    // corners (a later task), so SKIP the mask here — for now this
-                    // means corners are not rounded while CRT is on (accepted: the
-                    // CRT pass is a passthrough this task). During a Tier-B summon
+                    // When CRT is active (crt_active) the CRT pass owns the
+                    // rounded corners via its own alpha compositing, so SKIP the
+                    // mask here to avoid double-rounding. During a Tier-B summon
                     // CRT is bypassed (crt_active is false), so the mask still runs
                     // exactly as today and the summon path is unchanged.
                     if let (Some(mask), false) = (corner_mask, crt_active) {
@@ -4599,9 +4600,12 @@ impl ApplicationHandler<AppEvent> for App {
                     //   CRT OFF:  scene_view == &view (surface) → glow goes directly
                     //             onto the surface after the corner mask above.
                     //             Alpha=0 output keeps corner transparency intact.
-                    //   Tier-B:   scene_view == offscreen (Tier-B owns it) → glow is
-                    //             baked into the offscreen; the Tier-B effect displaces/
-                    //             blurs it along with the rest of the scene.
+                    //   Tier-B:   scene_view == offscreen (Tier-B owns it). NOTE: by
+                    //             this point the Tier-B effect has ALREADY composited
+                    //             the offscreen onto the surface; the glow is written
+                    //             to the now-unused offscreen and is NOT presented.
+                    //             Silently absent during a Tier-B summon — safe but
+                    //             not visible.
                     //
                     // No new redraw scheduling — the caret_anim guard in the self-drive
                     // block above already keeps frames coming while the burst is live.
@@ -4610,6 +4614,7 @@ impl ApplicationHandler<AppEvent> for App {
                             if snap.cursor_visible
                                 && snap.cursor_col < snap.cols
                                 && snap.cursor_row < snap.rows
+                                && t_val < 1.0
                             {
                                 // Cursor cell centre in physical pixels. x and y both
                                 // start from (0,0) at the top-left of the viewport,
@@ -4644,8 +4649,9 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     // CRT post-pass: when CRT is active (enabled AND not bypassed by
                     // an active Tier-B summon — Tier-B owns the offscreen this frame)
-                    // blit the fully-composited offscreen scene through the CRT pass
-                    // to the surface `view`. Passthrough (identity) for now. `crt`
+                    // run the full CRT effect pipeline (curvature, scanlines, bloom,
+                    // chromatic aberration, vignette, roll/flicker/jitter, rounded
+                    // corners) sampling the offscreen onto the surface `view`. `crt`
                     // and `offscreen` are both guaranteed present when `crt_active`
                     // (built in `resumed`; offscreen alloc'd above when crt_enabled),
                     // but guard defensively. src=offscreen, dst=surface — never

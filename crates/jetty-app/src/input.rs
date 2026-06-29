@@ -328,8 +328,8 @@ pub enum MouseAction {
     StartCaretColorGDrag,
     /// User pressed on the caret color B-channel mini-slider — start drag.
     StartCaretColorBDrag,
-    /// User clicked one of the 4 settings tab labels — switch the active tab.
-    /// The index is 0..=3 (Look / Fonts / Window / Shell).
+    /// User clicked one of the 5 settings tab labels — switch the active tab.
+    /// The index is 0..=4 (Look / Fonts / Window / Shell / Effects).
     SetSettingsTab(usize),
     /// User pressed on the title bar (not on any widget) — start dialog drag.
     StartDialogDrag,

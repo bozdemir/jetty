@@ -367,12 +367,13 @@ impl Crt {
         }
     }
 
-    /// Run the Crt pass: sample `src` (the offscreen rendered scene) and write
-    /// the result into `dst` (the surface). Currently a passthrough (identity
-    /// blit); real CRT effects are layered on in subsequent tasks.
+    /// Run the full CRT post-pass: sample `src` (the offscreen rendered scene)
+    /// and write the result into `dst` (the surface), applying curvature warp,
+    /// scanlines, shadow-mask, bloom, chromatic aberration, vignette, optional
+    /// roll/flicker/jitter animation, and rounded-corner alpha compositing.
     ///
     /// `width` and `height` are the physical pixel dimensions; they are written
-    /// into the uniform for use by future shader stages.
+    /// into the uniform as the pass resolution.
     #[allow(clippy::too_many_arguments)]
     pub fn apply(
         &self,

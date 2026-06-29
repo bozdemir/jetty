@@ -568,17 +568,20 @@ impl TextLayer {
                 if let Some(t) = caret_t {
                     // ease-out quadratic: fast rise, slow finish
                     let e = 1.0 - (1.0 - t) * (1.0 - t);
-                    // Color: lerp cursor_rgb → caret_flash_color by e
+                    // bump = 4·e·(1−e): rises to 1 at e=0.5, returns to 0 at e=1.
+                    // Both color and scale use the same bump so the color returns
+                    // to cursor_rgb by t=1 (no snap at the end of the burst).
+                    let bump = 4.0 * e * (1.0 - e);
+                    // Color: lerp cursor_rgb → caret_flash_color by bump
                     let [fr, fg, fb] = caret_flash_color;
                     let lerp_ch = |base: u8, target: f32, frac: f32| -> u8 {
                         let b = base as f32 / 255.0;
                         ((b + (target - b) * frac) * 255.0).round().clamp(0.0, 255.0) as u8
                     };
-                    let r = lerp_ch(cr, fr, e);
-                    let g = lerp_ch(cg, fg, e);
-                    let b = lerp_ch(cb, fb, e);
-                    // Scale: bump = 4·e·(1−e), peaks at e=0.5 (~1.15×), returns to 1 at e=1
-                    let bump = 4.0 * e * (1.0 - e);
+                    let r = lerp_ch(cr, fr, bump);
+                    let g = lerp_ch(cg, fg, bump);
+                    let b = lerp_ch(cb, fb, bump);
+                    // Scale: peaks at bump=1 (~1.15×), returns to 1 at bump=0 (t=1)
                     let scale = 1.0 + 0.15 * bump;
                     // Keep glyph centered on its cell by offsetting origin inward
                     // by half of the extra width/height the scaling adds.

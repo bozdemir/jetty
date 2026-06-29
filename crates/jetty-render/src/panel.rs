@@ -297,7 +297,7 @@ const _: () = assert!(CHIP_NAMES.len() == jetty_core::theme::PRESETS.len());
 /// a user drag offset (`dx`, `dy`) added to the centered position so the dialog
 /// can be moved. The panel is clamped to remain fully on-screen.
 ///
-/// `active_tab` (0..=3) selects which group of bands is laid out; every other
+/// `active_tab` (0..=4) selects which group of bands is laid out; every other
 /// tab's widgets are positioned offscreen so hit-tests can never match them.
 ///
 /// `char_w` is the measured physical-pixel advance of one chrome-font character
