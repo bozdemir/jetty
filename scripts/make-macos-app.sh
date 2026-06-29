@@ -10,6 +10,12 @@
 set -e
 cd "$(dirname "$0")/.."
 
+command -v sips >/dev/null 2>&1 || { echo "error: sips not found (macOS only)"; exit 1; }
+command -v iconutil >/dev/null 2>&1 || { echo "error: iconutil not found (macOS only)"; exit 1; }
+[ -f assets/icons/jetty-256.png ] || { echo "error: assets/icons/jetty-256.png missing"; exit 1; }
+
+VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1')"
+
 BIN=target/release/jetty
 [ -x "$BIN" ] || { echo "building release binary…"; cargo build --release --bin jetty; }
 
@@ -29,8 +35,9 @@ for s in 16 32 128 256 512; do
   sips -z "$d" "$d"     "$SRC" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/jetty.icns"
+[ -f "$APP/Contents/Resources/jetty.icns" ] || { echo "error: .icns not generated"; exit 1; }
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -40,8 +47,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.bozdemir.jetty</string>
   <key>CFBundleExecutable</key><string>jetty</string>
   <key>CFBundleIconFile</key><string>jetty</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>10.13</string>
   <key>NSHighResolutionCapable</key><true/>

@@ -88,6 +88,16 @@ cargo build --release
 
 Renders through **Metal**. Summon with **F9** — on Mac keyboards where the function-row keys default to media actions, press `fn`+`F9` so the OS delivers F9. You can also bind `jetty --toggle` to a shortcut via a launcher (the first press launches JeTTY; each subsequent press toggles the running instance via the single-instance socket). A locally built binary is not quarantined, so there's no Gatekeeper prompt. *(Prebuilt `.app` / `.dmg` are on the [roadmap](#-roadmap).)*
 
+### macOS (.app bundle with Dock icon)
+
+```bash
+cargo build --release
+sh scripts/make-macos-app.sh      # builds JeTTY.app with the Dock/Finder icon
+open JeTTY.app                     # run the bundle, NOT ./target/release/jetty
+```
+
+> **Note:** the bare binary cannot show a Dock icon on macOS (winit limitation); the `.app` bundle is required. If the icon appears stale in the Dock, run `killall Dock` once to flush the icon cache.
+
 ### 🐧 Linux — one-line installer (prebuilt, no toolchain)
 
 ```bash
