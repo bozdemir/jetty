@@ -285,6 +285,10 @@ pub enum MouseAction {
     ToggleFocusAutoHide,
     /// User clicked the "Launch at login" toggle pill (bottom band).
     ToggleLaunchAtLogin,
+    /// User clicked the shell-picker "‹" button — cycle to the previous shell.
+    CycleShellPrev,
+    /// User clicked the shell-picker "›" button — cycle to the next shell.
+    CycleShellNext,
     /// User pressed on the title bar (not on any widget) — start dialog drag.
     StartDialogDrag,
     /// User clicked inside the panel but not on any widget — swallow the event.
@@ -389,6 +393,13 @@ pub fn decide_mouse_press(
         // Launch-at-login toggle pill (bottom band).
         if point_in(&g.launch_login_toggle, cx, cy) {
             return MouseAction::ToggleLaunchAtLogin;
+        }
+        // Shell-picker cycle buttons (bottom-most band).
+        if point_in(&g.shell_prev, cx, cy) {
+            return MouseAction::CycleShellPrev;
+        }
+        if point_in(&g.shell_next, cx, cy) {
+            return MouseAction::CycleShellNext;
         }
         // Font-family list rows.
         for (i, row) in g.font_rows.iter().enumerate() {
@@ -847,6 +858,7 @@ mod tests {
             false, // launch_at_login
             18.0, &ui, "", 0,
             0.0, 0.0, &theme, 9.8, // char_w scale-1 fallback
+            "System default", // shell_display
         )
     }
 
@@ -888,6 +900,14 @@ mod tests {
             decide_mouse_press(Some(g), None, r2.x + 4.0, r2.y + r2.h / 2.0),
             MouseAction::SetUiFont(g.ui_font_scroll_offset + 2),
         );
+    }
+
+    #[test]
+    fn shell_cycle_buttons_hit_test() {
+        let pv = ui_panel();
+        let g = &pv.geom;
+        assert_eq!(click_rect(g, &g.shell_prev), MouseAction::CycleShellPrev);
+        assert_eq!(click_rect(g, &g.shell_next), MouseAction::CycleShellNext);
     }
 
     #[test]

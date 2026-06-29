@@ -483,6 +483,7 @@ fn make_panel_geom() -> jetty_render::PanelGeom {
         false, // launch_at_login
         16.0, &ui_families, "", 0,
         0.0, 0.0, &theme, 9.8,
+        "System default", // shell_display
     )
     .geom
 }

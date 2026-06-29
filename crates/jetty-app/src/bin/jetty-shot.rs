@@ -322,6 +322,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 panel_dy,
                 terminal.theme(),
                 chrome_char_w,
+                // JETTY_SHOT_PANEL_SHELL sets the SHELL band's display name
+                // (test-only; defaults to "System default").
+                std::env::var("JETTY_SHOT_PANEL_SHELL")
+                    .unwrap_or_else(|_| "System default".to_string())
+                    .as_str(),
             );
             rects.extend(pv.quads);
             // The live "Aa" specimen is drawn at the TRUE UI size via chrome_text

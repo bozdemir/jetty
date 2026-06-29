@@ -928,6 +928,38 @@ impl App {
         }
     }
 
+    /// Display name for the SHELL cycler band: "System default" for the empty
+    /// (auto-detect) selection, else the basename of the configured shell path.
+    fn shell_display(&self) -> String {
+        shell_display_name(&self.shell)
+    }
+
+    /// Cycle the selected shell. The option list is `["", ...detect_shells()]`
+    /// (index 0 = "System default" = auto-detect). Finds the current selection
+    /// (defaulting to index 0 when `self.shell` is empty or no longer present),
+    /// steps with wraparound, persists, and redraws. New tabs pick the change up
+    /// immediately via `opt_shell()`; existing tabs/shells are untouched.
+    fn cycle_shell(&mut self, forward: bool) {
+        let mut options: Vec<String> = Vec::new();
+        options.push(String::new()); // index 0 = System default
+        options.extend(detect_shells());
+        let cur = options
+            .iter()
+            .position(|s| s == &self.shell)
+            .unwrap_or(0);
+        let n = options.len();
+        let next = if forward {
+            (cur + 1) % n
+        } else {
+            (cur + n - 1) % n
+        };
+        self.shell = options[next].clone();
+        self.persist();
+        if let Some(w) = &self.settings_window {
+            w.request_redraw();
+        }
+    }
+
     /// Spawn a new tab sized to the current grid, themed like the others, make it
     /// active, and redraw. The new PTY shares the same wake proxy so one
     /// `AppEvent::Wake` drains every tab.
@@ -1765,6 +1797,7 @@ impl App {
             self.ui_font_logical, &self.ui_font_families, &self.ui_font_family,
             self.ui_font_scroll_offset,
             0.0, 0.0, &theme, self.settings_char_w(),
+            &self.shell_display(),
         )
     }
 
@@ -1791,6 +1824,7 @@ impl App {
         let ui_family = self.ui_font_family.clone();
         let ui_font_logical = self.ui_font_logical;
         let ui_font_scroll_offset = self.ui_font_scroll_offset;
+        let shell_display = self.shell_display();
         let theme = self.current_theme();
         // Panel labels use the SETTINGS (capped) layer advance so right-align /
         // truncation match the layer that draws them.
@@ -1816,6 +1850,7 @@ impl App {
             launch_at_login,
             ui_font_logical, &ui_families, &ui_family, ui_font_scroll_offset,
             0.0, 0.0, &theme, char_w,
+            &shell_display,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
             // Clear the window background to the panel border color, then paint the
@@ -1952,6 +1987,12 @@ impl App {
             input::MouseAction::TabBarPrev | input::MouseAction::TabBarNext => {
                 // Only two positions, so prev and next both toggle.
                 self.set_tab_bar_bottom(!self.tab_bar_bottom);
+            }
+            input::MouseAction::CycleShellPrev => {
+                self.cycle_shell(false);
+            }
+            input::MouseAction::CycleShellNext => {
+                self.cycle_shell(true);
             }
             input::MouseAction::StartDropdownDrag => {
                 // No-op in Center mode (the slider is grayed/disabled there).
@@ -3119,6 +3160,8 @@ impl ApplicationHandler<AppEvent> for App {
                     | input::MouseAction::StartDropdownWidthDrag
                     | input::MouseAction::ToggleFocusAutoHide
                     | input::MouseAction::ToggleLaunchAtLogin
+                    | input::MouseAction::CycleShellPrev
+                    | input::MouseAction::CycleShellNext
                     | input::MouseAction::StartDialogDrag
                     | input::MouseAction::ConsumePanel => {}
                     input::MouseAction::StartScrollbarDrag { grab_dy } => {
@@ -4256,6 +4299,73 @@ fn set_launch_at_login(enabled: bool) {
             eprintln!("launch-at-login: could not remove {}: {e}", path.display());
         }
     }
+}
+
+/// Display name for a `shell` config value: "System default" for the empty
+/// (auto-detect) selection, else the file basename of the path (e.g. "zsh").
+fn shell_display_name(shell: &str) -> String {
+    if shell.is_empty() {
+        "System default".to_string()
+    } else {
+        std::path::Path::new(shell)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| shell.to_string())
+    }
+}
+
+/// Detect the login shells installed on the system, POSIX-style.
+///
+/// Reads `/etc/shells` (the standard, desktop-environment-INDEPENDENT registry
+/// of valid login shells): keeps lines starting with `/`, trims whitespace,
+/// skips comments (`#`) and blanks, drops paths that don't exist on disk, and
+/// dedups by file basename (so `/bin/zsh` and `/usr/bin/zsh` collapse to one —
+/// first occurrence wins). If `/etc/shells` is missing/empty, falls back to
+/// whichever common shells exist. Returns absolute paths.
+fn detect_shells() -> Vec<String> {
+    use std::path::Path;
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new(); // basenames already added
+    if let Ok(contents) = std::fs::read_to_string("/etc/shells") {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || !line.starts_with('/') {
+                continue;
+            }
+            let path = Path::new(line);
+            if !path.exists() {
+                continue;
+            }
+            let base = match path.file_name().and_then(|s| s.to_str()) {
+                Some(b) => b.to_string(),
+                None => continue,
+            };
+            if seen.iter().any(|s| s == &base) {
+                continue; // dedup by basename, first occurrence wins
+            }
+            seen.push(base);
+            out.push(line.to_string());
+        }
+    }
+    if out.is_empty() {
+        // No /etc/shells (or nothing usable): fall back to whichever of these
+        // common shells actually exist on disk.
+        for cand in ["/usr/bin/bash", "/usr/bin/zsh", "/usr/bin/fish", "/bin/bash"] {
+            if Path::new(cand).exists() {
+                let base = Path::new(cand)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !seen.iter().any(|s| s == &base) {
+                    seen.push(base);
+                    out.push(cand.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Scrollbar thumb color derived from the active theme: theme fg at alpha 160.

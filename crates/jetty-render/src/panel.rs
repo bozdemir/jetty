@@ -52,6 +52,10 @@ pub struct PanelGeom {
     pub autohide_toggle: Rect,
     /// "Launch at login" toggle pill (bottom band, below the THEME cards).
     pub launch_login_toggle: Rect,
+    /// Shell-picker "‹" (previous) cycle button (bottom-most band).
+    pub shell_prev: Rect,
+    /// Shell-picker "›" (next) cycle button (bottom-most band).
+    pub shell_next: Rect,
     // ── UI (chrome) FONT section ──────────────────────────────────────────────
     /// UI-font-size decrement button ("−").
     pub ui_font_minus: Rect,
@@ -123,9 +127,14 @@ pub(crate) const CHAR_W_FALLBACK: f32 = 9.8;
 /// The "LAUNCH AT LOGIN" toggle band was then appended at the very BOTTOM, 12px
 /// below the theme-card grid (py+1068..py+1096), so NO existing element moves. It
 /// fits inside the ~46px slack the panel already had below the cards, so PANEL_H
-/// stays 1102 (= band bottom py+1096 + 6px margin); no growth was required.
+/// was 1102 (= band bottom py+1096 + 6px margin); no growth was required.
+///
+/// The "SHELL" cycler band (‹ name › like WINDOW MODE) was then appended below
+/// LAUNCH AT LOGIN, 12px under its bottom (py+1096): band at py+1108..py+1136
+/// (h=28), so PANEL_H grew 1102→1142 (= band bottom py+1136 + 6px margin). NO
+/// existing element moves.
 pub const PANEL_W: f32 = 380.0;
-pub const PANEL_H: f32 = 1102.0;
+pub const PANEL_H: f32 = 1142.0;
 
 /// Vertical size of the inserted "UI FONT" section. THEME + cards (everything
 /// below the terminal FONT list) shift down by exactly this. Keeping it a single
@@ -183,6 +192,10 @@ pub fn build_panel(
     dy: f32,
     theme: &jetty_core::Theme,
     char_w: f32,
+    // `shell_display`: the basename of the selected shell (e.g. "zsh"), or
+    //   "System default" when the `shell` config key is empty. Drives the SHELL
+    //   cycler band's centered name, mirroring `window_mode_name`.
+    shell_display: &str,
 ) -> PanelView {
 
     // --- Theme-derived panel chrome colors ---
@@ -260,8 +273,9 @@ pub fn build_panel(
     //  section before THEME). Real positions: "THEME" label at py+900; cards
     //  py+920..py+1056 (3 rows).
     //  py+1068 .. py+1096  Launch-at-login band (CAPS label + toggle pill at py+1068, h=28)
-    //  py+1096..py+1102   6px bottom margin
-    //  PANEL_H = 1096 + 6 = 1102  (the new band fit in the pre-existing slack)
+    //  py+1108 .. py+1136  Shell band (CAPS label + ‹ name › cycler at py+1108, h=28)
+    //  py+1136..py+1142   6px bottom margin
+    //  PANEL_H = 1136 + 6 = 1142
     //  (PANEL_W/PANEL_H are module-level pub consts above)
 
     // Center, then apply the user drag offset, then clamp to screen edges.
@@ -506,6 +520,15 @@ pub fn build_panel(
     let launch_login_toggle =
         Rect::rounded(px + PANEL_W - 16.0 - 56.0, py + 1068.0, 56.0, 28.0, launch_login_pill_col, 14.0);
 
+    // --- Shell band (py+1108 .. py+1136), bottom-most band ---
+    // CAPS label + ‹ name › cycler, MIRRORING the SUMMON EFFECT / WINDOW MODE
+    // bands exactly (same ‹/› button rects, same name-centering). Placed 12px
+    // below the launch-at-login band (bottom py+1096) so NO existing element
+    // moves. Button bottom py+1136 → PANEL_H = 1136 + 6 = 1142.
+    let shell_btn_y = py + 1108.0;
+    let shell_prev = Rect::rounded(summon_prev_x, shell_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let shell_next = Rect::rounded(summon_next_x, shell_btn_y, 28.0, 28.0, btn_fill, 4.0);
+
     // --- Build quads in draw order ---
     // Order: dim, border, bg, buttons, filled-track portions, tracks, handles,
     //        chip border highlight, chip fills, font-family rows.
@@ -548,6 +571,10 @@ pub fn build_panel(
 
     // Launch-at-login toggle pill (bottom band).
     quads.push(launch_login_toggle);
+
+    // Shell-picker cycle buttons (bottom-most band).
+    quads.push(shell_prev);
+    quads.push(shell_next);
 
     // Font-size buttons.
     quads.push(font_minus);
@@ -863,6 +890,17 @@ pub fn build_panel(
         launch_pill_col,
     ));
 
+    // SHELL band (py+1108) — CAPS header with a ‹ name › cycler, mirroring the
+    // SUMMON EFFECT / WINDOW MODE bands. Shell name centered between the ‹ / ›
+    // buttons; CAPS label aligned with the name baseline (btn_y + 6).
+    labels.push(("SHELL".to_string(), px + 16.0, shell_btn_y + 6.0, text_header));
+    {
+        let (shown, name_x) = center_cycle(shell_display);
+        labels.push((shown, name_x, shell_btn_y + 6.0, text_main));
+    }
+    labels.push(("<".to_string(), summon_prev_x + 9.0, shell_btn_y + 6.0, text_btn));
+    labels.push((">".to_string(), summon_next_x + 9.0, shell_btn_y + 6.0, text_btn));
+
     // --- PanelGeom for hit-testing ---
     let panel_rect = Rect {
         x: px,
@@ -899,6 +937,8 @@ pub fn build_panel(
         dropdown_width_handle,
         autohide_toggle,
         launch_login_toggle,
+        shell_prev,
+        shell_next,
         ui_font_minus,
         ui_font_plus,
         ui_font_reset,
@@ -961,17 +1001,19 @@ mod tests {
             0.0, 0.0,        // dx, dy
             &theme,
             CHAR_W_FALLBACK, // char_w (scale-1 default for tests)
+            "zsh",           // shell_display
         )
     }
 
     #[test]
     fn panel_fits_on_screen_at_various_sizes() {
-        // Screen sizes that can fully contain the panel (PANEL_H = 1102, PANEL_W = 380).
-        // After the UI-FONT section grew PANEL_H 860→1102, a "fully contains" check
-        // needs ≥1102px of height; screens shorter than that clamp to y=0 (asserted
-        // non-negative below) — the live Settings window is sized to PANEL_H+4 so the
-        // panel always fits its OWN window regardless of the desktop resolution.
-        for (w, h) in [(1920u32, 1200u32), (1600, 1150), (2560, 1440), (1440, 1102)] {
+        // Screen sizes that can fully contain the panel (PANEL_H = 1142, PANEL_W = 380).
+        // After the UI-FONT section grew PANEL_H 860→1102 and the SHELL band grew it
+        // 1102→1142, a "fully contains" check needs ≥1142px of height; screens shorter
+        // than that clamp to y=0 (asserted non-negative below) — the live Settings
+        // window is sized to PANEL_H+4 so the panel always fits its OWN window
+        // regardless of the desktop resolution.
+        for (w, h) in [(1920u32, 1200u32), (1600, 1150), (2560, 1440), (1440, 1142)] {
             let pv = default_panel(w, h);
             let g = &pv.geom;
             let sw = w as f32;
@@ -999,7 +1041,7 @@ mod tests {
                 sh
             );
         }
-        // Smaller screens (now including 900px-tall ones, since PANEL_H=1102):
+        // Smaller screens (now including 900px-tall ones, since PANEL_H=1142):
         // panel is clamped to y=0, x=0. Just assert non-negative.
         for (w, h) in [(1280u32, 900u32), (1440, 900), (1024, 768), (800, 600)] {
             let pv = default_panel(w, h);
@@ -1140,6 +1182,29 @@ mod tests {
             ll.x,
             g.autohide_toggle.x
         );
+
+        // The SHELL cycler band sits BELOW the launch-at-login pill (it is the
+        // bottom-most band) and stays inside the panel.
+        let sp = &g.shell_prev;
+        assert!(
+            sp.y >= ll.y + ll.h - 0.5,
+            "shell band ({}) overlaps the launch-at-login pill ({})",
+            sp.y,
+            ll.y + ll.h
+        );
+        assert!(
+            sp.y + sp.h <= g.panel.y + g.panel.h + 0.5,
+            "shell band bottom ({}) spills past the panel bottom ({})",
+            sp.y + sp.h,
+            g.panel.y + g.panel.h
+        );
+        // The ‹ and › buttons must not overlap each other horizontally.
+        assert!(
+            g.shell_prev.x + g.shell_prev.w <= g.shell_next.x + 0.5,
+            "shell ‹ ({}) overlaps › ({})",
+            g.shell_prev.x + g.shell_prev.w,
+            g.shell_next.x
+        );
     }
 
     #[test]
@@ -1175,7 +1240,7 @@ mod tests {
             "OPACITY", "CORNER RADIUS", "SUMMON EFFECT", "WINDOW MODE",
             "TAB BAR", "DROPDOWN HEIGHT", "DROPDOWN WIDTH",
             "AUTO-HIDE ON FOCUS LOSS", "FONT SIZE", "FONT",
-            "UI FONT SIZE", "UI FONT", "THEME", "LAUNCH AT LOGIN",
+            "UI FONT SIZE", "UI FONT", "THEME", "LAUNCH AT LOGIN", "SHELL",
         ] {
             assert!(
                 all_text.iter().any(|s| s == expected),
