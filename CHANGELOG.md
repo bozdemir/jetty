@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] — 2026-06-29
+
+A usability release: missing glyphs now render, you can select & copy inside
+mouse-driven TUIs, the summon hotkey is configurable, and JeTTY can start at
+login.
+
+### Added
+- **"Launch at login" toggle** in Settings — when ON, writes an XDG autostart
+  entry (`~/.config/autostart/jetty.desktop`) so JeTTY starts in the background
+  and holds the summon hotkey; OFF removes it. Desktop-environment-independent
+  (the freedesktop autostart standard).
+- **Configurable summon hotkey** — new `summon_hotkey` config key (default
+  `"F9"`). Accepts a bare key (`"F12"`) or a chord (`"Ctrl+Shift+F12"`); an
+  invalid value logs a warning and falls back to F9.
+
+### Changed
+- **Missing glyphs are drawn from a fallback font instead of tofu boxes.** The
+  grid shapes with `Shaping::Basic` (one cell per glyph) which does no font
+  fallback, so a char the terminal font lacked (e.g. Claude Code's `⏵⏵`
+  permission indicator, U+23F5) rendered as `□`. Such cells are now blanked on
+  the main grid and the real glyph is overdrawn from a fallback font at the
+  exact cell origin — so it renders like Konsole/Qt while the monospace grid
+  stays aligned. Coverage is probed once per char and cached; with no missing
+  glyphs the hot path is unchanged.
+- **Shift+drag selects text over mouse-reporting TUIs.** Inside apps that grab
+  the mouse (Claude Code, vim, htop, tmux), holding **Shift** while dragging now
+  forces a local text selection (copy-on-select), the standard terminal
+  convention — previously the drag was always forwarded to the app, so you could
+  never select & copy there.
+
+---
+
 ## [0.3.1] — 2026-06-29
 
 ### Added
