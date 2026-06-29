@@ -373,6 +373,10 @@ pub struct App {
     /// Active settings tab (0=Look, 1=Fonts, 2=Window, 3=Shell). Session-only:
     /// NOT persisted to config, so it resets to 0 each launch.
     settings_tab: usize,
+    /// Runtime mirror of the persisted `EffectsConfig`. Loaded from config on
+    /// startup; written back to `Config.effects` by `persist()`. UI/renderer tasks
+    /// read and write fields here; the next `persist()` call flushes them to disk.
+    fx: crate::config::EffectsConfig,
     /// Track held modifier keys so Ctrl+Shift combos can be detected.
     modifiers: winit::keyboard::ModifiersState,
     /// Last known cursor position in physical pixels.
@@ -685,6 +689,7 @@ impl App {
             ui_font_families: Vec::new(),
             ui_font_scroll_offset: 0,
             settings_tab: 0,
+            fx: crate::config::EffectsConfig::default(),
             modifiers: winit::keyboard::ModifiersState::empty(),
             cursor: (0.0, 0.0),
             mouse_grab_press: None,
@@ -770,6 +775,7 @@ impl App {
         app.welcome_open = cfg.show_welcome;
         app.cfg_show_welcome = cfg.show_welcome;
         app.show_perf_hud = cfg.show_perf_hud;
+        app.fx = cfg.effects.clone();
 
         // Apply the initial theme+opacity so Terminal::new env defaults are
         // overridden by our managed state (avoids double-reads from env).
@@ -806,7 +812,7 @@ impl App {
             // choice exactly as the on-disk read did.
             show_welcome: self.cfg_show_welcome,
             show_perf_hud: self.show_perf_hud,
-            effects: crate::config::EffectsConfig::default(),
+            effects: self.fx.clone(),
         }
         .save();
     }

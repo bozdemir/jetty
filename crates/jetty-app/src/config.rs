@@ -444,4 +444,16 @@ corner_radius = 8.0
         assert!(e.crt_curvature <= 1.0 && e.crt_bloom >= 0.0);
         assert!(e.caret_flash_ms <= 400.0);
     }
+
+    #[test]
+    fn effects_config_roundtrips_through_toml() {
+        let mut e = EffectsConfig::default();
+        e.crt_enabled = true; e.crt_curvature = 0.42; e.crt_flicker = true;
+        e.caret_flash_color = [0.1, 0.2, 0.3];
+        let mut cfg = Config::default();
+        cfg.effects = e.clone();
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.effects, e);
+    }
 }
