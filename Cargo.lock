@@ -1004,6 +1004,7 @@ dependencies = [
  "bytemuck",
  "glyphon",
  "jetty-core",
+ "naga",
  "pollster",
  "raw-window-handle",
  "wgpu",
