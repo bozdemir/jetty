@@ -474,6 +474,11 @@ fn arrow_keys_app_cursor_mode_all_directions() {
 
 /// Build a real PanelGeom for a 1000×640 window at 70% opacity, theme index 1.
 fn make_panel_geom_tab(active_tab: usize) -> jetty_render::PanelGeom {
+    make_panel_geom_tab_scroll(active_tab, 0.0)
+}
+
+/// Build a PanelGeom for `active_tab` with a specific `effects_scroll` offset.
+fn make_panel_geom_tab_scroll(active_tab: usize, effects_scroll: f32) -> jetty_render::PanelGeom {
     let theme = jetty_core::Theme::by_name("catppuccin_mocha");
     // UI-font args: size 16, a single synthetic "System Sans" row, selected "".
     let ui_families = ["System Sans (default)".to_string()];
@@ -486,6 +491,7 @@ fn make_panel_geom_tab(active_tab: usize) -> jetty_render::PanelGeom {
         "System default", // shell_display
         active_tab,
         &jetty_render::EffectsParams::default(),
+        effects_scroll,
     )
     .geom
 }
@@ -700,9 +706,19 @@ fn shift_tab_sends_back_tab() {
 // Effects tab (tab index 4) hit-tests
 // ---------------------------------------------------------------------------
 
-/// Build PanelGeom for the Effects tab (index 4).
+/// Build PanelGeom for the Effects tab (index 4) at scroll=0 (top).
+/// The CRT section (bands 0–9) is fully within the [content_top, content_bottom]
+/// viewport at this offset. The Caret section (bands 11–14) is below the
+/// viewport and correctly rejected by the input guard until scrolled into view.
 fn effects_panel_geom() -> jetty_render::PanelGeom {
     make_panel_geom_tab(4)
+}
+
+/// Build PanelGeom for the Effects tab scrolled to maximum offset (192 px).
+/// This brings the Caret section (bands 11–14) fully into the content viewport.
+fn effects_panel_geom_scrolled() -> jetty_render::PanelGeom {
+    // max_scroll = effects_content_h - visible_h = 652 - 460 = 192 px.
+    make_panel_geom_tab_scroll(4, 192.0)
 }
 
 /// Click the center of `rect` against the Effects panel and return the action.
@@ -778,28 +794,55 @@ fn effects_animation_toggles_hit_test() {
 
 #[test]
 fn effects_caret_flash_toggle_hit_test() {
-    let g = effects_panel_geom();
+    // Caret section (band 11) is below the viewport at scroll=0.
+    // Scroll to max (192 px) to bring it into view.
+    let g = effects_panel_geom_scrolled();
     assert_eq!(click(&g, &g.caret_flash_toggle), MouseAction::ToggleCaretFlash);
 }
 
 #[test]
 fn effects_caret_glow_toggle_hit_test() {
-    let g = effects_panel_geom();
+    let g = effects_panel_geom_scrolled();
     assert_eq!(click(&g, &g.caret_glow_toggle), MouseAction::ToggleCaretGlow);
 }
 
 #[test]
 fn effects_caret_dur_drag_hit_test() {
-    let g = effects_panel_geom();
+    let g = effects_panel_geom_scrolled();
     assert_eq!(click(&g, &g.caret_dur_track), MouseAction::StartCaretDurDrag);
 }
 
 #[test]
 fn effects_caret_color_rgb_drag_hit_test() {
-    let g = effects_panel_geom();
+    let g = effects_panel_geom_scrolled();
     assert_eq!(click(&g, &g.caret_color_r_track), MouseAction::StartCaretColorRDrag);
     assert_eq!(click(&g, &g.caret_color_g_track), MouseAction::StartCaretColorGDrag);
     assert_eq!(click(&g, &g.caret_color_b_track), MouseAction::StartCaretColorBDrag);
+}
+
+/// Scroll-aware hit-test: a widget that is below the viewport at scroll=0 becomes
+/// hittable once scrolled into view, and is correctly rejected when outside.
+#[test]
+fn effects_scroll_aware_hit_test() {
+    // caret_flash_toggle is in band 11. At scroll=0 its draw-Y is outside
+    // [content_top, content_bottom] for our 1000×640 test screen, so clicking
+    // at the rect center must not fire the action.
+    let g_top = effects_panel_geom(); // scroll=0
+    let action_outside = click(&g_top, &g_top.caret_flash_toggle);
+    assert_eq!(
+        action_outside,
+        MouseAction::None,
+        "caret_flash_toggle should be invisible (and non-hittable) at scroll=0"
+    );
+
+    // At scroll=192 (max) the same widget is inside the viewport: must fire.
+    let g_scrolled = effects_panel_geom_scrolled(); // scroll=192
+    let action_inside = click(&g_scrolled, &g_scrolled.caret_flash_toggle);
+    assert_eq!(
+        action_inside,
+        MouseAction::ToggleCaretFlash,
+        "caret_flash_toggle should be hittable at max scroll"
+    );
 }
 
 /// Regression: Effects widgets must NOT fire on tab 0 (Look) — their rects are

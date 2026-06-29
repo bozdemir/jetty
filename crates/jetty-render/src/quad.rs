@@ -250,7 +250,7 @@ impl QuadLayer {
         screen_h: u32,
         rects: &[Rect],
     ) {
-        self.render_inner(device, queue, view, screen_w, screen_h, rects, None);
+        self.render_inner(device, queue, view, screen_w, screen_h, rects, None, None);
     }
 
     /// Clear `view` to `clear_color`, then draw `rects` on top. Used for the
@@ -269,7 +269,7 @@ impl QuadLayer {
         rects: &[Rect],
         clear_color: wgpu::Color,
     ) {
-        self.render_inner(device, queue, view, screen_w, screen_h, rects, Some(clear_color));
+        self.render_inner(device, queue, view, screen_w, screen_h, rects, Some(clear_color), None);
     }
 
     fn render_inner(
@@ -281,6 +281,11 @@ impl QuadLayer {
         screen_h: u32,
         rects: &[Rect],
         clear_color: Option<wgpu::Color>,
+        // Optional scissor rect [x, y, w, h] in physical pixels that
+        // restricts drawing to a sub-region of the surface. None = no scissor
+        // (the default viewport covers the whole surface, which is the standard
+        // behaviour for all existing callers).
+        scissor: Option<[u32; 4]>,
     ) {
         // With nothing to draw and no clear requested, there is no work to do.
         if rects.is_empty() && clear_color.is_none() {
@@ -319,6 +324,13 @@ impl QuadLayer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // Scissor restricts all subsequent draws to a sub-region of the
+            // surface (physical px). Called before draw so the restriction is in
+            // effect for every instance we emit. When None the hardware default
+            // (full viewport) applies — identical to the existing behaviour.
+            if let Some([sx, sy, sw, sh]) = scissor {
+                pass.set_scissor_rect(sx, sy, sw, sh);
+            }
             if !rects.is_empty() {
                 let buf = self.instance_buf.as_ref().unwrap();
                 pass.set_pipeline(&self.pipeline);
@@ -328,6 +340,37 @@ impl QuadLayer {
             }
         }
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// Render `rects` on top of existing content (`LoadOp::Load`), no scissor.
+    /// Useful for layering quads in a second pass without clearing the surface.
+    pub fn render_load(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        screen_w: u32,
+        screen_h: u32,
+        rects: &[Rect],
+    ) {
+        self.render_inner(device, queue, view, screen_w, screen_h, rects, None, None);
+    }
+
+    /// Render `rects` on top of existing content (`LoadOp::Load`) with a
+    /// **scissor rect** that clips drawing to `[x, y, w, h]` in physical pixels.
+    /// Used for the Effects-tab content area so widgets scrolled above/below the
+    /// visible region are hardware-clipped and never bleed into the chrome.
+    pub fn render_load_scissored(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        screen_w: u32,
+        screen_h: u32,
+        rects: &[Rect],
+        scissor: [u32; 4],
+    ) {
+        self.render_inner(device, queue, view, screen_w, screen_h, rects, None, Some(scissor));
     }
 }
 

@@ -481,68 +481,84 @@ pub fn decide_mouse_press(
                 return MouseAction::SetUiFont(g.ui_font_scroll_offset + i);
             }
         }
-        // Effects tab toggle pills. Rects are at 1e6 when the Effects tab is not
-        // active, so these tests are effectively no-ops on every other tab.
-        if point_in(&g.crt_enabled_toggle, cx, cy) {
-            return MouseAction::ToggleCrt;
-        }
-        if point_in(&g.crt_roll_toggle, cx, cy) {
-            return MouseAction::ToggleCrtRoll;
-        }
-        if point_in(&g.crt_flicker_toggle, cx, cy) {
-            return MouseAction::ToggleCrtFlicker;
-        }
-        if point_in(&g.crt_jitter_toggle, cx, cy) {
-            return MouseAction::ToggleCrtJitter;
-        }
-        if point_in(&g.caret_flash_toggle, cx, cy) {
-            return MouseAction::ToggleCaretFlash;
-        }
-        if point_in(&g.caret_glow_toggle, cx, cy) {
-            return MouseAction::ToggleCaretGlow;
-        }
-        // Effects tab sliders: handle OR track → start drag.
-        if point_in(&g.crt_curvature_handle, cx, cy) || point_in(&g.crt_curvature_track, cx, cy) {
-            return MouseAction::StartCrtCurvatureDrag;
-        }
-        if point_in(&g.crt_scanline_handle, cx, cy) || point_in(&g.crt_scanline_track, cx, cy) {
-            return MouseAction::StartScanlineDrag;
-        }
-        if point_in(&g.crt_mask_handle, cx, cy) || point_in(&g.crt_mask_track, cx, cy) {
-            return MouseAction::StartMaskDrag;
-        }
-        if point_in(&g.crt_bloom_handle, cx, cy) || point_in(&g.crt_bloom_track, cx, cy) {
-            return MouseAction::StartBloomDrag;
-        }
-        if point_in(&g.crt_chromatic_handle, cx, cy) || point_in(&g.crt_chromatic_track, cx, cy) {
-            return MouseAction::StartChromaticDrag;
-        }
-        if point_in(&g.crt_vignette_handle, cx, cy) || point_in(&g.crt_vignette_track, cx, cy) {
-            return MouseAction::StartVignetteDrag;
-        }
-        // CRT scanline-tint RGB mini-sliders.
-        if point_in(&g.crt_tint_r_handle, cx, cy) || point_in(&g.crt_tint_r_track, cx, cy) {
-            return MouseAction::StartTintRDrag;
-        }
-        if point_in(&g.crt_tint_g_handle, cx, cy) || point_in(&g.crt_tint_g_track, cx, cy) {
-            return MouseAction::StartTintGDrag;
-        }
-        if point_in(&g.crt_tint_b_handle, cx, cy) || point_in(&g.crt_tint_b_track, cx, cy) {
-            return MouseAction::StartTintBDrag;
-        }
-        // Caret flash-duration slider.
-        if point_in(&g.caret_dur_handle, cx, cy) || point_in(&g.caret_dur_track, cx, cy) {
-            return MouseAction::StartCaretDurDrag;
-        }
-        // Caret flash-color RGB mini-sliders.
-        if point_in(&g.caret_color_r_handle, cx, cy) || point_in(&g.caret_color_r_track, cx, cy) {
-            return MouseAction::StartCaretColorRDrag;
-        }
-        if point_in(&g.caret_color_g_handle, cx, cy) || point_in(&g.caret_color_g_track, cx, cy) {
-            return MouseAction::StartCaretColorGDrag;
-        }
-        if point_in(&g.caret_color_b_handle, cx, cy) || point_in(&g.caret_color_b_track, cx, cy) {
-            return MouseAction::StartCaretColorBDrag;
+        // ── Effects-tab widgets ───────────────────────────────────────────────
+        // Rects are at 1e6 when the Effects tab is not active, so these tests are
+        // effectively no-ops on every other tab.
+        //
+        // Viewport guard: clicks in the title/tab-strip chrome area (above
+        // content_top) or below the panel bottom (content_bottom) must NOT fire
+        // Effects widget actions even if a widget rect has scrolled into that zone.
+        // We only apply this guard when at least one Effects widget is in its
+        // on-screen range (i.e. content_top < 1e5 — confirming we're on tab 4).
+        let in_effects_viewport = g.content_top < 1.0e5
+            && cy >= g.content_top
+            && cy < g.content_bottom
+            && cx >= g.panel.x
+            && cx < g.panel.x + g.panel.w;
+
+        if in_effects_viewport {
+            // Toggle pills.
+            if point_in(&g.crt_enabled_toggle, cx, cy) {
+                return MouseAction::ToggleCrt;
+            }
+            if point_in(&g.crt_roll_toggle, cx, cy) {
+                return MouseAction::ToggleCrtRoll;
+            }
+            if point_in(&g.crt_flicker_toggle, cx, cy) {
+                return MouseAction::ToggleCrtFlicker;
+            }
+            if point_in(&g.crt_jitter_toggle, cx, cy) {
+                return MouseAction::ToggleCrtJitter;
+            }
+            if point_in(&g.caret_flash_toggle, cx, cy) {
+                return MouseAction::ToggleCaretFlash;
+            }
+            if point_in(&g.caret_glow_toggle, cx, cy) {
+                return MouseAction::ToggleCaretGlow;
+            }
+            // Effects tab sliders: handle OR track → start drag.
+            if point_in(&g.crt_curvature_handle, cx, cy) || point_in(&g.crt_curvature_track, cx, cy) {
+                return MouseAction::StartCrtCurvatureDrag;
+            }
+            if point_in(&g.crt_scanline_handle, cx, cy) || point_in(&g.crt_scanline_track, cx, cy) {
+                return MouseAction::StartScanlineDrag;
+            }
+            if point_in(&g.crt_mask_handle, cx, cy) || point_in(&g.crt_mask_track, cx, cy) {
+                return MouseAction::StartMaskDrag;
+            }
+            if point_in(&g.crt_bloom_handle, cx, cy) || point_in(&g.crt_bloom_track, cx, cy) {
+                return MouseAction::StartBloomDrag;
+            }
+            if point_in(&g.crt_chromatic_handle, cx, cy) || point_in(&g.crt_chromatic_track, cx, cy) {
+                return MouseAction::StartChromaticDrag;
+            }
+            if point_in(&g.crt_vignette_handle, cx, cy) || point_in(&g.crt_vignette_track, cx, cy) {
+                return MouseAction::StartVignetteDrag;
+            }
+            // CRT scanline-tint RGB mini-sliders.
+            if point_in(&g.crt_tint_r_handle, cx, cy) || point_in(&g.crt_tint_r_track, cx, cy) {
+                return MouseAction::StartTintRDrag;
+            }
+            if point_in(&g.crt_tint_g_handle, cx, cy) || point_in(&g.crt_tint_g_track, cx, cy) {
+                return MouseAction::StartTintGDrag;
+            }
+            if point_in(&g.crt_tint_b_handle, cx, cy) || point_in(&g.crt_tint_b_track, cx, cy) {
+                return MouseAction::StartTintBDrag;
+            }
+            // Caret flash-duration slider.
+            if point_in(&g.caret_dur_handle, cx, cy) || point_in(&g.caret_dur_track, cx, cy) {
+                return MouseAction::StartCaretDurDrag;
+            }
+            // Caret flash-color RGB mini-sliders.
+            if point_in(&g.caret_color_r_handle, cx, cy) || point_in(&g.caret_color_r_track, cx, cy) {
+                return MouseAction::StartCaretColorRDrag;
+            }
+            if point_in(&g.caret_color_g_handle, cx, cy) || point_in(&g.caret_color_g_track, cx, cy) {
+                return MouseAction::StartCaretColorGDrag;
+            }
+            if point_in(&g.caret_color_b_handle, cx, cy) || point_in(&g.caret_color_b_track, cx, cy) {
+                return MouseAction::StartCaretColorBDrag;
+            }
         }
         // Title bar (top ~36px) — drag handle; must come before generic consume.
         if point_in(&g.title_bar, cx, cy) {
@@ -974,6 +990,7 @@ mod tests {
             "System default", // shell_display
             active_tab,
             &jetty_render::EffectsParams::default(),
+            0.0, // effects_scroll (default: top)
         )
     }
 

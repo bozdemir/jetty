@@ -334,15 +334,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(0),
                 &jetty_render::EffectsParams::default(),
+                0.0, // effects_scroll (screenshots always start at top)
             );
             rects.extend(pv.quads);
+            rects.extend(pv.effects_quads);
             // The live "Aa" specimen is drawn at the TRUE UI size via chrome_text
             // (here chrome_text IS at the UI size), so capture its baseline.
             ui_specimen_pos = Some(pv.ui_specimen_pos);
             eprintln!(
                 "jetty-shot: panel enabled (opacity={opacity:.2}, theme_idx={theme_idx}, font_size={font_size}, ui_font_size={ui_font_size}, offset=({panel_dx},{panel_dy}))"
             );
-            pv.labels
+            let mut lab = pv.labels;
+            lab.extend(pv.effects_labels);
+            lab
         } else {
             Vec::new()
         };

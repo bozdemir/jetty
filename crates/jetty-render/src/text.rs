@@ -658,6 +658,12 @@ impl TextLayer {
         // other chrome → the mono Nerd Font (preserving its symbol glyphs). When a
         // `Named` UI family is set, every surface uses it regardless of this flag.
         is_title: bool,
+        // Optional Y-clip range [top, bottom] in physical pixels applied to
+        // ALL labels in this call via TextArea.bounds. None means full
+        // window (the default). Used for the Effects-tab scrolled content so
+        // labels that have scrolled above/below the content viewport are clipped
+        // by glyphon before they ever reach the GPU.
+        clip_y: Option<(i32, i32)>,
     ) -> Result<(), PrepareError> {
         if labels.is_empty() {
             return Ok(());
@@ -670,11 +676,12 @@ impl TextLayer {
             self.overlay_buffers.push(buf);
         }
 
+        let (clip_top, clip_bottom) = clip_y.unwrap_or((0, height as i32));
         let win_bounds = TextBounds {
             left: 0,
-            top: 0,
+            top: clip_top,
             right: width as i32,
-            bottom: height as i32,
+            bottom: clip_bottom,
         };
 
         // First pass: set text content (requires &mut font_system, so can't borrow
@@ -768,7 +775,7 @@ impl TextLayer {
         height: u32,
         labels: &[(String, f32, f32, [u8; 3])],
     ) -> Result<(), PrepareError> {
-        self.render_overlays_inner(device, queue, view, width, height, labels, false)
+        self.render_overlays_inner(device, queue, view, width, height, labels, false, None)
     }
 
     /// Render tab TITLE labels. With a `Named` UI family they render in it (so the
@@ -784,7 +791,29 @@ impl TextLayer {
         height: u32,
         labels: &[(String, f32, f32, [u8; 3])],
     ) -> Result<(), PrepareError> {
-        self.render_overlays_inner(device, queue, view, width, height, labels, true)
+        self.render_overlays_inner(device, queue, view, width, height, labels, true, None)
+    }
+
+    /// Render NON-TITLE chrome labels clipped to `[clip_top..clip_bottom]`
+    /// (physical pixels). Labels whose glyphs fall entirely outside this Y range
+    /// are suppressed by the glyphon `TextArea.bounds` mechanism — no GPU work is
+    /// wasted on off-screen text. Used for the Effects-tab scrolled content so
+    /// labels that scroll above/below the content viewport are clipped.
+    pub fn render_overlays_clipped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        labels: &[(String, f32, f32, [u8; 3])],
+        clip_top: i32,
+        clip_bottom: i32,
+    ) -> Result<(), PrepareError> {
+        self.render_overlays_inner(
+            device, queue, view, width, height, labels, false,
+            Some((clip_top, clip_bottom)),
+        )
     }
 
     /// Clears the frame to the terminal background color and renders the grid text.

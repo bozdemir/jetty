@@ -395,6 +395,9 @@ pub struct App {
     /// Active settings tab (0=Look, 1=Fonts, 2=Window, 3=Shell). Session-only:
     /// NOT persisted to config, so it resets to 0 each launch.
     settings_tab: usize,
+    /// Vertical scroll offset (physical px, 0 = top) for the Effects tab (4).
+    /// Clamped to [0, max(0, effects_content_h - visible_h)] by the wheel handler.
+    effects_scroll: f32,
     /// Runtime mirror of the persisted `EffectsConfig`. Loaded from config on
     /// startup; written back to `Config.effects` by `persist()`. UI/renderer tasks
     /// read and write fields here; the next `persist()` call flushes them to disk.
@@ -714,6 +717,7 @@ impl App {
             ui_font_families: Vec::new(),
             ui_font_scroll_offset: 0,
             settings_tab: 0,
+            effects_scroll: 0.0,
             fx: crate::config::EffectsConfig::default(),
             modifiers: winit::keyboard::ModifiersState::empty(),
             cursor: (0.0, 0.0),
@@ -1861,6 +1865,7 @@ impl App {
             &self.shell_display(),
             self.settings_tab,
             &fx,
+            self.effects_scroll,
         )
     }
 
@@ -1915,6 +1920,7 @@ impl App {
             caret_flash_ms: self.fx.caret_flash_ms,
             caret_flash_color: self.fx.caret_flash_color,
         };
+        let effects_scroll = self.effects_scroll;
         let (Some(gpu), Some(text), Some(quad), Some(specimen)) = (
             &mut self.settings_gpu,
             &mut self.settings_text,
@@ -1935,10 +1941,12 @@ impl App {
             &shell_display,
             settings_tab,
             &fx,
+            effects_scroll,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
-            // Clear the window background to the panel border color, then paint the
-            // panel quads (the panel fills the window, so margins are ~none).
+            // Pass 1: Chrome quads — panel border, bg, chips, opacity/radius tracks,
+            // tab strip highlights, etc. Uses LoadOp::Clear so the surface starts
+            // fresh. No scissor: chrome elements are always fully in-bounds.
             quad.render_clear(
                 &gpu.device,
                 &gpu.queue,
@@ -1948,6 +1956,26 @@ impl App {
                 &pv.quads,
                 wgpu::Color { r: 0.02, g: 0.02, b: 0.03, a: 1.0 },
             );
+
+            // Pass 2: Effects-tab widget quads — only when on the Effects tab.
+            // Uses LoadOp::Load (composites on existing chrome) + hardware scissor
+            // so widgets that have scrolled outside the content viewport are clipped.
+            if let Some(vp) = pv.effects_viewport {
+                if !pv.effects_quads.is_empty() {
+                    quad.render_load_scissored(
+                        &gpu.device,
+                        &gpu.queue,
+                        &view,
+                        width,
+                        height,
+                        &pv.effects_quads,
+                        vp,
+                    );
+                }
+            }
+
+            // Pass 3: Chrome text — title, tab strip, non-Effects widget labels.
+            // No clip: these are always within bounds.
             if !pv.labels.is_empty() {
                 let _ = text.render_overlays(
                     &gpu.device,
@@ -1958,6 +1986,27 @@ impl App {
                     &pv.labels,
                 );
             }
+
+            // Pass 4: Effects-tab widget labels, clipped to content viewport via
+            // glyphon TextArea.bounds so labels outside the scroll window are
+            // suppressed without a GPU scissor (glyphon handles it per-glyph).
+            if let Some(vp) = pv.effects_viewport {
+                if !pv.effects_labels.is_empty() {
+                    let clip_top = vp[1] as i32;
+                    let clip_bottom = (vp[1] + vp[3]) as i32;
+                    let _ = text.render_overlays_clipped(
+                        &gpu.device,
+                        &gpu.queue,
+                        &view,
+                        width,
+                        height,
+                        &pv.effects_labels,
+                        clip_top,
+                        clip_bottom,
+                    );
+                }
+            }
+
             // Overdraw the live "Aa" specimen at the TRUE UI size via the dedicated
             // specimen layer, AFTER the capped panel-text pass — so the user sees an
             // honest big/small/typeface preview that tracks ui_font_size. Use the
@@ -2335,6 +2384,28 @@ impl App {
                 self.handle_settings_action(action, &pv.geom);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // ── Effects tab (4): vertical content scroll ─────────────────────
+                // Wheel anywhere in the settings window while the Effects tab is
+                // active scrolls the content, not the font lists (which are on
+                // different tabs). Clamp to [0, max_scroll] and redraw.
+                if self.settings_tab == 4 {
+                    let delta_px = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y * 24.0,
+                        MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+                    };
+                    // effects_content_h = 652.0 (15 bands × 44px + 36px header pitch)
+                    // visible_h         = PANEL_H - 100.0 = 460.0
+                    // max_scroll        = 192.0
+                    const EFFECTS_CONTENT_H: f32 = 652.0;
+                    const EFFECTS_VISIBLE_H: f32 = 460.0;
+                    let max_scroll = (EFFECTS_CONTENT_H - EFFECTS_VISIBLE_H).max(0.0);
+                    self.effects_scroll = (self.effects_scroll + delta_px).clamp(0.0, max_scroll);
+                    if let Some(w) = &self.settings_window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                // ── Font/UI-font list scroll (tabs 1) ────────────────────────────
                 // Wheel over the terminal- OR UI-font list scrolls it (same as the
                 // old in-app panel behaviour), now in the settings window.
                 if self.font_families.is_empty() && self.ui_font_families.is_empty() {

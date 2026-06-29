@@ -174,14 +174,39 @@ pub struct PanelGeom {
     /// Independent of screen size; always 652.0 (14 bands × 44 px pitch + 36 px
     /// for the last slider handle's bottom offset).
     pub effects_content_h: f32,
+
+    // ── Scroll viewport bounds (used by hit-testing for the Effects tab) ──────
+    /// Y coordinate (physical px) where the scrollable content area begins, i.e.
+    /// `panel.y + 100`. Clicks above this row must not trigger Effects widgets
+    /// even if an Effects rect has scrolled into that region.
+    pub content_top: f32,
+    /// Y coordinate (physical px) of the panel's bottom edge, i.e.
+    /// `panel.y + PANEL_H`. Clicks at or below this row are outside the panel.
+    pub content_bottom: f32,
 }
 
 /// Full description of how to draw the settings panel for one frame.
 pub struct PanelView {
-    /// Rects in draw order (border → bg → chip highlights → chip fills → track → handle).
+    /// Chrome rects in draw order (border → bg → chip highlights → chip fills →
+    /// opacity/radius tracks → scrollbar indicator).  These are rendered WITHOUT
+    /// a scissor so the panel chrome is always fully visible.
     pub quads: Vec<Rect>,
-    /// Text labels: (text, x, y, rgb).
+    /// Chrome text labels: title, tab strip, section headers for non-Effects tabs,
+    /// font/window/shell widget values.  Rendered without clip bounds.
     pub labels: Vec<(String, f32, f32, [u8; 3])>,
+    /// Effects-tab widget rects (CRT + Caret group), including the scrollbar
+    /// indicator as the last element.  Empty when `active_tab != 4`.  Rendered
+    /// with a hardware scissor rect equal to `effects_viewport` so content that
+    /// has scrolled above or below the content area is GPU-clipped.
+    pub effects_quads: Vec<Rect>,
+    /// Effects-tab widget labels (CRT + Caret section).  Empty when
+    /// `active_tab != 4`.  Rendered with glyphon `TextArea.bounds` = content
+    /// viewport so labels outside the visible area are suppressed.
+    pub effects_labels: Vec<(String, f32, f32, [u8; 3])>,
+    /// Scissor rect `[x, y, w, h]` in **physical pixels** covering the scrollable
+    /// content viewport.  `Some` only when `active_tab == 4`; `None` otherwise
+    /// (so the renderer can skip the scissored pass entirely on other tabs).
+    pub effects_viewport: Option<[u32; 4]>,
     /// Pixel geometry for hit-testing (used by the next mouse-interaction task).
     pub geom: PanelGeom,
     /// Baseline (x, y) at which the app overdraws the live "Aa" specimen at the
@@ -310,6 +335,12 @@ pub fn build_panel(
     //   mirror (`App.fx`). Used on the Effects tab (4) to position widget handles
     //   and toggle pill states. Ignored on other tabs (bands are at OFF).
     effects: &EffectsParams,
+    // `effects_scroll`: vertical scroll offset (physical px, 0 = top) for the
+    //   Effects tab.  Subtracted from every `t_fx_*` band top when active_tab==4
+    //   so the drawn positions and the PanelGeom hit-rects stay in sync.
+    //   Clamped to [0, max(0, content_h - visible_h)] by the caller (App).
+    //   Ignored on other tabs (bands are at OFF regardless).
+    effects_scroll: f32,
 ) -> PanelView {
     let active_tab = active_tab.min(4);
 
@@ -421,21 +452,26 @@ pub fn build_panel(
         }
         4 => {
             // 15 bands × 44 px pitch, top-to-bottom from content_top.
-            t_fx_crt_hdr  = content_top;                      // band 0: "CRT" section header
-            t_fx_crt_en   = content_top +  1.0 * 44.0;       // band 1: crt_enabled toggle
-            t_fx_curv     = content_top +  2.0 * 44.0;       // band 2: crt_curvature slider
-            t_fx_scan     = content_top +  3.0 * 44.0;       // band 3: crt_scanline slider
-            t_fx_mask     = content_top +  4.0 * 44.0;       // band 4: crt_mask slider
-            t_fx_bloom    = content_top +  5.0 * 44.0;       // band 5: crt_bloom slider
-            t_fx_chroma   = content_top +  6.0 * 44.0;       // band 6: crt_chromatic slider
-            t_fx_vignette = content_top +  7.0 * 44.0;       // band 7: crt_vignette slider
-            t_fx_tint     = content_top +  8.0 * 44.0;       // band 8: crt_scanline_tint RGB
-            t_fx_anim     = content_top +  9.0 * 44.0;       // band 9: roll/flicker/jitter pills
-            t_fx_caret_hdr= content_top + 10.0 * 44.0;      // band 10: "CARET" section header
-            t_fx_flash    = content_top + 11.0 * 44.0;      // band 11: caret_flash_enabled toggle
-            t_fx_glow     = content_top + 12.0 * 44.0;      // band 12: caret_glow_enabled toggle
-            t_fx_dur      = content_top + 13.0 * 44.0;      // band 13: caret_flash_ms slider
-            t_fx_color    = content_top + 14.0 * 44.0;      // band 14: caret_flash_color RGB
+            // `effects_scroll` (physical px) is subtracted from each band top so
+            // the drawn positions and the PanelGeom hit-rects are identical —
+            // the caller (App) has already clamped it to [0, max_scroll].
+            // The OFF sentinel for inactive tabs is NOT modified here.
+            let s = effects_scroll; // shorthand
+            t_fx_crt_hdr  = content_top             - s;     // band 0: "CRT" section header
+            t_fx_crt_en   = content_top +  1.0*44.0 - s;    // band 1: crt_enabled toggle
+            t_fx_curv     = content_top +  2.0*44.0 - s;    // band 2: crt_curvature slider
+            t_fx_scan     = content_top +  3.0*44.0 - s;    // band 3: crt_scanline slider
+            t_fx_mask     = content_top +  4.0*44.0 - s;    // band 4: crt_mask slider
+            t_fx_bloom    = content_top +  5.0*44.0 - s;    // band 5: crt_bloom slider
+            t_fx_chroma   = content_top +  6.0*44.0 - s;    // band 6: crt_chromatic slider
+            t_fx_vignette = content_top +  7.0*44.0 - s;    // band 7: crt_vignette slider
+            t_fx_tint     = content_top +  8.0*44.0 - s;    // band 8: crt_scanline_tint RGB
+            t_fx_anim     = content_top +  9.0*44.0 - s;    // band 9: roll/flicker/jitter pills
+            t_fx_caret_hdr= content_top + 10.0*44.0 - s;   // band 10: "CARET" section header
+            t_fx_flash    = content_top + 11.0*44.0 - s;   // band 11: caret_flash_enabled toggle
+            t_fx_glow     = content_top + 12.0*44.0 - s;   // band 12: caret_glow_enabled toggle
+            t_fx_dur      = content_top + 13.0*44.0 - s;   // band 13: caret_flash_ms slider
+            t_fx_color    = content_top + 14.0*44.0 - s;   // band 14: caret_flash_color RGB
         }
         _ => {
             t_shell = content_top;
@@ -785,8 +821,17 @@ pub fn build_panel(
     // 14 × 44 + 36 = 616 + 36 = 652 px. Independent of screen size.
     let effects_content_h: f32 = 14.0 * 44.0 + 36.0; // = 652.0
 
+    // Visible height of the content area (below the title + tab strip chrome).
+    // 100 px = ~36 px title + ~64 px tab strip. This is a layout constant, not
+    // derived at runtime, so effects_scroll clamping uses the same value.
+    const CONTENT_TOP_OFFSET: f32 = 100.0;
+    let visible_h = PANEL_H - CONTENT_TOP_OFFSET; // 460.0
+
     // --- Build quads in draw order ---
+    // `quads` = chrome: always visible, rendered WITHOUT scissor.
+    // `effects_quads` = Effects-tab content: rendered WITH scissor when tab 4.
     let mut quads: Vec<Rect> = Vec::new();
+    let mut effects_quads: Vec<Rect> = Vec::new();
     quads.push(dim_rect);
     quads.push(border_rect);
     quads.push(bg_rect);
@@ -847,27 +892,50 @@ pub fn build_panel(
     quads.push(shell_prev);
     quads.push(shell_next);
 
-    // ── Effects-tab quads (all offscreen when tab ≠ 4) ──────────────────────
-    // Draw order per slider band: track → fill → handle (same as opacity slider).
-    quads.push(crt_enabled_toggle);
-    quads.push(crt_curvature_track);  quads.push(crt_curvature_fill);  quads.push(crt_curvature_handle);
-    quads.push(crt_scanline_track);   quads.push(crt_scanline_fill);   quads.push(crt_scanline_handle);
-    quads.push(crt_mask_track);       quads.push(crt_mask_fill);       quads.push(crt_mask_handle);
-    quads.push(crt_bloom_track);      quads.push(crt_bloom_fill);      quads.push(crt_bloom_handle);
-    quads.push(crt_chromatic_track);  quads.push(crt_chromatic_fill);  quads.push(crt_chromatic_handle);
-    quads.push(crt_vignette_track);   quads.push(crt_vignette_fill);   quads.push(crt_vignette_handle);
-    quads.push(crt_tint_r_track);     quads.push(crt_tint_r_fill);     quads.push(crt_tint_r_handle);
-    quads.push(crt_tint_g_track);     quads.push(crt_tint_g_fill);     quads.push(crt_tint_g_handle);
-    quads.push(crt_tint_b_track);     quads.push(crt_tint_b_fill);     quads.push(crt_tint_b_handle);
-    quads.push(crt_roll_toggle);
-    quads.push(crt_flicker_toggle);
-    quads.push(crt_jitter_toggle);
-    quads.push(caret_flash_toggle);
-    quads.push(caret_glow_toggle);
-    quads.push(caret_dur_track);      quads.push(caret_dur_fill);      quads.push(caret_dur_handle);
-    quads.push(caret_color_r_track);  quads.push(caret_color_r_fill);  quads.push(caret_color_r_handle);
-    quads.push(caret_color_g_track);  quads.push(caret_color_g_fill);  quads.push(caret_color_g_handle);
-    quads.push(caret_color_b_track);  quads.push(caret_color_b_fill);  quads.push(caret_color_b_handle);
+    // ── Effects-tab quads (populate effects_quads; empty when tab ≠ 4) ────────
+    // When active_tab == 4 the band tops carry the scroll offset, so these rects
+    // are at their scrolled positions. The caller renders them with a hardware
+    // scissor rect (`effects_viewport`) so overflow is GPU-clipped.
+    // When active_tab ≠ 4 ALL t_fx_* are at OFF (1e6) so the rects land far
+    // offscreen — we skip pushing them entirely (they'd be culled anyway, but
+    // keeping effects_quads empty simplifies the render path).
+    if active_tab == 4 {
+        // Draw order per slider band: track → fill → handle (same as opacity slider).
+        effects_quads.push(crt_enabled_toggle);
+        effects_quads.push(crt_curvature_track);  effects_quads.push(crt_curvature_fill);  effects_quads.push(crt_curvature_handle);
+        effects_quads.push(crt_scanline_track);   effects_quads.push(crt_scanline_fill);   effects_quads.push(crt_scanline_handle);
+        effects_quads.push(crt_mask_track);       effects_quads.push(crt_mask_fill);       effects_quads.push(crt_mask_handle);
+        effects_quads.push(crt_bloom_track);      effects_quads.push(crt_bloom_fill);      effects_quads.push(crt_bloom_handle);
+        effects_quads.push(crt_chromatic_track);  effects_quads.push(crt_chromatic_fill);  effects_quads.push(crt_chromatic_handle);
+        effects_quads.push(crt_vignette_track);   effects_quads.push(crt_vignette_fill);   effects_quads.push(crt_vignette_handle);
+        effects_quads.push(crt_tint_r_track);     effects_quads.push(crt_tint_r_fill);     effects_quads.push(crt_tint_r_handle);
+        effects_quads.push(crt_tint_g_track);     effects_quads.push(crt_tint_g_fill);     effects_quads.push(crt_tint_g_handle);
+        effects_quads.push(crt_tint_b_track);     effects_quads.push(crt_tint_b_fill);     effects_quads.push(crt_tint_b_handle);
+        effects_quads.push(crt_roll_toggle);
+        effects_quads.push(crt_flicker_toggle);
+        effects_quads.push(crt_jitter_toggle);
+        effects_quads.push(caret_flash_toggle);
+        effects_quads.push(caret_glow_toggle);
+        effects_quads.push(caret_dur_track);      effects_quads.push(caret_dur_fill);      effects_quads.push(caret_dur_handle);
+        effects_quads.push(caret_color_r_track);  effects_quads.push(caret_color_r_fill);  effects_quads.push(caret_color_r_handle);
+        effects_quads.push(caret_color_g_track);  effects_quads.push(caret_color_g_fill);  effects_quads.push(caret_color_g_handle);
+        effects_quads.push(caret_color_b_track);  effects_quads.push(caret_color_b_fill);  effects_quads.push(caret_color_b_handle);
+
+        // ── Scrollbar indicator ──────────────────────────────────────────────
+        // Thin accent rect on the right edge of the content viewport, sized and
+        // positioned to show the current scroll position. Only emitted when
+        // content is taller than the viewport AND when actually scrollable.
+        let max_scroll = (effects_content_h - visible_h).max(0.0);
+        if max_scroll > 0.0 {
+            let indicator_h = (visible_h * visible_h / effects_content_h).max(10.0);
+            let t = effects_scroll / max_scroll;
+            let indicator_y = content_top + t * (visible_h - indicator_h);
+            let ind_col: [u8; 4] = [accent[0], accent[1], accent[2], 160];
+            effects_quads.push(Rect::rounded(
+                px + PANEL_W - 6.0, indicator_y, 4.0, indicator_h, ind_col, 2.0,
+            ));
+        }
+    }
 
     // Font-size buttons.
     quads.push(font_minus);
@@ -939,7 +1007,10 @@ pub fn build_panel(
     quads.push(radius_handle);
 
     // --- Labels ---
+    // `labels` = chrome: title, tab strip, and non-Effects tab widget labels.
+    // `effects_labels` = Effects-tab widget labels; clipped to content viewport.
     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
+    let mut effects_labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
 
     // Title.
     labels.push(("Settings".to_string(), px + 16.0, py + 12.0, text_main));
@@ -1180,79 +1251,85 @@ pub fn build_panel(
     labels.push(("<".to_string(), cycle_prev_x + 9.0, shell_btn_y + 6.0, text_btn));
     labels.push((">".to_string(), cycle_next_x + 9.0, shell_btn_y + 6.0, text_btn));
 
-    // ── Effects-tab labels (all offscreen when tab ≠ 4) ─────────────────────
-    // Section header "CRT" (band 0).
-    labels.push(("CRT".to_string(), px + 16.0, t_fx_crt_hdr, text_header));
+    // ── Effects-tab labels (into effects_labels; empty when tab ≠ 4) ────────
+    // When active_tab == 4, band tops carry the scroll offset so label Y
+    // positions already reflect scrolling. The caller renders effects_labels
+    // with TextArea.bounds = content viewport so labels outside the viewport
+    // are suppressed by glyphon.
+    if active_tab == 4 {
+        // Section header "CRT" (band 0).
+        effects_labels.push(("CRT".to_string(), px + 16.0, t_fx_crt_hdr, text_header));
 
-    // CRT ENABLED band (band 1) — header + pill ON/OFF label.
-    labels.push(("CRT ENABLED".to_string(), px + 16.0, t_fx_crt_en, text_header));
-    {
-        let (txt, col) = if effects.crt_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
-        labels.push((txt.to_string(), crt_enabled_toggle.x + 16.0, crt_enabled_toggle.y + 6.0, col));
+        // CRT ENABLED band (band 1) — header + pill ON/OFF label.
+        effects_labels.push(("CRT ENABLED".to_string(), px + 16.0, t_fx_crt_en, text_header));
+        {
+            let (txt, col) = if effects.crt_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
+            effects_labels.push((txt.to_string(), crt_enabled_toggle.x + 16.0, crt_enabled_toggle.y + 6.0, col));
+        }
+
+        // CRT slider bands (2–7): CAPS header + right-aligned "N%" value.
+        macro_rules! fx_slider_label {
+            ($label:expr, $band_y:expr, $val:expr) => {
+                effects_labels.push(($label.to_string(), px + 16.0, $band_y, text_header));
+                let pct = ($val * 100.0).round() as i32;
+                let pct_str = format!("{}%", pct);
+                effects_labels.push((pct_str.clone(), right_x(&pct_str), $band_y, text_main));
+            };
+        }
+        fx_slider_label!("CURVATURE", t_fx_curv,     effects.crt_curvature);
+        fx_slider_label!("SCANLINE",  t_fx_scan,     effects.crt_scanline);
+        fx_slider_label!("MASK",      t_fx_mask,     effects.crt_mask);
+        fx_slider_label!("BLOOM",     t_fx_bloom,    effects.crt_bloom);
+        fx_slider_label!("CHROMATIC", t_fx_chroma,   effects.crt_chromatic);
+        fx_slider_label!("VIGNETTE",  t_fx_vignette, effects.crt_vignette);
+
+        // CRT scanline-tint RGB triple (band 8): section header + "R"/"G"/"B" sub-labels.
+        effects_labels.push(("TINT".to_string(), px + 16.0, t_fx_tint, text_header));
+        effects_labels.push(("R".to_string(), rgb_r_x,        t_fx_tint, text_dim));
+        effects_labels.push(("G".to_string(), rgb_g_x,        t_fx_tint, text_dim));
+        effects_labels.push(("B".to_string(), rgb_b_x,        t_fx_tint, text_dim));
+
+        // CRT animation pills (band 9): header + three pill labels.
+        effects_labels.push(("ANIMATE".to_string(), px + 16.0, t_fx_anim, text_header));
+        {
+            let (rt, rc) = if effects.crt_animate_roll { ("ROLL",  [20u8, 20, 20]) } else { ("ROLL",  text_btn) };
+            let (ft, fc) = if effects.crt_flicker      { ("FLKR",  [20u8, 20, 20]) } else { ("FLKR",  text_btn) };
+            let (jt, jc) = if effects.crt_jitter       { ("JITR",  [20u8, 20, 20]) } else { ("JITR",  text_btn) };
+            effects_labels.push((rt.to_string(), crt_roll_toggle.x    + 8.0, crt_roll_toggle.y    + 6.0, rc));
+            effects_labels.push((ft.to_string(), crt_flicker_toggle.x + 8.0, crt_flicker_toggle.y + 6.0, fc));
+            effects_labels.push((jt.to_string(), crt_jitter_toggle.x  + 8.0, crt_jitter_toggle.y  + 6.0, jc));
+        }
+
+        // Section header "CARET" (band 10).
+        effects_labels.push(("CARET".to_string(), px + 16.0, t_fx_caret_hdr, text_header));
+
+        // CARET FLASH ENABLED toggle (band 11).
+        effects_labels.push(("FLASH".to_string(), px + 16.0, t_fx_flash, text_header));
+        {
+            let (txt, col) = if effects.caret_flash_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
+            effects_labels.push((txt.to_string(), caret_flash_toggle.x + 16.0, caret_flash_toggle.y + 6.0, col));
+        }
+
+        // CARET GLOW ENABLED toggle (band 12).
+        effects_labels.push(("GLOW".to_string(), px + 16.0, t_fx_glow, text_header));
+        {
+            let (txt, col) = if effects.caret_glow_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
+            effects_labels.push((txt.to_string(), caret_glow_toggle.x + 16.0, caret_glow_toggle.y + 6.0, col));
+        }
+
+        // FLASH MS slider (band 13): maps 60..=400 → shows raw ms value.
+        effects_labels.push(("FLASH MS".to_string(), px + 16.0, t_fx_dur, text_header));
+        {
+            let ms_str = format!("{}ms", effects.caret_flash_ms.round() as i32);
+            effects_labels.push((ms_str.clone(), right_x(&ms_str), t_fx_dur, text_main));
+        }
+
+        // CARET flash-color RGB triple (band 14): section header + "R"/"G"/"B" sub-labels.
+        effects_labels.push(("COLOR".to_string(), px + 16.0, t_fx_color, text_header));
+        effects_labels.push(("R".to_string(), rgb_r_x, t_fx_color, text_dim));
+        effects_labels.push(("G".to_string(), rgb_g_x, t_fx_color, text_dim));
+        effects_labels.push(("B".to_string(), rgb_b_x, t_fx_color, text_dim));
     }
-
-    // CRT slider bands (2–7): CAPS header + right-aligned "N%" value.
-    macro_rules! fx_slider_label {
-        ($label:expr, $band_y:expr, $val:expr) => {
-            labels.push(($label.to_string(), px + 16.0, $band_y, text_header));
-            let pct = ($val * 100.0).round() as i32;
-            let pct_str = format!("{}%", pct);
-            labels.push((pct_str.clone(), right_x(&pct_str), $band_y, text_main));
-        };
-    }
-    fx_slider_label!("CURVATURE", t_fx_curv,     effects.crt_curvature);
-    fx_slider_label!("SCANLINE",  t_fx_scan,     effects.crt_scanline);
-    fx_slider_label!("MASK",      t_fx_mask,     effects.crt_mask);
-    fx_slider_label!("BLOOM",     t_fx_bloom,    effects.crt_bloom);
-    fx_slider_label!("CHROMATIC", t_fx_chroma,   effects.crt_chromatic);
-    fx_slider_label!("VIGNETTE",  t_fx_vignette, effects.crt_vignette);
-
-    // CRT scanline-tint RGB triple (band 8): section header + "R"/"G"/"B" sub-labels.
-    labels.push(("TINT".to_string(), px + 16.0, t_fx_tint, text_header));
-    labels.push(("R".to_string(), rgb_r_x,        t_fx_tint, text_dim));
-    labels.push(("G".to_string(), rgb_g_x,        t_fx_tint, text_dim));
-    labels.push(("B".to_string(), rgb_b_x,        t_fx_tint, text_dim));
-
-    // CRT animation pills (band 9): header + three pill labels.
-    labels.push(("ANIMATE".to_string(), px + 16.0, t_fx_anim, text_header));
-    {
-        let (rt, rc) = if effects.crt_animate_roll { ("ROLL",  [20u8, 20, 20]) } else { ("ROLL",  text_btn) };
-        let (ft, fc) = if effects.crt_flicker      { ("FLKR",  [20u8, 20, 20]) } else { ("FLKR",  text_btn) };
-        let (jt, jc) = if effects.crt_jitter       { ("JITR",  [20u8, 20, 20]) } else { ("JITR",  text_btn) };
-        labels.push((rt.to_string(), crt_roll_toggle.x    + 8.0, crt_roll_toggle.y    + 6.0, rc));
-        labels.push((ft.to_string(), crt_flicker_toggle.x + 8.0, crt_flicker_toggle.y + 6.0, fc));
-        labels.push((jt.to_string(), crt_jitter_toggle.x  + 8.0, crt_jitter_toggle.y  + 6.0, jc));
-    }
-
-    // Section header "CARET" (band 10).
-    labels.push(("CARET".to_string(), px + 16.0, t_fx_caret_hdr, text_header));
-
-    // CARET FLASH ENABLED toggle (band 11).
-    labels.push(("FLASH".to_string(), px + 16.0, t_fx_flash, text_header));
-    {
-        let (txt, col) = if effects.caret_flash_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
-        labels.push((txt.to_string(), caret_flash_toggle.x + 16.0, caret_flash_toggle.y + 6.0, col));
-    }
-
-    // CARET GLOW ENABLED toggle (band 12).
-    labels.push(("GLOW".to_string(), px + 16.0, t_fx_glow, text_header));
-    {
-        let (txt, col) = if effects.caret_glow_enabled { ("ON", [20u8, 20, 20]) } else { ("OFF", text_btn) };
-        labels.push((txt.to_string(), caret_glow_toggle.x + 16.0, caret_glow_toggle.y + 6.0, col));
-    }
-
-    // FLASH MS slider (band 13): maps 60..=400 → shows raw ms value.
-    labels.push(("FLASH MS".to_string(), px + 16.0, t_fx_dur, text_header));
-    {
-        let ms_str = format!("{}ms", effects.caret_flash_ms.round() as i32);
-        labels.push((ms_str.clone(), right_x(&ms_str), t_fx_dur, text_main));
-    }
-
-    // CARET flash-color RGB triple (band 14): section header + "R"/"G"/"B" sub-labels.
-    labels.push(("COLOR".to_string(), px + 16.0, t_fx_color, text_header));
-    labels.push(("R".to_string(), rgb_r_x, t_fx_color, text_dim));
-    labels.push(("G".to_string(), rgb_g_x, t_fx_color, text_dim));
-    labels.push(("B".to_string(), rgb_b_x, t_fx_color, text_dim));
 
     // --- PanelGeom for hit-testing ---
     let panel_rect = Rect {
@@ -1334,9 +1411,19 @@ pub fn build_panel(
         caret_color_b_track,
         caret_color_b_handle,
         effects_content_h,
+        content_top,
+        content_bottom: py + PANEL_H,
     };
 
-    PanelView { quads, labels, geom, ui_specimen_pos }
+    // Viewport for the Effects tab scissor / text-clip pass.
+    // `None` on other tabs so the caller skips the scissored pass entirely.
+    let effects_viewport = if active_tab == 4 {
+        Some([px as u32, content_top as u32, PANEL_W as u32, visible_h as u32])
+    } else {
+        None
+    };
+
+    PanelView { quads, labels, effects_quads, effects_labels, effects_viewport, geom, ui_specimen_pos }
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -1392,6 +1479,7 @@ mod tests {
             "zsh",           // shell_display
             active_tab,
             &EffectsParams::default(), // effects (defaults: CRT off, caret flash on)
+            0.0,             // effects_scroll (default: top)
         )
     }
 
@@ -1658,7 +1746,12 @@ mod tests {
         ];
         for (tab, headers) in expected.iter().enumerate() {
             let pv = panel_tab(1920, 1080, tab);
-            let all_text: Vec<String> = pv.labels.iter().map(|l| l.0.clone()).collect();
+            // For the Effects tab (4) the widget headers land in `effects_labels`;
+            // for other tabs they are in `labels`. Combine both for the check.
+            let all_text: Vec<String> = pv.labels.iter()
+                .chain(pv.effects_labels.iter())
+                .map(|l| l.0.clone())
+                .collect();
             for h in headers.iter() {
                 assert!(
                     all_text.iter().any(|s| s == h),
