@@ -3,6 +3,10 @@ use crate::Rect;
 /// Hit-testing geometry exposed for the upcoming mouse-interaction task.
 pub struct PanelGeom {
     pub panel: Rect,
+    /// The 4 tab-strip hit rects ("Look", "Fonts", "Window", "Shell"), in order.
+    /// A press in `tab_rects[i]` selects tab `i`. These are ALWAYS live (present
+    /// regardless of the active tab) so the user can switch tabs.
+    pub tab_rects: [Rect; 4],
     pub slider_track: Rect,
     pub slider_handle: Rect,
     pub chips: Vec<Rect>,
@@ -50,11 +54,11 @@ pub struct PanelGeom {
     pub dropdown_width_handle: Rect,
     /// "Auto-hide on focus loss" toggle pill.
     pub autohide_toggle: Rect,
-    /// "Launch at login" toggle pill (bottom band, below the THEME cards).
+    /// "Launch at login" toggle pill.
     pub launch_login_toggle: Rect,
-    /// Shell-picker "‹" (previous) cycle button (bottom-most band).
+    /// Shell-picker "‹" (previous) cycle button.
     pub shell_prev: Rect,
-    /// Shell-picker "›" (next) cycle button (bottom-most band).
+    /// Shell-picker "›" (next) cycle button.
     pub shell_next: Rect,
     // ── UI (chrome) FONT section ──────────────────────────────────────────────
     /// UI-font-size decrement button ("−").
@@ -85,7 +89,8 @@ pub struct PanelView {
     /// Baseline (x, y) at which the app overdraws the live "Aa" specimen at the
     /// TRUE `ui_font_size` (not the capped panel-body size), after the capped
     /// panel-text pass — so the user sees an honest big/small/typeface preview
-    /// even though the surrounding panel text is clamped.
+    /// even though the surrounding panel text is clamped. When the Fonts tab is
+    /// NOT active, this is offscreen so the "Aa" is not drawn.
     pub ui_specimen_pos: (f32, f32),
 }
 
@@ -100,6 +105,17 @@ const MAX_FONT_ROWS: usize = 5;
 /// bound the panel's vertical growth from the new section.
 const MAX_UI_FONT_ROWS: usize = 4;
 
+/// The four settings-tab labels, in order. The active tab's bands are the only
+/// ones laid out on-screen; every other tab's widgets are positioned offscreen.
+const TAB_NAMES: [&str; 4] = ["Look", "Fonts", "Window", "Shell"];
+
+/// Y at which an INACTIVE tab's band tops are placed. Far offscreen so every
+/// rect derived from such a band lands well past the panel (and the screen):
+/// `point_in` uses INCLUSIVE bounds, so a zero-rect at the origin could spuriously
+/// match a click at exactly (0,0); pushing inactive geometry offscreen instead is
+/// unconditionally safe, and the GPU clips the offscreen quads/labels away.
+const OFF: f32 = 1.0e6;
+
 /// Fallback chrome-font character advance (px), used when a measured advance is
 /// not available. Passed in via the `char_w` parameter of `build_panel` on
 /// HiDPI-aware paths; matches the constant used in help.rs/tabbar.rs.
@@ -110,36 +126,25 @@ pub(crate) const CHAR_W_FALLBACK: f32 = 9.8;
 
 /// Settings-panel dimensions in logical px. The separate Settings OS window is
 /// sized to these (+ border) — see `SETTINGS_WIN_*` in jetty-app. Growing the
-/// panel here (e.g. adding a row) automatically resizes that window, so the
-/// bottom rows can never be clipped off a too-short window again.
+/// panel here automatically resizes that window.
 ///
-/// PANEL_H was grown from 744→860 to accommodate the 2-column×3-row theme card
-/// grid (card_h=40, gap=8 → 3 rows = 136px) replacing the original single-row
-/// chips (36px). 860−744=116px delta (136−36=100px new content + 16px margin).
+/// The panel is organised into FOUR tabs (a strip of clickable labels sits just
+/// under the title): only the active tab's bands are laid out, so PANEL_H is
+/// sized to the TALLEST tab rather than the sum of every band:
 ///
-/// PANEL_H was then grown 860→1102 to insert the new "UI FONT" section (size
-/// band + live "Aa" specimen + 4-row family list) BETWEEN the terminal FONT list
-/// and the THEME band. The section is `UI_SECTION_SHIFT` (242px) tall; THEME and
-/// the theme cards shift down by exactly that, so the layout below is unchanged
-/// in relative terms (the pinned ordering/containment tests still hold). The old
-/// cards bottom (py+814) becomes py+1056, leaving the same ~46px bottom margin.
+/// * Tab 0 "Look"   — opacity slider, corner-radius slider, theme cards.
+/// * Tab 1 "Fonts"  — font-size, font-family list, UI-font-size + "Aa" specimen,
+///                    UI-font-family list. (TALLEST tab — drives PANEL_H.)
+/// * Tab 2 "Window" — summon effect, window mode, dropdown height, dropdown
+///                    width, tab-bar position, auto-hide toggle.
+/// * Tab 3 "Shell"  — shell picker, launch-at-login toggle.
 ///
-/// The "LAUNCH AT LOGIN" toggle band was then appended at the very BOTTOM, 12px
-/// below the theme-card grid (py+1068..py+1096), so NO existing element moves. It
-/// fits inside the ~46px slack the panel already had below the cards, so PANEL_H
-/// was 1102 (= band bottom py+1096 + 6px margin); no growth was required.
-///
-/// The "SHELL" cycler band (‹ name › like WINDOW MODE) was then appended below
-/// LAUNCH AT LOGIN, 12px under its bottom (py+1096): band at py+1108..py+1136
-/// (h=28), so PANEL_H grew 1102→1142 (= band bottom py+1136 + 6px margin). NO
-/// existing element moves.
+/// All four tabs share one `content_top` (py+100) and lay their bands out
+/// top-down from there. The Fonts tab's last UI-font row bottoms at ~py+520, so
+/// PANEL_H = 560 leaves a comfortable bottom margin; shorter tabs simply have
+/// empty space below their last band.
 pub const PANEL_W: f32 = 380.0;
-pub const PANEL_H: f32 = 1142.0;
-
-/// Vertical size of the inserted "UI FONT" section. THEME + cards (everything
-/// below the terminal FONT list) shift down by exactly this. Keeping it a single
-/// named constant means the grow-and-shift is consistent in every offset below.
-const UI_SECTION_SHIFT: f32 = 242.0;
+pub const PANEL_H: f32 = 560.0;
 
 // Compile-time lockstep: CHIP_NAMES must always have one entry per PRESETS entry.
 // This panics at build time if PRESETS grows without updating CHIP_NAMES (or vice versa).
@@ -151,6 +156,9 @@ const _: () = assert!(CHIP_NAMES.len() == jetty_core::theme::PRESETS.len());
 /// currently selected family name, the scroll offset into the family list, and
 /// a user drag offset (`dx`, `dy`) added to the centered position so the dialog
 /// can be moved. The panel is clamped to remain fully on-screen.
+///
+/// `active_tab` (0..=3) selects which group of bands is laid out; every other
+/// tab's widgets are positioned offscreen so hit-tests can never match them.
 ///
 /// `char_w` is the measured physical-pixel advance of one chrome-font character
 /// (from `TextLayer::cell_size().0`). Pass `CHAR_W_FALLBACK` (9.8) when a real
@@ -173,8 +181,8 @@ pub fn build_panel(
     dropdown_width_pct: f32,
     is_dropdown: bool,
     focus_autohide: bool,
-    // `launch_at_login`: drives the bottom "LAUNCH AT LOGIN" toggle pill (accent
-    //   when ON). The app derives this from the XDG autostart file's existence.
+    // `launch_at_login`: drives the "LAUNCH AT LOGIN" toggle pill (accent when
+    //   ON). The app derives this from the XDG autostart file's existence.
     launch_at_login: bool,
     // ── UI (chrome) FONT section inputs ──
     // `ui_font_size`: the TRUE UI font size in logical points (10..=28). Drives
@@ -196,7 +204,11 @@ pub fn build_panel(
     //   "System default" when the `shell` config key is empty. Drives the SHELL
     //   cycler band's centered name, mirroring `window_mode_name`.
     shell_display: &str,
+    // `active_tab`: 0..=3 — which tab's bands are laid out (see TAB_NAMES). Values
+    //   above 3 are clamped to 3. Session-only; not persisted.
+    active_tab: usize,
 ) -> PanelView {
+    let active_tab = active_tab.min(3);
 
     // --- Theme-derived panel chrome colors ---
     // All panel colors are derived from the ACTIVE theme so the settings window
@@ -248,41 +260,55 @@ pub fn build_panel(
     // read as labels rather than values, matching the design's "muted CAPS" look.
     let text_header = lerp(0.55);
 
-    // ── Vertical layout (non-overlapping bands, each ≥12px gap from prior) ──
-    //
-    //  py+ 0  .. py+36   Title bar  (title label at py+12)
-    //  py+48  .. py+96   Opacity band  (CAPS label+value at py+48, track at py+72)
-    //                    slider track h=6 → bottom py+78; handle h=18 → bottom py+84 (± 3)
-    //  py+96  .. py+144  Corner-radius band  (CAPS label+value at py+96, track at py+120)
-    //                    track h=6 → bottom py+126; handle h=18 → bottom py+132
-    //  py+144 .. py+192  Summon-effect band  (CAPS label at py+144, ‹ name › INLINE on the header row at py+138, h=28)
-    //  py+192 .. py+240  Window-mode band    (CAPS label at py+192, ‹ name › INLINE on the header row at py+186, h=28)
-    //  py+240 .. py+288  Tab-bar band        (CAPS label at py+240, ‹ name › INLINE on the header row at py+234, h=28)
-    //  py+300 .. py+336  Dropdown-height band (CAPS label+value at py+300, track at py+324, handle py+318)
-    //  py+348 .. py+384  Dropdown-width band  (CAPS label+value at py+348, track at py+372, handle py+366)
-    //  py+396 .. py+432  Auto-hide band      (CAPS label at py+396, toggle pill at py+396, h=28)
-    //  py+444 .. py+492  Font-size band  (CAPS label+value at py+444, buttons at py+464, btn h=28 → bottom py+492)
-    //  py+504 .. py+512  "FONT" section header label + scroll arrows
-    //  py+526 ..         Font-family list rows (5×(22+2)=120px → bottom py+646)
-    //  py+658            "THEME" label (12px gap after list bottom)
-    //  py+678            Theme cards — 2-col × 3-row grid:
-    //                    col_w=(348−8)/2=170; card_h=40; gap=8
-    //                    row0 at py+678..py+718; row1 at py+726..py+766; row2 at py+774..py+814
-    //  NOTE: THEME + cards actually sit UI_SECTION_SHIFT(242) lower than the
-    //  py-offsets sketched just above (the "FONT" list is followed by the UI FONT
-    //  section before THEME). Real positions: "THEME" label at py+900; cards
-    //  py+920..py+1056 (3 rows).
-    //  py+1068 .. py+1096  Launch-at-login band (CAPS label + toggle pill at py+1068, h=28)
-    //  py+1108 .. py+1136  Shell band (CAPS label + ‹ name › cycler at py+1108, h=28)
-    //  py+1136..py+1142   6px bottom margin
-    //  PANEL_H = 1136 + 6 = 1142
-    //  (PANEL_W/PANEL_H are module-level pub consts above)
-
     // Center, then apply the user drag offset, then clamp to screen edges.
     let sw = screen_w as f32;
     let sh = screen_h as f32;
     let px = (((sw - PANEL_W) / 2.0).floor() + dx).clamp(0.0, (sw - PANEL_W).max(0.0));
     let py = (((sh - PANEL_H) / 2.0).floor() + dy).clamp(0.0, (sh - PANEL_H).max(0.0));
+
+    // ── Per-band tops ────────────────────────────────────────────────────────
+    // Every band keeps its existing internal (sub-element) layout relative to a
+    // single "band top" Y. For the ACTIVE tab the band tops run top-down from
+    // `content_top`; for every other tab they are OFF (offscreen), so all rects
+    // and labels derived from them fall far offscreen and can neither be hit-tested
+    // nor seen. This keeps app.rs's hit-test logic tab-agnostic.
+    //
+    //   Tab 0 "Look":   opacity(48) · corner-radius(48) · theme cards(grid)
+    //   Tab 1 "Fonts":  font-size(60) · font list(154) · UI-size+specimen(90) · UI list
+    //   Tab 2 "Window": summon · win-mode · drop-h · drop-w · tab-bar · auto-hide (48 each)
+    //   Tab 3 "Shell":  shell cycler(48) · launch-at-login toggle
+    let content_top = py + 100.0;
+    let (mut t_opacity, mut t_radius, mut t_theme) = (OFF, OFF, OFF);
+    let (mut t_fontsize, mut t_fontlist, mut t_uifontsize, mut t_uifontlist) =
+        (OFF, OFF, OFF, OFF);
+    let (mut t_summon, mut t_winmode, mut t_droph, mut t_dropw, mut t_tabbar, mut t_autohide) =
+        (OFF, OFF, OFF, OFF, OFF, OFF);
+    let (mut t_shell, mut t_launch) = (OFF, OFF);
+    match active_tab {
+        0 => {
+            t_opacity = content_top;
+            t_radius = content_top + 48.0;
+            t_theme = content_top + 96.0;
+        }
+        1 => {
+            t_fontsize = content_top;
+            t_fontlist = content_top + 60.0;
+            t_uifontsize = content_top + 214.0;
+            t_uifontlist = content_top + 304.0;
+        }
+        2 => {
+            t_summon = content_top;
+            t_winmode = content_top + 48.0;
+            t_droph = content_top + 96.0;
+            t_dropw = content_top + 144.0;
+            t_tabbar = content_top + 192.0;
+            t_autohide = content_top + 240.0;
+        }
+        _ => {
+            t_shell = content_top;
+            t_launch = content_top + 48.0;
+        }
+    }
 
     // --- Full-screen dim quad (drawn before everything else) ---
     let dim_rect = Rect {
@@ -308,6 +334,24 @@ pub fn build_panel(
         ..Default::default()
     };
 
+    // --- Tab strip (py+50 .. py+82): 4 evenly distributed clickable labels ---
+    // Labels baseline at py+56; the active tab gets a 2px accent underline at
+    // py+78. The hit rects span the full cell so the whole label area is clickable.
+    let tab_w = (PANEL_W - 32.0) / 4.0;
+    let tab_strip_y = py + 56.0;
+    let mut tab_rects: [Rect; 4] = [Rect::default(); 4];
+    for (i, r) in tab_rects.iter_mut().enumerate() {
+        let cell_x = px + 16.0 + i as f32 * tab_w;
+        *r = Rect {
+            x: cell_x,
+            y: py + 50.0,
+            w: tab_w,
+            h: 30.0,
+            color: [0, 0, 0, 0],
+            ..Default::default()
+        };
+    }
+
     // Helper: right-align a text value on the section-header row.
     // Returns the x-position such that the text's right edge sits at px+PANEL_W-16.
     let right_x = |text: &str| -> f32 {
@@ -315,78 +359,74 @@ pub fn build_panel(
         px + PANEL_W - 16.0 - w
     };
 
-    // --- Opacity band (py+48 .. py+96) ---
-    // CAPS label at py+48; value right-aligned on same row; track at py+72 (h=6);
-    // handle at py+66 (h=18). The filled left portion of the track shows progress.
-    let slider_track = Rect::rounded(px + 16.0, py + 72.0, 348.0, 6.0, slider_track_col, 3.0);
+    // --- Opacity band (Look) ---
+    // CAPS label + value on the header row (t_opacity); track at +24 (h=6); handle
+    // at +18 (h=18). The filled left portion of the track shows progress.
+    let slider_track = Rect::rounded(px + 16.0, t_opacity + 24.0, 348.0, 6.0, slider_track_col, 3.0);
     let frac = ((opacity - 0.1) / 0.9).clamp(0.0, 1.0);
     let handle_x = px + 16.0 + frac * (348.0 - 14.0);
-    let slider_handle = Rect::rounded(handle_x, py + 66.0, 14.0, 18.0, accent_col, 4.0);
-    // Filled portion: from track left to handle centre, in accent color.
+    let slider_handle = Rect::rounded(handle_x, t_opacity + 18.0, 14.0, 18.0, accent_col, 4.0);
     let opacity_fill_w = (frac * (348.0 - 14.0) + 7.0).max(6.0).min(348.0);
-    let opacity_fill = Rect::rounded(px + 16.0, py + 72.0, opacity_fill_w, 6.0, accent_fill, 3.0);
+    let opacity_fill = Rect::rounded(px + 16.0, t_opacity + 24.0, opacity_fill_w, 6.0, accent_fill, 3.0);
 
-    // --- Corner-radius band (py+96 .. py+144) ---
-    // CAPS label at py+96; value right-aligned; track at py+120 (h=6); handle at py+114 (h=18).
+    // --- Corner-radius band (Look) ---
     // Radius range is [0, 24] px.
     const RADIUS_MAX: f32 = 24.0;
-    let radius_track = Rect::rounded(px + 16.0, py + 120.0, 348.0, 6.0, slider_track_col, 3.0);
+    let radius_track = Rect::rounded(px + 16.0, t_radius + 24.0, 348.0, 6.0, slider_track_col, 3.0);
     let r_frac = (corner_radius / RADIUS_MAX).clamp(0.0, 1.0);
     let radius_handle_x = px + 16.0 + r_frac * (348.0 - 14.0);
-    let radius_handle = Rect::rounded(radius_handle_x, py + 114.0, 14.0, 18.0, accent_col, 4.0);
+    let radius_handle = Rect::rounded(radius_handle_x, t_radius + 18.0, 14.0, 18.0, accent_col, 4.0);
     let radius_fill_w = (r_frac * (348.0 - 14.0) + 7.0).max(6.0).min(348.0);
-    let radius_fill = Rect::rounded(px + 16.0, py + 120.0, radius_fill_w, 6.0, accent_fill, 3.0);
+    let radius_fill = Rect::rounded(px + 16.0, t_radius + 24.0, radius_fill_w, 6.0, accent_fill, 3.0);
 
-    // --- Summon-effect band (py+144 .. py+192) ---
-    // CAPS label at py+144; ‹ name › cycle control INLINE on the same row,
-    // right-aligned (button h=28 centred on the header text → top at py+138),
-    // mirroring the sliders' header+value-on-one-row rhythm.
-    let summon_btn_y = py + 138.0;
-    let summon_prev_x = px + 200.0;
-    let summon_next_x = px + PANEL_W - 16.0 - 28.0; // rightmost
-    let summon_prev = Rect::rounded(summon_prev_x, summon_btn_y, 28.0, 28.0, btn_fill, 4.0);
-    let summon_next = Rect::rounded(summon_next_x, summon_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    // Shared x-positions for the ‹ / › cycle buttons (Summon/WinMode/TabBar/Shell).
+    let cycle_prev_x = px + 200.0;
+    let cycle_next_x = px + PANEL_W - 16.0 - 28.0; // rightmost
 
-    // --- Window-mode band (py+192 .. py+240) ---
-    // CAPS label at py+192; ‹ name › cycle control inline on the header row.
-    let winmode_btn_y = py + 186.0;
-    let win_mode_prev = Rect::rounded(summon_prev_x, winmode_btn_y, 28.0, 28.0, btn_fill, 4.0);
-    let win_mode_next = Rect::rounded(summon_next_x, winmode_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    // --- Summon-effect band (Window) ---
+    // CAPS label at t_summon; ‹ name › cycle control INLINE on the same row,
+    // right-aligned (button h=28 centred on the header text → top at t_summon-6).
+    let summon_btn_y = t_summon - 6.0;
+    let summon_prev = Rect::rounded(cycle_prev_x, summon_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let summon_next = Rect::rounded(cycle_next_x, summon_btn_y, 28.0, 28.0, btn_fill, 4.0);
 
-    // --- Tab-bar band (py+240 .. py+288) ---
-    // CAPS label at py+240; ‹ name › cycle control inline on the header row.
-    let tabbar_btn_y = py + 234.0;
-    let tab_bar_prev = Rect::rounded(summon_prev_x, tabbar_btn_y, 28.0, 28.0, btn_fill, 4.0);
-    let tab_bar_next = Rect::rounded(summon_next_x, tabbar_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    // --- Window-mode band (Window) ---
+    let winmode_btn_y = t_winmode - 6.0;
+    let win_mode_prev = Rect::rounded(cycle_prev_x, winmode_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let win_mode_next = Rect::rounded(cycle_next_x, winmode_btn_y, 28.0, 28.0, btn_fill, 4.0);
 
-    // --- Dropdown-height band (py+300 .. py+336) ---
-    // CAPS label at py+300; value right-aligned; track at py+324 (h=6); handle at py+318 (h=18).
+    // --- Tab-bar band (Window) ---
+    let tabbar_btn_y = t_tabbar - 6.0;
+    let tab_bar_prev = Rect::rounded(cycle_prev_x, tabbar_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let tab_bar_next = Rect::rounded(cycle_next_x, tabbar_btn_y, 28.0, 28.0, btn_fill, 4.0);
+
+    // --- Dropdown-height band (Window) ---
+    // CAPS label + value at t_droph; track at +24 (h=6); handle at +18 (h=18).
     // Range 25%..100%. Grayed (treated as no-op) when mode==Center.
-    let dropdown_track = Rect::rounded(px + 16.0, py + 324.0, 348.0, 6.0, slider_track_col, 3.0);
+    let dropdown_track = Rect::rounded(px + 16.0, t_droph + 24.0, 348.0, 6.0, slider_track_col, 3.0);
     let dh_frac = ((dropdown_height_pct - 0.25) / 0.75).clamp(0.0, 1.0);
     let dropdown_handle_x = px + 16.0 + dh_frac * (348.0 - 14.0);
-    let dropdown_handle = Rect::rounded(dropdown_handle_x, py + 318.0, 14.0, 18.0, accent_col, 4.0);
+    let dropdown_handle = Rect::rounded(dropdown_handle_x, t_droph + 18.0, 14.0, 18.0, accent_col, 4.0);
     let dh_fill_w = (dh_frac * (348.0 - 14.0) + 7.0).max(6.0).min(348.0);
-    let dh_fill = Rect::rounded(px + 16.0, py + 324.0, dh_fill_w, 6.0, accent_fill, 3.0);
+    let dh_fill = Rect::rounded(px + 16.0, t_droph + 24.0, dh_fill_w, 6.0, accent_fill, 3.0);
 
-    // --- Dropdown-width band (py+348 .. py+384) ---
-    // CAPS label at py+348; value right-aligned; track at py+372 (h=6); handle at py+366 (h=18).
+    // --- Dropdown-width band (Window) ---
     // Range 20%..100%. Grayed (treated as no-op) when mode==Center.
-    let dropdown_width_track = Rect::rounded(px + 16.0, py + 372.0, 348.0, 6.0, slider_track_col, 3.0);
+    let dropdown_width_track = Rect::rounded(px + 16.0, t_dropw + 24.0, 348.0, 6.0, slider_track_col, 3.0);
     let dw_frac = ((dropdown_width_pct - 0.2) / 0.8).clamp(0.0, 1.0);
     let dropdown_width_handle_x = px + 16.0 + dw_frac * (348.0 - 14.0);
-    let dropdown_width_handle = Rect::rounded(dropdown_width_handle_x, py + 366.0, 14.0, 18.0, accent_col, 4.0);
+    let dropdown_width_handle = Rect::rounded(dropdown_width_handle_x, t_dropw + 18.0, 14.0, 18.0, accent_col, 4.0);
     let dw_fill_w = (dw_frac * (348.0 - 14.0) + 7.0).max(6.0).min(348.0);
-    let dw_fill = Rect::rounded(px + 16.0, py + 372.0, dw_fill_w, 6.0, accent_fill, 3.0);
+    let dw_fill = Rect::rounded(px + 16.0, t_dropw + 24.0, dw_fill_w, 6.0, accent_fill, 3.0);
 
-    // --- Auto-hide band (py+396 .. py+432) ---
-    // CAPS label at py+396; toggle pill at the right (h=28). Pill is accent when ON.
+    // --- Auto-hide band (Window) ---
+    // CAPS label at t_autohide; toggle pill at the right (h=28). Accent when ON.
     let autohide_pill_col: [u8; 4] = if focus_autohide { accent_col } else { btn_fill };
-    let autohide_toggle = Rect::rounded(px + PANEL_W - 16.0 - 56.0, py + 396.0, 56.0, 28.0, autohide_pill_col, 14.0);
+    let autohide_toggle = Rect::rounded(px + PANEL_W - 16.0 - 56.0, t_autohide, 56.0, 28.0, autohide_pill_col, 14.0);
 
-    // --- Font-size band (py+444 .. py+492) ---
-    // CAPS label+value at py+444; "Npt" readout right-aligned; buttons at py+464 (h=28 → bottom py+492).
-    let font_btn_y = py + 464.0;
+    // --- Font-size band (Fonts) ---
+    // CAPS label + value at t_fontsize; buttons at +20 (h=28).
+    let font_btn_y = t_fontsize + 20.0;
     let font_minus_x = px + 200.0;
     let font_plus_x  = font_minus_x + 36.0;
     let font_reset_x = font_plus_x  + 36.0;
@@ -395,21 +435,18 @@ pub fn build_panel(
     let font_plus = Rect::rounded(font_plus_x, font_btn_y, 28.0, 28.0, btn_fill, 4.0);
     let font_reset = Rect::rounded(font_reset_x, font_btn_y, 44.0, 28.0, btn_fill, 4.0);
 
-    // --- Font scroll buttons (▲ / ▼) in the "FONT" header row at py+504 ---
-    // Two 20×20 buttons placed at the right side of the header row.
-    let scroll_btn_y = py + 502.0;
+    // --- Font scroll buttons (▲ / ▼) on the "FONT" header row (Fonts) ---
+    let scroll_btn_y = t_fontlist - 2.0;
     let scroll_down_x = px + PANEL_W - 16.0 - 20.0;        // ▼ rightmost
     let scroll_up_x   = scroll_down_x - 24.0;               // ▲ left of ▼
     let font_scroll_up = Rect::rounded(scroll_up_x, scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
     let font_scroll_down = Rect::rounded(scroll_down_x, scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
 
-    // --- Font-family list (py+526 .. py+646) ---
-    // "FONT" header at py+504; list rows start at py+526.
-    // 5 rows × (22px row + 2px gap) = 120px → list bottom = py+646.
-    // Theme label at py+658 (12px gap); cards start at py+678.
+    // --- Font-family list (Fonts) ---
+    // "FONT" header at t_fontlist; rows start at +22. 5 rows × (22+2) = 120px.
     const ROW_H: f32 = 22.0;
     const ROW_GAP: f32 = 2.0;
-    let list_top = py + 526.0;
+    let list_top = t_fontlist + 22.0;
     let list_x = px + 16.0;
     let list_w = PANEL_W - 32.0;
 
@@ -425,20 +462,11 @@ pub fn build_panel(
         font_row_rects.push(Rect::rounded(list_x, row_y, list_w, ROW_H, row_color, 3.0));
     }
 
-    // ── UI (chrome) FONT section (py+668 .. py+888) ──────────────────────────
-    // Inserted between the terminal FONT list (bottom py+646) and the THEME band.
-    // Styled identically to the terminal FONT section so they read as a matched
-    // pair. Everything below (THEME + cards) shifts down by UI_SECTION_SHIFT.
-    //
-    //  py+668  "UI FONT SIZE" CAPS header + right-aligned "Npt" readout
-    //  py+688  − / + / rst buttons (h=28 → bottom py+716)
-    //  py+726  live "Aa" specimen baseline (drawn at the TRUE ui_font_size)
-    //  py+770  "UI FONT" list header + ▲/▼ scroll arrows + "(shown/total)" hint
-    //  py+792  4 family rows × (22+2)=96 → list bottom py+888
-    // THEME then sits at py+(658+SHIFT)=py+900; cards at py+(678+SHIFT)=py+920.
-
-    // UI FONT SIZE band: − / + / rst buttons, mirroring the terminal FONT SIZE band.
-    let ui_font_btn_y = py + 688.0;
+    // ── UI (chrome) FONT size band + "Aa" specimen (Fonts) ───────────────────
+    //  t_uifontsize       "UI FONT SIZE" CAPS header + right-aligned "Npt" readout
+    //  t_uifontsize+20    − / + / rst buttons (h=28)
+    //  t_uifontsize+58    live "Aa" specimen baseline (drawn at the TRUE ui_font_size)
+    let ui_font_btn_y = t_uifontsize + 20.0;
     let ui_font_minus_x = px + 200.0;
     let ui_font_plus_x = ui_font_minus_x + 36.0;
     let ui_font_reset_x = ui_font_plus_x + 36.0;
@@ -447,19 +475,25 @@ pub fn build_panel(
     let ui_font_reset = Rect::rounded(ui_font_reset_x, ui_font_btn_y, 44.0, 28.0, btn_fill, 4.0);
 
     // Live "Aa" specimen baseline. The app overdraws "Aa" here at the TRUE UI size
-    // (PanelView.ui_specimen_pos) AFTER the capped panel-text pass, so the user
-    // sees the real big/small/typeface preview even though the panel body is capped.
-    let ui_specimen_pos = (px + 16.0, py + 726.0);
+    // AFTER the capped panel-text pass. Offscreen unless the Fonts tab is active,
+    // so the "Aa" is only drawn on that tab.
+    let ui_specimen_pos = if active_tab == 1 {
+        (px + 16.0, t_uifontsize + 58.0)
+    } else {
+        (px + 16.0, OFF)
+    };
 
-    // UI FONT family list scroll buttons (▲ / ▼) on the "UI FONT" header row.
-    let ui_scroll_btn_y = py + 768.0;
+    // ── UI (chrome) FONT family list (Fonts) ─────────────────────────────────
+    //  t_uifontlist       "UI FONT" list header + ▲/▼ scroll arrows + "(shown/total)"
+    //  t_uifontlist+22    4 family rows × (22+2)
+    let ui_scroll_btn_y = t_uifontlist - 2.0;
     let ui_scroll_down_x = px + PANEL_W - 16.0 - 20.0;
     let ui_scroll_up_x = ui_scroll_down_x - 24.0;
     let ui_font_scroll_up = Rect::rounded(ui_scroll_up_x, ui_scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
     let ui_font_scroll_down = Rect::rounded(ui_scroll_down_x, ui_scroll_btn_y, 20.0, 20.0, btn_fill, 4.0);
 
     // UI FONT family list — 4 rows. Index 0 of ui_families is "System Sans".
-    let ui_list_top = py + 792.0;
+    let ui_list_top = t_uifontlist + 22.0;
     let ui_offset = ui_font_scroll_offset.min(ui_families.len().saturating_sub(1));
     let ui_visible_count = (ui_families.len().saturating_sub(ui_offset)).min(MAX_UI_FONT_ROWS);
     let mut ui_font_row_rects: Vec<Rect> = Vec::with_capacity(ui_visible_count);
@@ -477,12 +511,9 @@ pub fn build_panel(
         ui_font_row_rects.push(Rect::rounded(list_x, row_y, list_w, ROW_H, row_color, 3.0));
     }
 
-    // --- Theme cards — 2-column × 3-row grid (py+678 .. py+854) ---
-    // "THEME" label at py+658; cards start at py+678.
+    // --- Theme cards — 2-column × 3-row grid (Look) ---
+    // "THEME" label at t_theme; cards start at +20.
     // Each card: col_w = (348 − 8) / 2 = 170px; card_h = 40px; row_gap = 8px.
-    // Layout: row0=[Mocha,Tokyo], row1=[Gruv,Drac], row2=[Onyx,(empty)].
-    // Each card contains a 3-dot color preview (bg, palette[4]/accent, palette[2])
-    // and the theme name beneath the dots, giving an at-a-glance swatch.
     let presets = jetty_core::theme::PRESETS;
     let num_presets = presets.len(); // 5
 
@@ -491,8 +522,7 @@ pub fn build_panel(
     const CARD_ROW_GAP: f32 = 8.0;
     const CARD_COL_GAP: f32 = 8.0;
     let card_w = (348.0 - (CARD_COLS as f32 - 1.0) * CARD_COL_GAP) / CARD_COLS as f32; // 170px
-    // Cards shift down by UI_SECTION_SHIFT to make room for the new UI FONT section.
-    let card_top = py + 678.0 + UI_SECTION_SHIFT;
+    let card_top = t_theme + 20.0;
 
     let mut chip_rects: Vec<Rect> = Vec::with_capacity(num_presets);
     for i in 0..num_presets {
@@ -507,35 +537,41 @@ pub fn build_panel(
         ));
     }
 
-    // Compute bottom of last card for PANEL_H sanity — last card row for 5 items:
-    // row = (4/2) = 2, bottom = card_top + 2*(40+8) + 40 = card_top + 136.
-    // card_top = py+678+SHIFT(242) = py+920, so bottom = py+1056.
-
-    // --- Launch-at-login band (py+1068 .. py+1096), bottom of the panel ---
-    // Placed 12px below the theme-card grid bottom (py+1056) so NO existing
-    // element moves. CAPS label at py+1068; toggle pill at the right (h=28),
-    // mirroring the auto-hide pill. Accent when ON. Pill bottom py+1096 →
-    // PANEL_H = 1096 + 6 = 1102 (consumes the slack the panel already had).
+    // --- Launch-at-login band (Shell) ---
+    // CAPS label at t_launch; toggle pill at the right (h=28). Accent when ON.
     let launch_login_pill_col: [u8; 4] = if launch_at_login { accent_col } else { btn_fill };
     let launch_login_toggle =
-        Rect::rounded(px + PANEL_W - 16.0 - 56.0, py + 1068.0, 56.0, 28.0, launch_login_pill_col, 14.0);
+        Rect::rounded(px + PANEL_W - 16.0 - 56.0, t_launch, 56.0, 28.0, launch_login_pill_col, 14.0);
 
-    // --- Shell band (py+1108 .. py+1136), bottom-most band ---
+    // --- Shell band (Shell) ---
     // CAPS label + ‹ name › cycler, MIRRORING the SUMMON EFFECT / WINDOW MODE
-    // bands exactly (same ‹/› button rects, same name-centering). Placed 12px
-    // below the launch-at-login band (bottom py+1096) so NO existing element
-    // moves. Button bottom py+1136 → PANEL_H = 1136 + 6 = 1142.
-    let shell_btn_y = py + 1108.0;
-    let shell_prev = Rect::rounded(summon_prev_x, shell_btn_y, 28.0, 28.0, btn_fill, 4.0);
-    let shell_next = Rect::rounded(summon_next_x, shell_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    // bands exactly (same ‹/› button rects, same name-centering).
+    let shell_btn_y = t_shell - 6.0;
+    let shell_prev = Rect::rounded(cycle_prev_x, shell_btn_y, 28.0, 28.0, btn_fill, 4.0);
+    let shell_next = Rect::rounded(cycle_next_x, shell_btn_y, 28.0, 28.0, btn_fill, 4.0);
 
     // --- Build quads in draw order ---
-    // Order: dim, border, bg, buttons, filled-track portions, tracks, handles,
-    //        chip border highlight, chip fills, font-family rows.
     let mut quads: Vec<Rect> = Vec::new();
     quads.push(dim_rect);
     quads.push(border_rect);
     quads.push(bg_rect);
+
+    // Active-tab underline bar under the tab strip.
+    {
+        let name = TAB_NAMES[active_tab];
+        let text_w = name.chars().count() as f32 * char_w;
+        let cell_x = px + 16.0 + active_tab as f32 * tab_w;
+        let bar_w = text_w + 10.0;
+        let bar_x = cell_x + (tab_w - bar_w) * 0.5;
+        quads.push(Rect {
+            x: bar_x,
+            y: py + 78.0,
+            w: bar_w,
+            h: 2.0,
+            color: accent_col,
+            ..Default::default()
+        });
+    }
 
     // Summon-effect cycle buttons.
     quads.push(summon_prev);
@@ -569,10 +605,10 @@ pub fn build_panel(
     // Auto-hide toggle pill.
     quads.push(autohide_toggle);
 
-    // Launch-at-login toggle pill (bottom band).
+    // Launch-at-login toggle pill.
     quads.push(launch_login_toggle);
 
-    // Shell-picker cycle buttons (bottom-most band).
+    // Shell-picker cycle buttons.
     quads.push(shell_prev);
     quads.push(shell_next);
 
@@ -608,14 +644,11 @@ pub fn build_panel(
     quads.extend_from_slice(&chip_rects);
 
     // Color-dot quads for each theme card (3 dots: bg-neighbor, accent, bright).
-    // Dots are 8×8 circles laid out at 3px from the card left edge, vertically
-    // centred in the top half of the card so the name label fits below them.
     const DOT_R: f32 = 8.0;
     const DOT_GAP: f32 = 4.0;
     for i in 0..num_presets {
         let card = &chip_rects[i];
         let t = jetty_core::Theme::by_name(presets[i]);
-        // Three representative colors: bg-lifted, accent (palette[4]), bright (palette[6]).
         let dot_colors = [
             // Slightly lifted bg — "surface" color.
             {
@@ -654,26 +687,33 @@ pub fn build_panel(
     // Title.
     labels.push(("Settings".to_string(), px + 16.0, py + 12.0, text_main));
 
-    // OPACITY header (py+48) — CAPS with right-aligned "97%" value.
+    // Tab strip labels — active tab accent-colored, others dim.
+    for (i, name) in TAB_NAMES.iter().enumerate() {
+        let cell_x = px + 16.0 + i as f32 * tab_w;
+        let text_w = name.chars().count() as f32 * char_w;
+        let label_x = cell_x + (tab_w - text_w) * 0.5;
+        let col = if i == active_tab { accent } else { text_header };
+        labels.push((name.to_string(), label_x, tab_strip_y, col));
+    }
+
+    // OPACITY header — CAPS with right-aligned "97%" value.
     let pct = (opacity * 100.0).round() as i32;
     let pct_str = format!("{}%", pct);
-    labels.push(("OPACITY".to_string(), px + 16.0, py + 48.0, text_header));
-    labels.push((pct_str.clone(), right_x(&pct_str), py + 48.0, text_main));
+    labels.push(("OPACITY".to_string(), px + 16.0, t_opacity, text_header));
+    labels.push((pct_str.clone(), right_x(&pct_str), t_opacity, text_main));
 
-    // CORNER RADIUS header (py+96) — CAPS with right-aligned "Npx" value.
+    // CORNER RADIUS header — CAPS with right-aligned "Npx" value.
     let radius_px = corner_radius.round() as i32;
     let radius_str = format!("{}px", radius_px);
-    labels.push(("CORNER RADIUS".to_string(), px + 16.0, py + 96.0, text_header));
-    labels.push((radius_str.clone(), right_x(&radius_str), py + 96.0, text_main));
+    labels.push(("CORNER RADIUS".to_string(), px + 16.0, t_radius, text_header));
+    labels.push((radius_str.clone(), right_x(&radius_str), t_radius, text_main));
 
     // Helper: center a (possibly truncated) cycle-name label between the ‹ and ›
-    // buttons. The gap runs from [summon_prev_x+28] to [summon_next_x]; we clamp
+    // buttons. The gap runs from [cycle_prev_x+28] to [cycle_next_x]; we clamp
     // the x so a long name never overruns either button.
-    // Max chars that fit in the gap (cycle_gap_w / char_w, approximately 11 at scale 1).
-    let cycle_gap_left  = summon_prev_x + 28.0; // right edge of ‹ button
-    let cycle_gap_right = summon_next_x;         // left edge of › button
+    let cycle_gap_left  = cycle_prev_x + 28.0; // right edge of ‹ button
+    let cycle_gap_right = cycle_next_x;         // left edge of › button
     let cycle_gap_w     = cycle_gap_right - cycle_gap_left;
-    // Guard against zero/tiny char_w to avoid infinite truncation.
     let cycle_max_chars = if char_w > 0.0 {
         ((cycle_gap_w / char_w).floor() as usize).max(3)
     } else {
@@ -689,60 +729,56 @@ pub fn build_panel(
             name.to_string()
         };
         let text_w = shown.chars().count() as f32 * char_w;
-        // Center in the gap, clamped so text stays between the buttons.
         let x = (cycle_gap_left + (cycle_gap_w - text_w) * 0.5)
             .clamp(cycle_gap_left, (cycle_gap_right - text_w).max(cycle_gap_left));
         (shown, x)
     };
 
-    // SUMMON EFFECT section (py+144) — CAPS header.
-    labels.push(("SUMMON EFFECT".to_string(), px + 16.0, py + 144.0, text_header));
-    // Effect name centered between the ‹ / › buttons.
+    // SUMMON EFFECT band (Window) — CAPS header.
+    labels.push(("SUMMON EFFECT".to_string(), px + 16.0, t_summon, text_header));
     {
         let (shown, name_x) = center_cycle(summon_effect_name);
         labels.push((shown, name_x, summon_btn_y + 6.0, text_main));
     }
-    // Cycle button labels (‹ / ›).
-    labels.push(("<".to_string(), summon_prev_x + 9.0, summon_btn_y + 6.0, text_btn));
-    labels.push((">".to_string(), summon_next_x + 9.0, summon_btn_y + 6.0, text_btn));
+    labels.push(("<".to_string(), cycle_prev_x + 9.0, summon_btn_y + 6.0, text_btn));
+    labels.push((">".to_string(), cycle_next_x + 9.0, summon_btn_y + 6.0, text_btn));
 
-    // WINDOW MODE section (py+192) — CAPS header.
-    labels.push(("WINDOW MODE".to_string(), px + 16.0, py + 192.0, text_header));
+    // WINDOW MODE band (Window) — CAPS header.
+    labels.push(("WINDOW MODE".to_string(), px + 16.0, t_winmode, text_header));
     {
         let (shown, name_x) = center_cycle(window_mode_name);
         labels.push((shown, name_x, winmode_btn_y + 6.0, text_main));
     }
-    labels.push(("<".to_string(), summon_prev_x + 9.0, winmode_btn_y + 6.0, text_btn));
-    labels.push((">".to_string(), summon_next_x + 9.0, winmode_btn_y + 6.0, text_btn));
+    labels.push(("<".to_string(), cycle_prev_x + 9.0, winmode_btn_y + 6.0, text_btn));
+    labels.push((">".to_string(), cycle_next_x + 9.0, winmode_btn_y + 6.0, text_btn));
 
-    // TAB BAR section (py+240) — CAPS header.
-    labels.push(("TAB BAR".to_string(), px + 16.0, py + 240.0, text_header));
-    {
-        let (shown, name_x) = center_cycle(tab_bar_name);
-        labels.push((shown, name_x, tabbar_btn_y + 6.0, text_main));
-    }
-    labels.push(("<".to_string(), summon_prev_x + 9.0, tabbar_btn_y + 6.0, text_btn));
-    labels.push((">".to_string(), summon_next_x + 9.0, tabbar_btn_y + 6.0, text_btn));
-
-    // DROPDOWN HEIGHT section (py+300) — CAPS header + right-aligned value.
-    // Grayed when mode==Center.
+    // DROPDOWN HEIGHT band (Window) — CAPS header + right-aligned value.
     let dh_text = if is_dropdown { text_header } else { text_btn };
     let dh_val_text = if is_dropdown { text_main } else { text_btn };
     let dh_pct = (dropdown_height_pct * 100.0).round() as i32;
     let dh_str = format!("{}%", dh_pct);
-    labels.push(("DROPDOWN HEIGHT".to_string(), px + 16.0, py + 300.0, dh_text));
-    labels.push((dh_str.clone(), right_x(&dh_str), py + 300.0, dh_val_text));
+    labels.push(("DROPDOWN HEIGHT".to_string(), px + 16.0, t_droph, dh_text));
+    labels.push((dh_str.clone(), right_x(&dh_str), t_droph, dh_val_text));
 
-    // DROPDOWN WIDTH section (py+348) — CAPS header + right-aligned value.
+    // DROPDOWN WIDTH band (Window) — CAPS header + right-aligned value.
     let dw_text = if is_dropdown { text_header } else { text_btn };
     let dw_val_text = if is_dropdown { text_main } else { text_btn };
     let dw_pct = (dropdown_width_pct * 100.0).round() as i32;
     let dw_str = format!("{}%", dw_pct);
-    labels.push(("DROPDOWN WIDTH".to_string(), px + 16.0, py + 348.0, dw_text));
-    labels.push((dw_str.clone(), right_x(&dw_str), py + 348.0, dw_val_text));
+    labels.push(("DROPDOWN WIDTH".to_string(), px + 16.0, t_dropw, dw_text));
+    labels.push((dw_str.clone(), right_x(&dw_str), t_dropw, dw_val_text));
 
-    // AUTO-HIDE section (py+396) — CAPS header with ON/OFF pill label.
-    labels.push(("AUTO-HIDE ON FOCUS LOSS".to_string(), px + 16.0, py + 396.0, text_header));
+    // TAB BAR band (Window) — CAPS header.
+    labels.push(("TAB BAR".to_string(), px + 16.0, t_tabbar, text_header));
+    {
+        let (shown, name_x) = center_cycle(tab_bar_name);
+        labels.push((shown, name_x, tabbar_btn_y + 6.0, text_main));
+    }
+    labels.push(("<".to_string(), cycle_prev_x + 9.0, tabbar_btn_y + 6.0, text_btn));
+    labels.push((">".to_string(), cycle_next_x + 9.0, tabbar_btn_y + 6.0, text_btn));
+
+    // AUTO-HIDE band (Window) — CAPS header with ON/OFF pill label.
+    labels.push(("AUTO-HIDE ON FOCUS LOSS".to_string(), px + 16.0, t_autohide, text_header));
     let (pill_text, pill_col) = if focus_autohide {
         ("ON", [20u8, 20, 20])
     } else {
@@ -755,19 +791,19 @@ pub fn build_panel(
         pill_col,
     ));
 
-    // FONT SIZE section (py+444) — CAPS header + right-aligned "Npt" value.
+    // FONT SIZE band (Fonts) — CAPS header + right-aligned "Npt" value.
     let fs_display = font_size.round() as i32;
     let fs_str = format!("{}pt", fs_display);
-    labels.push(("FONT SIZE".to_string(), px + 16.0, py + 444.0, text_header));
-    labels.push((fs_str.clone(), right_x(&fs_str), py + 444.0, text_main));
+    labels.push(("FONT SIZE".to_string(), px + 16.0, t_fontsize, text_header));
+    labels.push((fs_str.clone(), right_x(&fs_str), t_fontsize, text_main));
 
     // Font button labels.
     labels.push(("-".to_string(),  font_minus_x + 9.0,  font_btn_y + 6.0,  text_btn));
     labels.push(("+".to_string(),  font_plus_x  + 8.0,  font_btn_y + 6.0,  text_btn));
     labels.push(("rst".to_string(), font_reset_x + 6.0, font_btn_y + 6.0,  text_btn));
 
-    // FONT section header (py+504) — CAPS header; list starts at py+526.
-    labels.push(("FONT".to_string(), px + 16.0, py + 504.0, text_header));
+    // FONT list header (Fonts) — CAPS header; list starts at +22.
+    labels.push(("FONT".to_string(), px + 16.0, t_fontlist, text_header));
 
     // Scroll button labels (▲ / ▼).
     labels.push(("^".to_string(), scroll_up_x   + 6.0, scroll_btn_y + 4.0, text_btn));
@@ -779,14 +815,8 @@ pub fn build_panel(
         if let Some(name) = families.get(family_idx) {
             let row_y = list_top + i as f32 * (ROW_H + ROW_GAP) + 4.0;
             let is_selected = name.as_str() == selected_family;
-            let text_color: [u8; 3] = if is_selected {
-                text_main
-            } else {
-                text_dim
-            };
-            // Truncate long names to avoid overflowing the panel.
-            // Use char-boundary-safe truncation to avoid panicking on
-            // multibyte UTF-8 characters (e.g. accented/CJK family names).
+            let text_color: [u8; 3] = if is_selected { text_main } else { text_dim };
+            // Char-boundary-safe truncation (multibyte-safe).
             let display = if name.chars().count() > 36 {
                 let truncated: String = name.chars().take(34).collect();
                 format!("{}…", truncated)
@@ -797,31 +827,27 @@ pub fn build_panel(
         }
     }
 
-    // Show a scroll hint if there are more families than visible rows.
+    // Scroll hint if there are more families than visible rows.
     if families.len() > MAX_FONT_ROWS {
-        // Right-align the "(shown/total)" hint so its right edge stays clear of
-        // the ▲ scroll button (left edge at px+PANEL_W-60) regardless of how many
-        // digits the counts have — on desktops with hundreds of fonts a fixed
-        // px+PANEL_W-132 anchor overran the arrows.
         let hint = format!("({}/{})", offset + visible_count, families.len());
         let scroll_up_left = px + PANEL_W - 60.0;
         let hint_w = hint.chars().count() as f32 * char_w;
         let hint_x = scroll_up_left - 6.0 - hint_w;
-        labels.push((hint, hint_x, py + 504.0, text_dim));
+        labels.push((hint, hint_x, t_fontlist, text_dim));
     }
 
-    // ── UI FONT section labels ──
-    // UI FONT SIZE header (py+668) + right-aligned "Npt" readout (TRUE size).
+    // ── UI FONT section labels (Fonts) ──
+    // UI FONT SIZE header + right-aligned "Npt" readout (TRUE size).
     let ui_fs_display = ui_font_size.round() as i32;
     let ui_fs_str = format!("{}pt", ui_fs_display);
-    labels.push(("UI FONT SIZE".to_string(), px + 16.0, py + 668.0, text_header));
-    labels.push((ui_fs_str.clone(), right_x(&ui_fs_str), py + 668.0, text_main));
+    labels.push(("UI FONT SIZE".to_string(), px + 16.0, t_uifontsize, text_header));
+    labels.push((ui_fs_str.clone(), right_x(&ui_fs_str), t_uifontsize, text_main));
     labels.push(("-".to_string(),  ui_font_minus_x + 9.0, ui_font_btn_y + 6.0, text_btn));
     labels.push(("+".to_string(),  ui_font_plus_x  + 8.0, ui_font_btn_y + 6.0, text_btn));
     labels.push(("rst".to_string(), ui_font_reset_x + 6.0, ui_font_btn_y + 6.0, text_btn));
 
-    // UI FONT family list header (py+770) + scroll arrows.
-    labels.push(("UI FONT".to_string(), px + 16.0, py + 770.0, text_header));
+    // UI FONT family list header + scroll arrows.
+    labels.push(("UI FONT".to_string(), px + 16.0, t_uifontlist, text_header));
     labels.push(("^".to_string(), ui_scroll_up_x   + 6.0, ui_scroll_btn_y + 4.0, text_btn));
     labels.push(("v".to_string(), ui_scroll_down_x + 6.0, ui_scroll_btn_y + 4.0, text_btn));
 
@@ -852,11 +878,11 @@ pub fn build_panel(
         let scroll_up_left = px + PANEL_W - 60.0;
         let hint_w = hint.chars().count() as f32 * char_w;
         let hint_x = scroll_up_left - 6.0 - hint_w;
-        labels.push((hint, hint_x, py + 770.0, text_dim));
+        labels.push((hint, hint_x, t_uifontlist, text_dim));
     }
 
-    // THEME section header — CAPS, shifted down by UI_SECTION_SHIFT (now py+900).
-    labels.push(("THEME".to_string(), px + 16.0, py + 658.0 + UI_SECTION_SHIFT, text_header));
+    // THEME band (Look) — CAPS header.
+    labels.push(("THEME".to_string(), px + 16.0, t_theme, text_header));
 
     // Theme card name labels and color-dot labels.
     for i in 0..num_presets {
@@ -866,7 +892,6 @@ pub fn build_panel(
         let cb = jetty_core::Theme::by_name(presets[i]).bg;
         let lum = 0.299 * cb[0] as f32 + 0.587 * cb[1] as f32 + 0.114 * cb[2] as f32;
         let label_color: [u8; 3] = if lum > 140.0 { [20, 20, 20] } else { [235, 235, 240] };
-        // Theme name sits in the lower half of the card, below the dot row.
         labels.push((
             CHIP_NAMES[i].to_string(),
             card.x + 8.0,
@@ -875,9 +900,8 @@ pub fn build_panel(
         ));
     }
 
-    // LAUNCH AT LOGIN band (py+1068) — CAPS header with ON/OFF pill label,
-    // mirroring the auto-hide band.
-    labels.push(("LAUNCH AT LOGIN".to_string(), px + 16.0, py + 1068.0, text_header));
+    // LAUNCH AT LOGIN band (Shell) — CAPS header with ON/OFF pill label.
+    labels.push(("LAUNCH AT LOGIN".to_string(), px + 16.0, t_launch, text_header));
     let (launch_pill_text, launch_pill_col) = if launch_at_login {
         ("ON", [20u8, 20, 20])
     } else {
@@ -890,16 +914,14 @@ pub fn build_panel(
         launch_pill_col,
     ));
 
-    // SHELL band (py+1108) — CAPS header with a ‹ name › cycler, mirroring the
-    // SUMMON EFFECT / WINDOW MODE bands. Shell name centered between the ‹ / ›
-    // buttons; CAPS label aligned with the name baseline (btn_y + 6).
+    // SHELL band (Shell) — CAPS header with a ‹ name › cycler.
     labels.push(("SHELL".to_string(), px + 16.0, shell_btn_y + 6.0, text_header));
     {
         let (shown, name_x) = center_cycle(shell_display);
         labels.push((shown, name_x, shell_btn_y + 6.0, text_main));
     }
-    labels.push(("<".to_string(), summon_prev_x + 9.0, shell_btn_y + 6.0, text_btn));
-    labels.push((">".to_string(), summon_next_x + 9.0, shell_btn_y + 6.0, text_btn));
+    labels.push(("<".to_string(), cycle_prev_x + 9.0, shell_btn_y + 6.0, text_btn));
+    labels.push((">".to_string(), cycle_next_x + 9.0, shell_btn_y + 6.0, text_btn));
 
     // --- PanelGeom for hit-testing ---
     let panel_rect = Rect {
@@ -912,6 +934,7 @@ pub fn build_panel(
     };
     let geom = PanelGeom {
         panel: panel_rect,
+        tab_rects,
         slider_track,
         slider_handle,
         chips: chip_rects,
@@ -957,8 +980,8 @@ pub fn build_panel(
 mod tests {
     use super::*;
 
-    /// Build a default panel view with representative inputs for assertion helpers.
-    fn default_panel(screen_w: u32, screen_h: u32) -> PanelView {
+    /// Build a panel view with representative inputs for the given active tab.
+    fn panel_tab(screen_w: u32, screen_h: u32, active_tab: usize) -> PanelView {
         let theme = jetty_core::Theme::by_name("catppuccin_mocha");
         let families: Vec<String> = vec![
             "JetBrains Mono".to_string(),
@@ -1002,48 +1025,44 @@ mod tests {
             &theme,
             CHAR_W_FALLBACK, // char_w (scale-1 default for tests)
             "zsh",           // shell_display
+            active_tab,
         )
+    }
+
+    /// Tab-0 ("Look") panel, the most commonly asserted layout.
+    fn default_panel(screen_w: u32, screen_h: u32) -> PanelView {
+        panel_tab(screen_w, screen_h, 0)
+    }
+
+    /// The visible (on-screen) rects for the active tab — drops any rect pushed
+    /// offscreen (inactive-tab band). Used to assert per-tab layout.
+    fn is_visible(r: &Rect) -> bool {
+        r.y < 1.0e5
     }
 
     #[test]
     fn panel_fits_on_screen_at_various_sizes() {
-        // Screen sizes that can fully contain the panel (PANEL_H = 1142, PANEL_W = 380).
-        // After the UI-FONT section grew PANEL_H 860→1102 and the SHELL band grew it
-        // 1102→1142, a "fully contains" check needs ≥1142px of height; screens shorter
-        // than that clamp to y=0 (asserted non-negative below) — the live Settings
-        // window is sized to PANEL_H+4 so the panel always fits its OWN window
-        // regardless of the desktop resolution.
-        for (w, h) in [(1920u32, 1200u32), (1600, 1150), (2560, 1440), (1440, 1142)] {
-            let pv = default_panel(w, h);
-            let g = &pv.geom;
-            let sw = w as f32;
-            let sh = h as f32;
-            assert!(
-                g.panel.x >= 0.0,
-                "panel.x < 0 at {w}×{h}: {}",
-                g.panel.x
-            );
-            assert!(
-                g.panel.y >= 0.0,
-                "panel.y < 0 at {w}×{h}: {}",
-                g.panel.y
-            );
-            assert!(
-                g.panel.x + g.panel.w <= sw + 0.5,
-                "panel overflows right at {w}×{h}: {} > {}",
-                g.panel.x + g.panel.w,
-                sw
-            );
-            assert!(
-                g.panel.y + g.panel.h <= sh + 0.5,
-                "panel overflows bottom at {w}×{h}: {} > {}",
-                g.panel.y + g.panel.h,
-                sh
-            );
+        // Screen sizes that can fully contain the panel (PANEL_H=560, PANEL_W=380).
+        for tab in 0..4 {
+            for (w, h) in [(1920u32, 1200u32), (1600, 900), (2560, 1440), (1440, 700)] {
+                let pv = panel_tab(w, h, tab);
+                let g = &pv.geom;
+                let sw = w as f32;
+                let sh = h as f32;
+                assert!(g.panel.x >= 0.0, "panel.x < 0 at {w}×{h} tab {tab}");
+                assert!(g.panel.y >= 0.0, "panel.y < 0 at {w}×{h} tab {tab}");
+                assert!(
+                    g.panel.x + g.panel.w <= sw + 0.5,
+                    "panel overflows right at {w}×{h} tab {tab}"
+                );
+                assert!(
+                    g.panel.y + g.panel.h <= sh + 0.5,
+                    "panel overflows bottom at {w}×{h} tab {tab}"
+                );
+            }
         }
-        // Smaller screens (now including 900px-tall ones, since PANEL_H=1142):
-        // panel is clamped to y=0, x=0. Just assert non-negative.
-        for (w, h) in [(1280u32, 900u32), (1440, 900), (1024, 768), (800, 600)] {
+        // Smaller screens clamp to y=0, x=0. Just assert non-negative.
+        for (w, h) in [(1280u32, 600u32), (1024, 560), (800, 480)] {
             let pv = default_panel(w, h);
             let g = &pv.geom;
             assert!(g.panel.x >= 0.0, "panel.x < 0 at {w}×{h}");
@@ -1052,64 +1071,97 @@ mod tests {
     }
 
     #[test]
+    fn tab_strip_present_and_active_highlighted() {
+        for tab in 0..4 {
+            let pv = panel_tab(1920, 1080, tab);
+            let g = &pv.geom;
+            // All 4 tab hit rects exist, are inside the panel horizontally, and sit
+            // in the strip band (below the title, above content).
+            for (i, r) in g.tab_rects.iter().enumerate() {
+                assert!(
+                    r.x >= g.panel.x && r.x + r.w <= g.panel.x + g.panel.w + 0.5,
+                    "tab_rect[{i}] x out of panel"
+                );
+                assert!(r.y > g.panel.y, "tab_rect[{i}] not below panel top");
+            }
+            // The 4 tab labels are present.
+            let all_text: Vec<String> = pv.labels.iter().map(|l| l.0.clone()).collect();
+            for name in &TAB_NAMES {
+                assert!(all_text.iter().any(|s| s == name), "missing tab label {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_active_tab_widgets_are_on_screen() {
+        // The opacity slider belongs to tab 0 only; it must be offscreen on others.
+        for tab in 0..4 {
+            let pv = panel_tab(1920, 1080, tab);
+            let g = &pv.geom;
+            assert_eq!(
+                is_visible(&g.slider_track),
+                tab == 0,
+                "opacity track visibility wrong on tab {tab}"
+            );
+            assert_eq!(
+                is_visible(&g.font_minus),
+                tab == 1,
+                "font_minus visibility wrong on tab {tab}"
+            );
+            assert_eq!(
+                is_visible(&g.summon_prev),
+                tab == 2,
+                "summon_prev visibility wrong on tab {tab}"
+            );
+            assert_eq!(
+                is_visible(&g.shell_prev),
+                tab == 3,
+                "shell_prev visibility wrong on tab {tab}"
+            );
+        }
+    }
+
+    #[test]
     fn exactly_five_chips_in_presets_order() {
-        // There are exactly 5 PRESETS; chips must match 1-to-1.
-        let pv = default_panel(1920, 1080);
-        assert_eq!(
-            pv.geom.chips.len(),
-            5,
-            "expected 5 theme chips, got {}",
-            pv.geom.chips.len()
-        );
-        // Every chip rect must lie inside the panel rect.
+        // The THEME cards live on tab 0.
+        let pv = panel_tab(1920, 1080, 0);
+        assert_eq!(pv.geom.chips.len(), 5, "expected 5 theme chips");
         let panel = &pv.geom.panel;
         for (i, chip) in pv.geom.chips.iter().enumerate() {
             assert!(
                 chip.x >= panel.x && chip.x + chip.w <= panel.x + panel.w + 0.5,
-                "chip[{i}] x out of panel: chip_x={} chip_x+w={} panel_x={} panel_right={}",
-                chip.x, chip.x + chip.w, panel.x, panel.x + panel.w
+                "chip[{i}] x out of panel"
             );
             assert!(
                 chip.y >= panel.y && chip.y + chip.h <= panel.y + panel.h + 0.5,
-                "chip[{i}] y out of panel: chip_y={} chip_y+h={} panel_y={} panel_bottom={}",
-                chip.y, chip.y + chip.h, panel.y, panel.y + panel.h
+                "chip[{i}] y out of panel"
             );
         }
     }
 
     #[test]
     fn slider_handles_within_tracks() {
-        let pv = default_panel(1920, 1080);
+        // Opacity + corner-radius are on tab 0.
+        let pv = panel_tab(1920, 1080, 0);
         let g = &pv.geom;
-
-        // Opacity slider: handle must start no earlier than track left and end
-        // no later than track right.
         let track = &g.slider_track;
         let handle = &g.slider_handle;
-        assert!(
-            handle.x >= track.x - 0.5,
-            "opacity handle left of track: hx={} tx={}",
-            handle.x, track.x
-        );
-        assert!(
-            handle.x + handle.w <= track.x + track.w + 0.5,
-            "opacity handle right of track: hx+w={} tx+w={}",
-            handle.x + handle.w, track.x + track.w
-        );
+        assert!(handle.x >= track.x - 0.5, "opacity handle left of track");
+        assert!(handle.x + handle.w <= track.x + track.w + 0.5, "opacity handle right of track");
 
-        // Corner-radius slider.
         let rtrack = &g.radius_track;
         let rhandle = &g.radius_handle;
         assert!(rhandle.x >= rtrack.x - 0.5);
         assert!(rhandle.x + rhandle.w <= rtrack.x + rtrack.w + 0.5);
 
-        // Dropdown-height slider.
+        // Dropdown sliders are on tab 2.
+        let pv = panel_tab(1920, 1080, 2);
+        let g = &pv.geom;
         let dtrack = &g.dropdown_track;
         let dhandle = &g.dropdown_handle;
         assert!(dhandle.x >= dtrack.x - 0.5);
         assert!(dhandle.x + dhandle.w <= dtrack.x + dtrack.w + 0.5);
 
-        // Dropdown-width slider.
         let dwtrack = &g.dropdown_width_track;
         let dwhandle = &g.dropdown_width_handle;
         assert!(dwhandle.x >= dwtrack.x - 0.5);
@@ -1117,113 +1169,79 @@ mod tests {
     }
 
     #[test]
-    fn no_adjacent_control_bands_overlap_vertically() {
-        // Check that major control bands don't overlap. We test select pairs of
-        // rects that should be strictly above/below each other. Tolerates 1px
-        // for rounding.
-        let pv = default_panel(1920, 1080);
-        let g = &pv.geom;
-        let pairs: &[(&Rect, &Rect, &str)] = &[
-            (&g.title_bar, &g.slider_track, "title_bar vs opacity_track"),
-            (&g.slider_track, &g.radius_track, "opacity_track vs radius_track"),
-            (&g.radius_track, &g.summon_prev, "radius_track vs summon_prev"),
-            (&g.summon_prev, &g.win_mode_prev, "summon_prev vs win_mode_prev"),
-            (&g.win_mode_prev, &g.tab_bar_prev, "win_mode_prev vs tab_bar_prev"),
-            (&g.dropdown_track, &g.dropdown_width_track, "dropdown_h_track vs dropdown_w_track"),
-            (&g.autohide_toggle, &g.font_minus, "autohide vs font_minus"),
-            (&g.font_minus, &g.font_scroll_up, "font_minus vs font_scroll_up"),
-            // Terminal font list → new UI FONT section → theme cards, in order.
-            (&g.font_scroll_up, &g.ui_font_minus, "font_scroll_up vs ui_font_minus"),
-            (&g.ui_font_minus, &g.ui_font_scroll_up, "ui_font_minus vs ui_font_scroll_up"),
+    fn each_tab_bands_stack_without_overlap_and_fit() {
+        // For each tab, the visible bands run strictly top-down with no overlap and
+        // every band fits within the panel rect. We pick one representative rect per
+        // band (for side-by-side controls, the left/primary one) in layout order.
+        let representatives: [Vec<fn(&PanelGeom) -> Rect>; 4] = [
+            // Tab 0 "Look": opacity track, radius track, first card, last card.
+            vec![
+                |g| g.slider_track,
+                |g| g.radius_track,
+                |g| g.chips[0],
+                |g| g.chips[4],
+            ],
+            // Tab 1 "Fonts": font-size button, font scroll, last font row,
+            //                ui-size button, ui scroll, last ui row.
+            vec![
+                |g| g.font_minus,
+                |g| g.font_scroll_up,
+                |g| *g.font_rows.last().unwrap(),
+                |g| g.ui_font_minus,
+                |g| g.ui_font_scroll_up,
+                |g| *g.ui_font_rows.last().unwrap(),
+            ],
+            // Tab 2 "Window": summon, win-mode, drop-h track, drop-w track,
+            //                 tab-bar, auto-hide.
+            vec![
+                |g| g.summon_prev,
+                |g| g.win_mode_prev,
+                |g| g.dropdown_track,
+                |g| g.dropdown_width_track,
+                |g| g.tab_bar_prev,
+                |g| g.autohide_toggle,
+            ],
+            // Tab 3 "Shell": shell cycler, launch toggle.
+            vec![|g| g.shell_prev, |g| g.launch_login_toggle],
         ];
-        for (a, b, label) in pairs {
-            let a_bottom = a.y + a.h;
-            let b_top = b.y;
-            assert!(
-                a_bottom <= b_top + 1.0,
-                "{label}: a_bottom={a_bottom} > b_top={b_top} (overlap)"
-            );
+
+        for (tab, reps) in representatives.iter().enumerate() {
+            let pv = panel_tab(1920, 1080, tab);
+            let g = &pv.geom;
+            let rects: Vec<Rect> = reps.iter().map(|f| f(g)).collect();
+            let mut prev_bottom = g.panel.y; // content starts below the panel top
+            for (i, r) in rects.iter().enumerate() {
+                assert!(is_visible(r), "tab {tab} band {i} unexpectedly offscreen");
+                assert!(
+                    r.y + 0.5 >= prev_bottom,
+                    "tab {tab} band {i} (y={}) overlaps previous (bottom={prev_bottom})",
+                    r.y
+                );
+                assert!(
+                    r.y >= g.panel.y && r.y + r.h <= g.panel.y + g.panel.h + 0.5,
+                    "tab {tab} band {i} spills past the panel (y={}, bottom={})",
+                    r.y,
+                    r.y + r.h
+                );
+                prev_bottom = r.y + r.h;
+            }
         }
-        // The UI-font rows must sit below the terminal-font rows and above the
-        // first theme card — verifying the grow-and-shift kept everything ordered.
-        let term_rows_bottom = g.font_rows.last().map(|r| r.y + r.h).unwrap();
-        let ui_rows_top = g.ui_font_rows.first().map(|r| r.y).unwrap();
-        let ui_rows_bottom = g.ui_font_rows.last().map(|r| r.y + r.h).unwrap();
-        let first_card_top = g.chips.first().map(|r| r.y).unwrap();
-        assert!(
-            ui_rows_top > term_rows_bottom,
-            "ui_font rows ({ui_rows_top}) not below terminal-font rows ({term_rows_bottom})"
-        );
-        assert!(
-            first_card_top >= ui_rows_bottom - 0.5,
-            "theme cards ({first_card_top}) overlap the ui_font rows ({ui_rows_bottom})"
-        );
-
-        // The launch-at-login pill must sit BELOW every theme card (it's the
-        // bottom band) and stay inside the panel.
-        let last_card_bottom = g.chips.iter().map(|r| r.y + r.h).fold(0.0_f32, f32::max);
-        let ll = &g.launch_login_toggle;
-        assert!(
-            ll.y >= last_card_bottom - 0.5,
-            "launch_login pill ({}) overlaps the theme cards ({last_card_bottom})",
-            ll.y
-        );
-        assert!(
-            ll.y + ll.h <= g.panel.y + g.panel.h + 0.5,
-            "launch_login pill bottom ({}) spills past the panel bottom ({})",
-            ll.y + ll.h,
-            g.panel.y + g.panel.h
-        );
-        // It also must not overlap the right-aligned font/ui-font buttons above it
-        // (different bands, but assert horizontal pill placement matches autohide).
-        assert!(
-            (ll.x - g.autohide_toggle.x).abs() < 0.5,
-            "launch_login pill x ({}) != autohide pill x ({})",
-            ll.x,
-            g.autohide_toggle.x
-        );
-
-        // The SHELL cycler band sits BELOW the launch-at-login pill (it is the
-        // bottom-most band) and stays inside the panel.
-        let sp = &g.shell_prev;
-        assert!(
-            sp.y >= ll.y + ll.h - 0.5,
-            "shell band ({}) overlaps the launch-at-login pill ({})",
-            sp.y,
-            ll.y + ll.h
-        );
-        assert!(
-            sp.y + sp.h <= g.panel.y + g.panel.h + 0.5,
-            "shell band bottom ({}) spills past the panel bottom ({})",
-            sp.y + sp.h,
-            g.panel.y + g.panel.h
-        );
-        // The ‹ and › buttons must not overlap each other horizontally.
-        assert!(
-            g.shell_prev.x + g.shell_prev.w <= g.shell_next.x + 0.5,
-            "shell ‹ ({}) overlaps › ({})",
-            g.shell_prev.x + g.shell_prev.w,
-            g.shell_next.x
-        );
     }
 
     #[test]
     fn theme_cards_form_2col_grid() {
-        let pv = default_panel(1920, 1080);
+        let pv = panel_tab(1920, 1080, 0);
         let chips = &pv.geom.chips;
         assert_eq!(chips.len(), 5);
 
-        // Column 0 chips (i=0,2,4) share the same x.
         let col0_x = chips[0].x;
         assert!((chips[2].x - col0_x).abs() < 0.5, "chip[2].x != chip[0].x");
         assert!((chips[4].x - col0_x).abs() < 0.5, "chip[4].x != chip[0].x");
 
-        // Column 1 chips (i=1,3) share the same x, which is > col0_x.
         let col1_x = chips[1].x;
         assert!(col1_x > col0_x, "col1 not to the right of col0");
         assert!((chips[3].x - col1_x).abs() < 0.5, "chip[3].x != chip[1].x");
 
-        // Row pairs are vertically separated.
         let row0_bottom = chips[0].y + chips[0].h;
         let row1_top = chips[2].y;
         assert!(row1_top >= row0_bottom - 0.5, "row1 overlaps row0");
@@ -1233,40 +1251,49 @@ mod tests {
     }
 
     #[test]
-    fn caps_headers_present_in_labels() {
-        let pv = default_panel(1920, 1080);
-        let all_text: Vec<String> = pv.labels.iter().map(|l| l.0.clone()).collect();
-        for expected in &[
-            "OPACITY", "CORNER RADIUS", "SUMMON EFFECT", "WINDOW MODE",
-            "TAB BAR", "DROPDOWN HEIGHT", "DROPDOWN WIDTH",
-            "AUTO-HIDE ON FOCUS LOSS", "FONT SIZE", "FONT",
-            "UI FONT SIZE", "UI FONT", "THEME", "LAUNCH AT LOGIN", "SHELL",
-        ] {
-            assert!(
-                all_text.iter().any(|s| s == expected),
-                "missing CAPS header: {expected}"
-            );
+    fn caps_headers_present_per_tab() {
+        // Each tab carries only its own CAPS headers.
+        let expected: [&[&str]; 4] = [
+            &["OPACITY", "CORNER RADIUS", "THEME"],
+            &["FONT SIZE", "FONT", "UI FONT SIZE", "UI FONT"],
+            &[
+                "SUMMON EFFECT", "WINDOW MODE", "TAB BAR", "DROPDOWN HEIGHT",
+                "DROPDOWN WIDTH", "AUTO-HIDE ON FOCUS LOSS",
+            ],
+            &["SHELL", "LAUNCH AT LOGIN"],
+        ];
+        for (tab, headers) in expected.iter().enumerate() {
+            let pv = panel_tab(1920, 1080, tab);
+            let all_text: Vec<String> = pv.labels.iter().map(|l| l.0.clone()).collect();
+            for h in headers.iter() {
+                assert!(
+                    all_text.iter().any(|s| s == h),
+                    "tab {tab} missing CAPS header: {h}"
+                );
+            }
         }
     }
 
     #[test]
     fn right_aligned_values_in_labels() {
-        // Opacity, corner-radius, font-size, dropdown values must appear as
-        // separate right-aligned labels (not appended to the header string).
-        let pv = default_panel(1920, 1080);
-        let all_text: Vec<String> = pv.labels.iter().map(|l| l.0.clone()).collect();
-        // With opacity=0.97 → "97%", corner_radius=8→"8px", font=15→"15pt", dh=50%→"50%"
-        assert!(all_text.iter().any(|s| s == "97%"),  "missing opacity value label");
-        assert!(all_text.iter().any(|s| s == "8px"),  "missing corner radius value label");
-        assert!(all_text.iter().any(|s| s == "15pt"), "missing font size value label");
-        assert!(all_text.iter().any(|s| s == "50%"),  "missing dropdown height value label");
+        // Opacity/corner-radius values live on tab 0; font size on tab 1; dropdown
+        // height on tab 2. Each must appear as a separate right-aligned label.
+        let t0: Vec<String> = panel_tab(1920, 1080, 0).labels.iter().map(|l| l.0.clone()).collect();
+        assert!(t0.iter().any(|s| s == "97%"), "missing opacity value label");
+        assert!(t0.iter().any(|s| s == "8px"), "missing corner radius value label");
+
+        let t1: Vec<String> = panel_tab(1920, 1080, 1).labels.iter().map(|l| l.0.clone()).collect();
+        assert!(t1.iter().any(|s| s == "15pt"), "missing font size value label");
+
+        let t2: Vec<String> = panel_tab(1920, 1080, 2).labels.iter().map(|l| l.0.clone()).collect();
+        assert!(t2.iter().any(|s| s == "50%"), "missing dropdown height value label");
     }
 
     #[test]
     fn ui_font_section_present_and_well_formed() {
-        let pv = default_panel(1920, 1200);
+        // The UI-font section lives on the Fonts tab (1).
+        let pv = panel_tab(1920, 1080, 1);
         let g = &pv.geom;
-        // The UI-font widgets exist and are inside the panel rect.
         let panel = &g.panel;
         for (r, name) in [
             (&g.ui_font_minus, "ui_font_minus"),
@@ -1280,22 +1307,31 @@ mod tests {
                 "{name} outside panel vertically"
             );
         }
-        // 4-row cap: with 5 ui_families and offset 0, exactly 4 rows are visible.
         assert_eq!(g.ui_font_rows.len(), 4, "expected 4 visible UI-font rows (cap)");
-        // The true ui_font_size (18) shows as "18pt", and the "System Sans" row
-        // and the "UI FONT SIZE" header are present.
         let all_text: Vec<String> = pv.labels.iter().map(|l| l.0.clone()).collect();
         assert!(all_text.iter().any(|s| s == "18pt"), "missing UI font size value label");
         assert!(
             all_text.iter().any(|s| s == "System Sans (default)"),
             "missing synthetic System Sans row"
         );
-        // The specimen baseline is below the UI-font-size buttons and within bounds.
+        // The specimen baseline is below the UI-font-size buttons and above the list.
         let (sx, sy) = pv.ui_specimen_pos;
         assert!(sx >= panel.x && sx <= panel.x + panel.w, "specimen x out of panel");
         assert!(
             sy > g.ui_font_minus.y + g.ui_font_minus.h && sy < g.ui_font_rows[0].y,
             "specimen baseline ({sy}) not between the size buttons and the family list"
         );
+    }
+
+    #[test]
+    fn specimen_offscreen_when_fonts_tab_inactive() {
+        // On non-Fonts tabs the "Aa" specimen must be offscreen (not drawn).
+        for tab in [0usize, 2, 3] {
+            let pv = panel_tab(1920, 1080, tab);
+            assert!(
+                pv.ui_specimen_pos.1 >= 1.0e5,
+                "specimen should be offscreen on tab {tab}"
+            );
+        }
     }
 }
