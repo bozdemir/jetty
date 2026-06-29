@@ -83,6 +83,10 @@ pub struct Config {
     /// entirely.
     #[serde(default = "default_show_perf_hud")]
     pub show_perf_hud: bool,
+    /// Visual effects (CRT, scanlines, caret). See `EffectsConfig`. Backward
+    /// compatible: old configs without `[effects]` load with all defaults.
+    #[serde(default)]
+    pub effects: EffectsConfig,
 }
 
 fn default_shell() -> String {
@@ -142,6 +146,70 @@ fn default_ui_font_size() -> f32 {
     16.0
 }
 
+/// All visual-effect parameters. Every field is `#[serde(default)]` so adding
+/// the `[effects]` table is backward compatible: an old config without it (or
+/// missing any field) loads with the defaults below. All effects default OFF
+/// except `caret_flash_enabled`, so the out-of-box look/idle profile is unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectsConfig {
+    #[serde(default = "ef_false")] pub crt_enabled: bool,
+    #[serde(default = "ef_curvature")] pub crt_curvature: f32,
+    #[serde(default = "ef_scanline")] pub crt_scanline: f32,
+    #[serde(default = "ef_mask")] pub crt_mask: f32,
+    #[serde(default = "ef_bloom")] pub crt_bloom: f32,
+    #[serde(default = "ef_chromatic")] pub crt_chromatic: f32,
+    #[serde(default = "ef_vignette")] pub crt_vignette: f32,
+    #[serde(default = "ef_white")] pub crt_scanline_tint: [f32; 3],
+    #[serde(default = "ef_false")] pub crt_animate_roll: bool,
+    #[serde(default = "ef_false")] pub crt_flicker: bool,
+    #[serde(default = "ef_false")] pub crt_jitter: bool,
+    #[serde(default = "ef_true")] pub caret_flash_enabled: bool,
+    #[serde(default = "ef_false")] pub caret_glow_enabled: bool,
+    #[serde(default = "ef_flash_ms")] pub caret_flash_ms: f32,
+    #[serde(default = "ef_white")] pub caret_flash_color: [f32; 3],
+}
+
+fn ef_false() -> bool { false }
+fn ef_true() -> bool { true }
+fn ef_curvature() -> f32 { 0.30 }
+fn ef_scanline() -> f32 { 0.50 }
+fn ef_mask() -> f32 { 0.30 }
+fn ef_bloom() -> f32 { 0.40 }
+fn ef_chromatic() -> f32 { 0.20 }
+fn ef_vignette() -> f32 { 0.40 }
+fn ef_flash_ms() -> f32 { 130.0 }
+fn ef_white() -> [f32; 3] { [1.0, 1.0, 1.0] }
+
+impl Default for EffectsConfig {
+    fn default() -> Self {
+        EffectsConfig {
+            crt_enabled: ef_false(), crt_curvature: ef_curvature(), crt_scanline: ef_scanline(),
+            crt_mask: ef_mask(), crt_bloom: ef_bloom(), crt_chromatic: ef_chromatic(),
+            crt_vignette: ef_vignette(), crt_scanline_tint: ef_white(),
+            crt_animate_roll: ef_false(), crt_flicker: ef_false(), crt_jitter: ef_false(),
+            caret_flash_enabled: ef_true(), caret_glow_enabled: ef_false(),
+            caret_flash_ms: ef_flash_ms(), caret_flash_color: ef_white(),
+        }
+    }
+}
+
+impl EffectsConfig {
+    /// Clamp every numeric field into its valid range. Called on load.
+    pub fn clamped(mut self) -> Self {
+        let c01 = |v: f32| v.clamp(0.0, 1.0);
+        self.crt_curvature = c01(self.crt_curvature);
+        self.crt_scanline = c01(self.crt_scanline);
+        self.crt_mask = c01(self.crt_mask);
+        self.crt_bloom = c01(self.crt_bloom);
+        self.crt_chromatic = c01(self.crt_chromatic);
+        self.crt_vignette = c01(self.crt_vignette);
+        for ch in &mut self.crt_scanline_tint { *ch = c01(*ch); }
+        for ch in &mut self.caret_flash_color { *ch = c01(*ch); }
+        self.caret_flash_ms = self.caret_flash_ms.clamp(60.0, 400.0);
+        self
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -163,6 +231,7 @@ impl Default for Config {
             tab_bar_position: default_tab_bar_position(),
             show_welcome: default_show_welcome(),
             show_perf_hud: default_show_perf_hud(),
+            effects: EffectsConfig::default(),
         }
     }
 }
@@ -184,7 +253,11 @@ impl Config {
     pub fn load() -> Config {
         let path = Self::path();
         match std::fs::read_to_string(&path) {
-            Ok(s) => toml::from_str(&s).unwrap_or_default(),
+            Ok(s) => {
+                let mut cfg: Config = toml::from_str(&s).unwrap_or_default();
+                cfg.effects = cfg.effects.clamped();
+                cfg
+            }
             Err(_) => Config::default(),
         }
     }
@@ -285,6 +358,7 @@ mod tests {
             tab_bar_position: "bottom".to_string(),
             show_welcome: false,
             show_perf_hud: false,
+            effects: EffectsConfig::default(),
         };
         let s = toml::to_string_pretty(&c).expect("serialize");
         let back: Config = toml::from_str(&s).expect("deserialize");
@@ -315,6 +389,7 @@ mod tests {
             tab_bar_position: "bottom".to_string(),
             show_welcome: true,
             show_perf_hud: true,
+            effects: EffectsConfig::default(),
         };
         std::fs::write(&path, toml::to_string_pretty(&c).unwrap()).unwrap();
         let s = std::fs::read_to_string(&path).unwrap();
@@ -338,5 +413,35 @@ mod tests {
         // toml::from_str on garbage falls back to default via unwrap_or_default.
         let back: Config = toml::from_str("not valid toml !!!").unwrap_or_default();
         assert_eq!(back, Config::default());
+    }
+
+    #[test]
+    fn effects_defaults_are_off_except_caret_flash() {
+        let e = EffectsConfig::default();
+        assert!(!e.crt_enabled);
+        assert!(!e.crt_animate_roll && !e.crt_flicker && !e.crt_jitter);
+        assert!(e.caret_flash_enabled);      // the one ON-by-default effect
+        assert!(!e.caret_glow_enabled);
+        assert_eq!(e.crt_scanline_tint, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn old_config_without_effects_table_loads_with_defaults() {
+        // a config TOML predating the effects feature
+        let toml = r#"theme = "default"
+opacity = 1.0
+font_size = 14.0
+font_family = "monospace"
+corner_radius = 8.0
+"#;
+        let cfg: Config = toml::from_str(toml).expect("must load");
+        assert_eq!(cfg.effects, EffectsConfig::default());
+    }
+
+    #[test]
+    fn effects_clamp_out_of_range() {
+        let e = EffectsConfig { crt_curvature: 9.0, crt_bloom: -1.0, caret_flash_ms: 5000.0, ..Default::default() }.clamped();
+        assert!(e.crt_curvature <= 1.0 && e.crt_bloom >= 0.0);
+        assert!(e.caret_flash_ms <= 400.0);
     }
 }

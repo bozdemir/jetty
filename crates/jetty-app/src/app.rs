@@ -806,6 +806,7 @@ impl App {
             // choice exactly as the on-disk read did.
             show_welcome: self.cfg_show_welcome,
             show_perf_hud: self.show_perf_hud,
+            effects: crate::config::EffectsConfig::default(),
         }
         .save();
     }
