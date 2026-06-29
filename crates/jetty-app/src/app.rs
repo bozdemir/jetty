@@ -259,6 +259,10 @@ pub struct App {
     liquid: Option<jetty_render::LiquidDrop>,
     /// Tier-B FocusPull summon effect (samples the offscreen frame).
     focus: Option<jetty_render::FocusPull>,
+    /// CRT post-effect: when enabled the whole scene is rendered to `offscreen`
+    /// and this pass blits it to the surface (passthrough for now). Built in
+    /// `resumed` with the surface format; `None` until then.
+    crt: Option<jetty_render::Crt>,
     /// Surface-sized offscreen color texture used ONLY while a Tier-B effect is
     /// summoning: the scene is rendered into this, then the effect samples it and
     /// writes the displaced/blurred result to the surface. `None` until built in
@@ -674,6 +678,7 @@ impl App {
             phosphor: None,
             liquid: None,
             focus: None,
+            crt: None,
             offscreen: None,
             summon_effect: SummonEffect::Bayer,
             window_mode: WindowMode::Center,
@@ -2696,6 +2701,9 @@ impl ApplicationHandler<AppEvent> for App {
             // a Tier-B effect is summoning; Tier-A and normal frames never use it.
             self.liquid = Some(jetty_render::LiquidDrop::new(&g.device, g.format));
             self.focus = Some(jetty_render::FocusPull::new(&g.device, g.format));
+            // CRT post-effect (passthrough for now). Same surface format as the
+            // rest of the pipeline so the blit-to-surface target matches.
+            self.crt = Some(jetty_render::Crt::new(&g.device, g.format));
             self.summon_pending = true;
             self.summon_settle_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
@@ -4059,12 +4067,15 @@ impl ApplicationHandler<AppEvent> for App {
                             .unwrap_or(false);
                 }
                 let top_flush = self.cached_top_flush;
-                // Lazily (re)allocate the Tier-B offscreen scene texture ONLY when a
-                // Tier-B effect (Liquid/Focus) is actively summoning and the texture
-                // is missing or stale (wrong size) — instead of eagerly on startup
-                // and on every Resized event. Done before the `as_ref()` captures
+                // Lazily (re)allocate the offscreen scene texture when EITHER a
+                // Tier-B effect (Liquid/Focus) is actively summoning OR CRT is
+                // enabled — and the texture is missing or stale (wrong size).
+                // Otherwise it stays unallocated (the normal hot path renders
+                // straight to the surface). Done before the `as_ref()` captures
                 // below so `offscreen` picks up the freshly-sized texture.
-                if self.summon_effect.is_tier_b() && self.summon_anim.is_some() {
+                let want_offscreen = self.fx.crt_enabled
+                    || (self.summon_effect.is_tier_b() && self.summon_anim.is_some());
+                if want_offscreen {
                     if let Some((gw, gh)) = self.gpu.as_ref().map(|g| (g.config.width, g.config.height)) {
                         let stale = self
                             .offscreen
@@ -4082,7 +4093,10 @@ impl ApplicationHandler<AppEvent> for App {
                 let phosphor = self.phosphor.as_ref();
                 let liquid = self.liquid.as_ref();
                 let focus = self.focus.as_ref();
+                let crt = self.crt.as_ref();
                 let offscreen = self.offscreen.as_ref();
+                // CRT enable flag, captured before the mutable gpu/text borrow.
+                let crt_enabled = self.fx.crt_enabled;
                 let summon_effect = self.summon_effect;
                 // Summon progress: t in [0,1) drives a reveal pass this frame and
                 // self-schedules the next; t>=1 ends the animation so we return to
@@ -4168,7 +4182,17 @@ impl ApplicationHandler<AppEvent> for App {
                     let tier_b_active = summon_effect.is_tier_b()
                         && matches!(summon_t, Some(t) if t < 1.0)
                         && offscreen.is_some();
-                    let scene_view: &wgpu::TextureView = if tier_b_active {
+                    // CRT also routes the whole scene through the offscreen, but
+                    // only when no Tier-B summon is using it this frame: a Tier-B
+                    // summon OWNS the offscreen and CRT is BYPASSED for that frame
+                    // (see the dispatch guard before `present()`). Requires the
+                    // offscreen to actually exist (alloc'd above when crt_enabled).
+                    let crt_active = crt_enabled && !tier_b_active && offscreen.is_some();
+                    // Either consumer routes the scene into the offscreen; otherwise
+                    // it renders straight to the surface view (byte-identical to the
+                    // pre-CRT hot path).
+                    let want_offscreen = tier_b_active || crt_active;
+                    let scene_view: &wgpu::TextureView = if want_offscreen {
                         &offscreen.as_ref().unwrap().1
                     } else {
                         &view
@@ -4399,7 +4423,14 @@ impl ApplicationHandler<AppEvent> for App {
                     // Applied to `scene_view`: for Tier-A this is the surface; for a
                     // Tier-B summon it's the offscreen frame, so the rounded corners
                     // are baked in before the effect samples it.
-                    if let Some(mask) = corner_mask {
+                    //
+                    // When CRT is active (crt_active) the CRT pass will own the
+                    // corners (a later task), so SKIP the mask here — for now this
+                    // means corners are not rounded while CRT is on (accepted: the
+                    // CRT pass is a passthrough this task). During a Tier-B summon
+                    // CRT is bypassed (crt_active is false), so the mask still runs
+                    // exactly as today and the summon path is unchanged.
+                    if let (Some(mask), false) = (corner_mask, crt_active) {
                         // Bottom corners always round to corner_radius_px; the top
                         // corners are zeroed when the window is top-flush (Dropdown).
                         let r_top = if top_flush { 0.0 } else { corner_radius_px };
@@ -4417,12 +4448,21 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     // Final-final pass: the selected summon reveal effect. After the
                     // corner mask, run the per-effect pass at the current t. Tier-A
-                    // (Bayer/Phosphor) write straight to the surface and compose with
-                    // the dst-multiply mask. Tier-B (Liquid/Focus) SAMPLE the
-                    // offscreen scene (`scene_view`) and write the displaced/blurred
-                    // result to the surface `view`. At t>=1 every effect is fully
-                    // resolved (zero residue, identity blit) and we stop the
-                    // animation; otherwise self-drive the next frame.
+                    // (Bayer/Phosphor) write into `scene_view` and compose with the
+                    // dst-multiply blend. Tier-B (Liquid/Focus) SAMPLE the offscreen
+                    // scene (`scene_view`) and write the displaced/blurred result to
+                    // the surface `view`. At t>=1 every effect is fully resolved
+                    // (zero residue, identity blit) and we stop the animation;
+                    // otherwise self-drive the next frame.
+                    //
+                    // Tier-A dst is `scene_view`, NOT `&view`: when CRT is off (or
+                    // bypassed by a Tier-B summon) `scene_view` IS the surface view,
+                    // so this is byte-identical to before. When CRT is active
+                    // `scene_view` is the offscreen, so the reveal composites into
+                    // the offscreen and the CRT pass below blits it to the surface
+                    // (instead of CRT clobbering a surface-only reveal). Tier-A
+                    // effects use LoadOp::Load + blend and sample no texture, so
+                    // there is no src==dst hazard against the CRT read.
                     if let Some(t) = summon_t {
                         if t < 1.0 {
                             match summon_effect {
@@ -4430,14 +4470,14 @@ impl ApplicationHandler<AppEvent> for App {
                                 SummonEffect::Bayer => {
                                     if let Some(reveal) = bayer_reveal {
                                         reveal.apply(
-                                            &gpu.device, &gpu.queue, &view, width, height, t,
+                                            &gpu.device, &gpu.queue, scene_view, width, height, t,
                                         );
                                     }
                                 }
                                 SummonEffect::Phosphor => {
                                     if let Some(ph) = phosphor {
                                         ph.apply(
-                                            &gpu.device, &gpu.queue, &view, width, height,
+                                            &gpu.device, &gpu.queue, scene_view, width, height,
                                             corner_radius_px, t, summon_accent,
                                         );
                                     }
@@ -4483,6 +4523,32 @@ impl ApplicationHandler<AppEvent> for App {
                     if self.summon_anim.is_some() || self.slide_anim.is_some() || hint_live {
                         if let Some(w) = &self.window {
                             w.request_redraw();
+                        }
+                    }
+                    // CRT post-pass: when CRT is active (enabled AND not bypassed by
+                    // an active Tier-B summon — Tier-B owns the offscreen this frame)
+                    // blit the fully-composited offscreen scene through the CRT pass
+                    // to the surface `view`. Passthrough (identity) for now. `crt`
+                    // and `offscreen` are both guaranteed present when `crt_active`
+                    // (built in `resumed`; offscreen alloc'd above when crt_enabled),
+                    // but guard defensively. src=offscreen, dst=surface — never
+                    // src==dst; the offscreen was cleared+painted this frame, so it
+                    // is never sampled uninitialized. This does NOT request a redraw,
+                    // so enabling CRT does not by itself break 0-CPU idle.
+                    if crt_active {
+                        if let (Some(crt), Some((_, off_view))) = (crt, offscreen) {
+                            crt.apply(
+                                &gpu.device,
+                                &gpu.queue,
+                                &view,
+                                off_view,
+                                width,
+                                height,
+                                &jetty_render::CrtUniform {
+                                    resolution: [width as f32, height as f32],
+                                    _pad: [0.0, 0.0],
+                                },
+                            );
                         }
                     }
                     frame.present();
