@@ -342,20 +342,6 @@ impl QuadLayer {
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Render `rects` on top of existing content (`LoadOp::Load`), no scissor.
-    /// Useful for layering quads in a second pass without clearing the surface.
-    pub fn render_load(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        view: &wgpu::TextureView,
-        screen_w: u32,
-        screen_h: u32,
-        rects: &[Rect],
-    ) {
-        self.render_inner(device, queue, view, screen_w, screen_h, rects, None, None);
-    }
-
     /// Render `rects` on top of existing content (`LoadOp::Load`) with a
     /// **scissor rect** that clips drawing to `[x, y, w, h]` in physical pixels.
     /// Used for the Effects-tab content area so widgets scrolled above/below the

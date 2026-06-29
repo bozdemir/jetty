@@ -270,6 +270,22 @@ pub(crate) const CHAR_W_FALLBACK: f32 = 9.8;
 pub const PANEL_W: f32 = 380.0;
 pub const PANEL_H: f32 = 560.0;
 
+/// Y-offset from the panel's top edge to the scrollable content area (title bar
+/// + tab strip chrome). Single-sourced here so `EFFECTS_VISIBLE_H` and the
+/// `content_top` local in `build_panel` can both derive from it.
+const CONTENT_TOP_OFFSET: f32 = 100.0;
+
+/// Total pixel height of the Effects-tab content region (14 bands × 44 px pitch
+/// + 36 px for the last slider handle's bottom offset). Single source of truth
+/// for the scroll clamp in `App` and the scrollbar indicator in `build_panel`.
+/// Value: `14 × 44 + 36 = 652.0`.
+pub const EFFECTS_CONTENT_H: f32 = 14.0 * 44.0 + 36.0;
+
+/// Visible height of the Effects-tab content viewport (the panel height minus the
+/// chrome strip). Scroll is clamped to `[0, EFFECTS_CONTENT_H − EFFECTS_VISIBLE_H]`
+/// = `[0, 192.0]`. Value: `PANEL_H − CONTENT_TOP_OFFSET = 460.0`.
+pub const EFFECTS_VISIBLE_H: f32 = PANEL_H - CONTENT_TOP_OFFSET;
+
 // Compile-time lockstep: CHIP_NAMES must always have one entry per PRESETS entry.
 // This panics at build time if PRESETS grows without updating CHIP_NAMES (or vice versa).
 const _: () = assert!(CHIP_NAMES.len() == jetty_core::theme::PRESETS.len());
@@ -816,16 +832,11 @@ pub fn build_panel(
     let (caret_color_g_track, caret_color_g_fill, caret_color_g_handle) = fx_mini_slider!(rgb_g_x, t_fx_color, effects.caret_flash_color[1]);
     let (caret_color_b_track, caret_color_b_fill, caret_color_b_handle) = fx_mini_slider!(rgb_b_x, t_fx_color, effects.caret_flash_color[2]);
 
-    // Effects content height: last band bottom − content_top.
-    // Last band (14, caret_flash_color RGB) has handle bottom at +36 from band top.
-    // 14 × 44 + 36 = 616 + 36 = 652 px. Independent of screen size.
-    let effects_content_h: f32 = 14.0 * 44.0 + 36.0; // = 652.0
-
-    // Visible height of the content area (below the title + tab strip chrome).
-    // 100 px = ~36 px title + ~64 px tab strip. This is a layout constant, not
-    // derived at runtime, so effects_scroll clamping uses the same value.
-    const CONTENT_TOP_OFFSET: f32 = 100.0;
-    let visible_h = PANEL_H - CONTENT_TOP_OFFSET; // 460.0
+    // Effects content height and visible height come from the module-level
+    // `pub const`s so the App's scroll clamp and this scrollbar indicator
+    // are guaranteed to use identical values.
+    let effects_content_h = EFFECTS_CONTENT_H; // 652.0
+    let visible_h = EFFECTS_VISIBLE_H;          // 460.0
 
     // --- Build quads in draw order ---
     // `quads` = chrome: always visible, rendered WITHOUT scissor.

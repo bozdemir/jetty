@@ -488,8 +488,9 @@ pub fn decide_mouse_press(
         // Viewport guard: clicks in the title/tab-strip chrome area (above
         // content_top) or below the panel bottom (content_bottom) must NOT fire
         // Effects widget actions even if a widget rect has scrolled into that zone.
-        // We only apply this guard when at least one Effects widget is in its
-        // on-screen range (i.e. content_top < 1e5 — confirming we're on tab 4).
+        // We only apply this guard when the panel is on-screen
+        // (content_top < 1e5 — Y-viewport bound only; cross-tab isolation
+        // relies on the OFF-sentinel rects, not this check).
         let in_effects_viewport = g.content_top < 1.0e5
             && cy >= g.content_top
             && cy < g.content_bottom

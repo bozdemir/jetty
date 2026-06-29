@@ -2393,12 +2393,9 @@ impl App {
                         MouseScrollDelta::LineDelta(_, y) => -y * 24.0,
                         MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
                     };
-                    // effects_content_h = 652.0 (15 bands × 44px + 36px header pitch)
-                    // visible_h         = PANEL_H - 100.0 = 460.0
-                    // max_scroll        = 192.0
-                    const EFFECTS_CONTENT_H: f32 = 652.0;
-                    const EFFECTS_VISIBLE_H: f32 = 460.0;
-                    let max_scroll = (EFFECTS_CONTENT_H - EFFECTS_VISIBLE_H).max(0.0);
+                    // max_scroll = EFFECTS_CONTENT_H − EFFECTS_VISIBLE_H = 652.0 − 460.0 = 192.0
+                    let max_scroll = (jetty_render::EFFECTS_CONTENT_H
+                        - jetty_render::EFFECTS_VISIBLE_H).max(0.0);
                     self.effects_scroll = (self.effects_scroll + delta_px).clamp(0.0, max_scroll);
                     if let Some(w) = &self.settings_window {
                         w.request_redraw();
