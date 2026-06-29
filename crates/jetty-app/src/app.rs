@@ -340,7 +340,7 @@ pub struct App {
     wayland_warned: bool,
     /// Free-running clock for CRT animation (roll/flicker/jitter). Initialized
     /// once at construction and never reset; `elapsed().as_secs_f32()` feeds the
-    /// CRT uniform's `time`. The shader uses `fract`/`sin`, so unbounded growth is
+    /// CRT uniform's `time`. The shader uses `sin`, so unbounded growth is
     /// fine. This clock does NOT by itself drive redraws — the redraw guard only
     /// self-schedules frames while an animate toggle is on (see `crt_anim_live`).
     crt_clock: std::time::Instant,
@@ -2540,11 +2540,18 @@ impl ApplicationHandler<AppEvent> for App {
         // here we only need to WAKE ONCE at the debounce deadline to run the reflow
         // (handled by `reflow_due` at the top of this fn). So the reflow deadline
         // is routed through WaitUntil below, never Poll.
+        // `crt_anim_live()` is `false` whenever CRT animation is off (CRT disabled,
+        // or all three animate toggles off), so this term cannot force Poll at idle:
+        // static/off CRT keeps `main_pending` false → `about_to_wait` returns Wait
+        // (0-CPU idle). When animation is ON it selects Poll, which Fifo present
+        // throttles to ~60fps vsync — exactly how summon/slide animate on macOS,
+        // where a `request_redraw` issued under Wait is not delivered until input.
         let main_pending = self.summon_anim.is_some()
             || self.slide_anim.is_some()
             || self.summon_pending
             || self.pending_dock_frames > 0
-            || self.pending_center_frames > 0;
+            || self.pending_center_frames > 0
+            || self.fx.crt_anim_live();
         if main_pending {
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -4530,14 +4537,11 @@ impl ApplicationHandler<AppEvent> for App {
                     // CRT animation self-drive: keep painting ONLY while CRT is on
                     // AND at least one of roll/flicker/jitter is toggled on. Static
                     // CRT (enabled, all three off) does NOT match here, so it stays
-                    // damage-driven (0-CPU idle preserved). Mirrors the `hint_live`
-                    // pattern: a condition in this self-redraw block that has no
-                    // `about_to_wait` Poll entry, so it returns to Wait/idle the
-                    // moment the condition clears.
-                    let crt_anim_live = self.fx.crt_enabled
-                        && (self.fx.crt_animate_roll
-                            || self.fx.crt_flicker
-                            || self.fx.crt_jitter);
+                    // damage-driven (0-CPU idle preserved). Same `crt_anim_live()`
+                    // term feeds `about_to_wait`'s `main_pending`, so on macOS the
+                    // loop sits in `Poll` (vsync-throttled by Fifo present) while
+                    // animating and returns to `Wait`/idle the moment it clears.
+                    let crt_anim_live = self.fx.crt_anim_live();
                     if self.summon_anim.is_some()
                         || self.slide_anim.is_some()
                         || hint_live

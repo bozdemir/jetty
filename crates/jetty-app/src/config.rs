@@ -208,6 +208,19 @@ impl EffectsConfig {
         self.caret_flash_ms = self.caret_flash_ms.clamp(60.0, 400.0);
         self
     }
+
+    /// True iff an *animated* CRT sub-effect is live: CRT enabled AND at least one
+    /// of roll/flicker/jitter toggled on. Static CRT (enabled, all three off) is
+    /// `false`, so it stays damage-driven (0-CPU idle). Single source of truth for
+    /// BOTH the `RedrawRequested` self-redraw guard AND the `about_to_wait`
+    /// `main_pending` Poll term — keeping them identical is what makes the loop pump
+    /// frames under `Poll` on macOS (where a `request_redraw` issued under `Wait` is
+    /// not delivered until input) yet fall back to `Wait`/idle the instant animation
+    /// is off. Lives on `EffectsConfig` (not `App`) so callers borrow only the `fx`
+    /// field, leaving `gpu`/`text` free to be mutably borrowed in the render path.
+    pub fn crt_anim_live(&self) -> bool {
+        self.crt_enabled && (self.crt_animate_roll || self.crt_flicker || self.crt_jitter)
+    }
 }
 
 impl Default for Config {

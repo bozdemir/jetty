@@ -247,7 +247,7 @@ pub struct CrtUniform {
     /// Rounded-corner radius in physical px (matches the corner mask). (offset 48)
     pub corner_radius: f32,
     /// Animation phase in seconds (free-running clock). Drives roll/flicker/jitter
-    /// via `fract`/`sin`, so unbounded growth is fine. (offset 52)
+    /// via `sin`, so unbounded growth is fine. (offset 52)
     pub time: f32,
     /// Roll/flicker/jitter bitfield (`CRT_FLAG_*`). 0 => static look. (offset 56)
     pub flags: u32,
