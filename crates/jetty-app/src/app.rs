@@ -2892,10 +2892,18 @@ impl ApplicationHandler<AppEvent> for App {
                     if let Some(idx) = hit {
                         match idx {
                             0 => {
-                                // Copy
-                                if let Some(text) = self.active_tab().terminal.selection_text() {
-                                    if !text.is_empty() {
-                                        clipboard::set(&text);
+                                // Copy — then clear the selection so the highlight
+                                // doesn't linger after an explicit copy.
+                                let copied = self
+                                    .active_tab()
+                                    .terminal
+                                    .selection_text()
+                                    .filter(|t| !t.is_empty());
+                                if let Some(text) = copied {
+                                    clipboard::set(&text);
+                                    self.active_tab_mut().terminal.selection_clear();
+                                    if let Some(win) = &self.window {
+                                        win.request_redraw();
                                     }
                                 }
                             }
@@ -3610,10 +3618,18 @@ impl ApplicationHandler<AppEvent> for App {
                         self.set_font_size(FONT_LOGICAL_DEFAULT);
                     }
                     input::KeyAction::Copy => {
-                        // Copy the current selection to the clipboard.
-                        if let Some(text) = self.active_tab().terminal.selection_text() {
-                            if !text.is_empty() {
-                                clipboard::set(&text);
+                        // Copy the current selection to the clipboard, then clear it
+                        // so the highlight doesn't linger after an explicit copy.
+                        let copied = self
+                            .active_tab()
+                            .terminal
+                            .selection_text()
+                            .filter(|t| !t.is_empty());
+                        if let Some(text) = copied {
+                            clipboard::set(&text);
+                            self.active_tab_mut().terminal.selection_clear();
+                            if let Some(win) = &self.window {
+                                win.request_redraw();
                             }
                         }
                     }
