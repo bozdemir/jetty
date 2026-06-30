@@ -37,6 +37,18 @@ pub(crate) fn grid_dims(width_px: f32, height_px: f32, cell_w: f32, cell_h: f32,
     (cols, rows)
 }
 
+/// True if `last_focused` is one of the live detached-window ids, i.e. focus
+/// moved from the main window into one of the app's OWN detached windows. The
+/// main window's Yakuake-style auto-hide must be suppressed in that case (the
+/// user has not left Jetty), exactly as it already is for the Settings window.
+/// Generic over the id type so it is unit-testable without real `WindowId`s.
+pub fn focus_in_detached<I: PartialEq>(last_focused: Option<I>, detached_ids: &[I]) -> bool {
+    match last_focused {
+        Some(id) => detached_ids.contains(&id),
+        None => false,
+    }
+}
+
 // ── DetachedWindow ────────────────────────────────────────────────────────────
 
 use std::sync::Arc;
@@ -190,5 +202,22 @@ mod tests {
     #[test]
     fn detached_grid_dims_zero_cell_falls_back_to_default() {
         assert_eq!(grid_dims(800.0, 600.0, 0.0, 0.0, 14.0), (80, 24));
+    }
+
+    #[test]
+    fn focus_in_detached_matches_a_live_detached_id() {
+        // Focus moved from the main window to one of our own detached windows:
+        // the main window must NOT auto-hide.
+        assert!(focus_in_detached(Some(7), &[3, 7, 9]));
+    }
+
+    #[test]
+    fn focus_in_detached_false_for_third_party_or_none() {
+        // Focus left to a third app (id not among ours) → main may auto-hide.
+        assert!(!focus_in_detached(Some(42), &[3, 7, 9]));
+        // No tracked focus target → not one of ours.
+        assert!(!focus_in_detached(None, &[3, 7, 9]));
+        // No detached windows at all → never a match.
+        assert!(!focus_in_detached(Some(7), &[]));
     }
 }

@@ -342,6 +342,11 @@ pub struct App {
     /// Focused(false) BEFORE the settings Focused(true) (the last_focused_window
     /// check alone loses that race).
     switching_to_settings: bool,
+    /// Set while focus is moving to one of OUR detached windows (on detach, and
+    /// while a detached window holds focus). Consumed by the main window's
+    /// Focused(false) to suppress auto-hide so detaching a tab does not hide the
+    /// main window — mirrors `switching_to_settings` for the Settings window.
+    switching_to_detached: bool,
     /// Whether the user is dragging the Dropdown-height slider in Settings.
     dragging_dropdown: bool,
     /// Whether the user is dragging the Dropdown-width slider in Settings.
@@ -727,6 +732,7 @@ impl App {
             cached_tabs_sig: u64::MAX,
             last_focused_window: None,
             switching_to_settings: false,
+            switching_to_detached: false,
             dragging_dropdown: false,
             dragging_dropdown_width: false,
             wayland_warned: false,
@@ -1132,6 +1138,13 @@ impl App {
             (1000, 640) // fallback when GPU not yet initialised
         };
 
+        // Focus is about to move to the new detached window, which makes the main
+        // window receive Focused(false). Flag it so the auto-hide there does NOT
+        // fire (the user is staying inside Jetty) — mirrors the Settings path.
+        // Some platforms deliver the main Focused(false) BEFORE the detached
+        // Focused(true), so set this now, before the window is created.
+        self.switching_to_detached = true;
+
         // Build the detached window with the same font settings as the main window.
         let mut dw = crate::detached::DetachedWindow::new(
             event_loop,
@@ -1175,6 +1188,14 @@ impl App {
             return;
         }
         let dw = self.detached.remove(pos);
+        // Drop focus bookkeeping that pointed at the now-destroyed detached window
+        // so the main window's auto-hide guard doesn't keep suppressing on a stale
+        // id/flag (mirrors `close_settings_window`).
+        let dw_id = dw.window.id();
+        if self.last_focused_window == Some(dw_id) {
+            self.last_focused_window = None;
+        }
+        self.switching_to_detached = false;
         let mut tab = dw.tab; // move the Tab out before `dw` drops
 
         // Reflow to the MAIN window's grid (tab bar accounted for).
@@ -2267,6 +2288,23 @@ impl App {
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
             }
+            WindowEvent::Focused(true) if pos < self.detached.len() => {
+                // OUR detached window now holds focus: record it and keep the
+                // switch flag set so the main window's Focused(false) auto-hide
+                // does not fire (the user is still inside Jetty). Mirrors how the
+                // Settings window suppresses auto-hide.
+                self.last_focused_window = Some(self.detached[pos].window.id());
+                self.switching_to_detached = true;
+            }
+            WindowEvent::Focused(false) if pos < self.detached.len() => {
+                // The detached window lost focus. Clear the switch flag so a later
+                // main Focused(false) (focus actually left Jetty) is not mistaken
+                // for a switch-to-detached and the terminal hides as it should.
+                self.switching_to_detached = false;
+                if self.last_focused_window == Some(self.detached[pos].window.id()) {
+                    self.last_focused_window = None;
+                }
+            }
             _ => {}
         }
     }
@@ -3355,6 +3393,14 @@ impl ApplicationHandler<AppEvent> for App {
                 let to_settings = self.switching_to_settings
                     || (self.last_focused_window.is_some()
                         && self.last_focused_window == settings_id);
+                // Same exemption for OUR detached windows: detaching a tab moves
+                // focus to the new detached window, which must not hide the main
+                // window. `switching_to_detached` covers the race where the main
+                // Focused(false) arrives before the detached Focused(true).
+                let detached_ids: Vec<WindowId> =
+                    self.detached.iter().map(|d| d.window.id()).collect();
+                let to_detached = self.switching_to_detached
+                    || crate::detached::focus_in_detached(self.last_focused_window, &detached_ids);
                 if self.focus_autohide
                     && self.visible
                     && self.summon_anim.is_none()
@@ -3366,6 +3412,7 @@ impl ApplicationHandler<AppEvent> for App {
                         .summon_settle_until
                         .map_or(true, |d| std::time::Instant::now() >= d)
                     && !to_settings
+                    && !to_detached
                 {
                     if let Some(win) = &self.window {
                         if self.window_mode == WindowMode::Center {
