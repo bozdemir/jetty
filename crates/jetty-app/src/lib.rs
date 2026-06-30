@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod detached;
 pub mod clipboard;
 pub mod input;
 
