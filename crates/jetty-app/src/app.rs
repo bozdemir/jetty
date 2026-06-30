@@ -2167,6 +2167,74 @@ impl App {
             WindowEvent::CloseRequested if pos < self.detached.len() => {
                 self.detached.remove(pos);
             }
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                let Some(dw) = self.detached.get_mut(pos) else { return };
+                // Same modifier/decode pipeline as the main window's
+                // `KeyboardInput` arm (app.rs ~4043-4076), except `app_cursor`
+                // is sourced from THIS window's own terminal, not the main one,
+                // and `panel_open` is always false — detached windows have no
+                // settings panel.
+                let ctrl = self.modifiers.control_key();
+                let shift = self.modifiers.shift_key();
+                let alt = self.modifiers.alt_key();
+                let app_cursor = dw.tab.terminal.app_cursor_keys();
+                // macOS Option-compose: see the matching comment on the main
+                // window's arm — Alt + a composed non-ASCII glyph is sent as
+                // text instead of being ESC-prefixed by decide_key.
+                let composed: Option<Vec<u8>> = if alt && !ctrl {
+                    event.text.as_ref().and_then(|t| {
+                        if !t.is_empty() && t.chars().all(|c| !c.is_control()) && !t.is_ascii() {
+                            Some(t.as_bytes().to_vec())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                let action = match composed {
+                    Some(bytes) => input::KeyAction::Send(bytes),
+                    None => input::decide_key(
+                        ctrl,
+                        shift,
+                        alt,
+                        event.physical_key,
+                        &event.logical_key,
+                        false,
+                        app_cursor,
+                    ),
+                };
+                match action {
+                    // Ctrl+Shift+D is reserved for reattach (Task 7). Don't
+                    // forward it to the PTY in the meantime.
+                    input::KeyAction::DetachTab => {
+                        // TODO(Task 7): reattach this detached window.
+                    }
+                    input::KeyAction::Send(bytes) => {
+                        let _ = dw.tab.writer.write_all(&bytes);
+                        let _ = dw.tab.writer.flush();
+                        dw.window.request_redraw();
+                    }
+                    // Every other action (new/close/nav tab, font, opacity,
+                    // panel, copy/paste, scroll, ...) is a main-window-only
+                    // feature for this MVP — ignored in a detached window.
+                    _ => {}
+                }
+            }
+            WindowEvent::Resized(size) => {
+                let Some(dw) = self.detached.get_mut(pos) else { return };
+                dw.gpu.resize(size.width, size.height);
+                // Bare window: no tab bar / status bar to subtract, same
+                // convention as `detach_active_tab`'s initial sizing and
+                // `detached::grid_dims`.
+                let (cw, ch) = dw.text.cell_size();
+                let (cols, rows) = crate::detached::grid_dims(
+                    size.width as f32, size.height as f32, cw, ch, SCROLLBAR_GUTTER,
+                );
+                dw.tab.terminal.resize(cols, rows);
+                dw.tab.pty.resize(cols as u16, rows as u16);
+                dw.window.request_redraw();
+            }
             _ => {}
         }
     }
