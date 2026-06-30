@@ -3886,6 +3886,7 @@ impl ApplicationHandler<AppEvent> for App {
                         input::KeyAction::ClosePanel => "ClosePanel",
                         input::KeyAction::NewTab => "NewTab",
                         input::KeyAction::CloseTab => "CloseTab",
+                        input::KeyAction::DetachTab => "DetachTab",
                         input::KeyAction::NextTab => "NextTab",
                         input::KeyAction::PrevTab => "PrevTab",
                         input::KeyAction::SelectTab(_) => "SelectTab",
@@ -3929,6 +3930,9 @@ impl ApplicationHandler<AppEvent> for App {
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
+                    }
+                    input::KeyAction::DetachTab => {
+                        // TODO: Wired in Task 4
                     }
                     input::KeyAction::NextTab => {
                         self.switch_tab(true);

@@ -9,6 +9,9 @@ pub enum KeyAction {
     NewTab,
     /// Close the active tab (Ctrl+Shift+W).
     CloseTab,
+    /// Detach the active tab into its own window, or — when already in a detached
+    /// window — reattach it to the main window (Ctrl+Shift+D).
+    DetachTab,
     /// Switch to the next tab, wrapping (Ctrl+Tab).
     NextTab,
     /// Switch to the previous tab, wrapping (Ctrl+Shift+Tab).
@@ -97,10 +100,12 @@ pub fn decide_key(
             PhysicalKey::Code(KeyCode::KeyP) => return KeyAction::TogglePanel,
             PhysicalKey::Code(KeyCode::KeyO) => return KeyAction::TogglePanel,
             // Tabs: Ctrl+Shift+T opens a new tab; Ctrl+Shift+W closes the active
-            // one. Theme switching moved to the Settings window. Ctrl+Shift+Tab
-            // cycles to the previous tab (must be intercepted before ctrl_byte).
+            // one. Ctrl+Shift+D detaches the active tab or reattaches a detached one.
+            // Theme switching moved to the Settings window. Ctrl+Shift+Tab cycles to
+            // the previous tab (must be intercepted before ctrl_byte).
             PhysicalKey::Code(KeyCode::KeyT) => return KeyAction::NewTab,
             PhysicalKey::Code(KeyCode::KeyW) => return KeyAction::CloseTab,
+            PhysicalKey::Code(KeyCode::KeyD) => return KeyAction::DetachTab,
             PhysicalKey::Code(KeyCode::Tab) => return KeyAction::PrevTab,
             PhysicalKey::Code(KeyCode::Equal) => return KeyAction::OpacityUp,
             PhysicalKey::Code(KeyCode::Minus) => return KeyAction::OpacityDown,
@@ -868,6 +873,17 @@ mod tests {
             false, false,
         );
         assert_eq!(action, KeyAction::CloseTab);
+    }
+
+    #[test]
+    fn ctrl_shift_d_maps_to_detach_tab() {
+        let action = decide_key(
+            true, true, false,
+            make_physical(KeyCode::KeyD),
+            &make_logical_char("D"),
+            false, false,
+        );
+        assert_eq!(action, KeyAction::DetachTab);
     }
 
     #[test]
