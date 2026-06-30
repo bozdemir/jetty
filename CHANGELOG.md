@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.2] — 2026-06-30
+
+### Changed
+- **CRT curvature now defaults to 0** — enabling CRT no longer bows the screen
+  out of the box; scanlines/mask/bloom/vignette still apply, and the barrel can
+  be dialed up under Settings → Effects. Only affects fresh configs.
+
+---
+
 ## [0.6.1] — 2026-06-30
 
 ### Fixed
