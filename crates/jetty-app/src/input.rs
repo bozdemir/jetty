@@ -236,8 +236,15 @@ pub enum MouseAction {
     StartSliderDrag,
     /// User pressed on the corner-radius slider handle or track.
     StartRadiusDrag,
-    /// User clicked a theme chip. The index is into `jetty_core::theme::PRESETS`.
+    /// User clicked a theme row in the OPEN dropdown. The index is into
+    /// `jetty_core::theme::PRESETS` (already offset by `geom.theme_scroll_offset`).
     SetTheme(usize),
+    /// User clicked the collapsed theme combo header — toggle the dropdown open/closed.
+    ToggleThemeDropdown,
+    /// User clicked the ▲ theme-list scroll button — scroll up (offset−1).
+    ThemeScrollUp,
+    /// User clicked the ▼ theme-list scroll button — scroll down (offset+1).
+    ThemeScrollDown,
     /// User clicked the font-size decrement button ("−").
     FontMinus,
     /// User clicked the font-size increment button ("+").
@@ -351,7 +358,7 @@ pub enum MouseAction {
 ///
 /// Priority:
 /// 1. If panel open: slider handle/track → StartSliderDrag
-/// 2. If panel open: theme chip i        → SetTheme(i)
+/// 2. If panel open: theme combo / open rows → ToggleThemeDropdown / SetTheme(i)
 /// 3. If panel open: font-size buttons   → FontMinus/Plus/Reset
 /// 4. If panel open: font-scroll buttons → FontScrollUp/FontScrollDown
 /// 5. If panel open: font-family row     → SetFont(idx)
@@ -384,11 +391,25 @@ pub fn decide_mouse_press(
         if point_in(&g.radius_handle, cx, cy) || point_in(&g.radius_track, cx, cy) {
             return MouseAction::StartRadiusDrag;
         }
-        // Theme chips.
-        for (i, chip) in g.chips.iter().enumerate() {
-            if point_in(chip, cx, cy) {
-                return MouseAction::SetTheme(i);
+        // Theme picker. When the dropdown is OPEN its rows + scroll arrows take
+        // priority (they overlay the area below the combo). A row click selects a
+        // preset; the scroll arrows page the list. Clicking the combo header itself
+        // toggles the dropdown.
+        if g.theme_open {
+            for (i, row) in g.theme_rows.iter().enumerate() {
+                if point_in(row, cx, cy) {
+                    return MouseAction::SetTheme(g.theme_scroll_offset + i);
+                }
             }
+            if point_in(&g.theme_scroll_up, cx, cy) {
+                return MouseAction::ThemeScrollUp;
+            }
+            if point_in(&g.theme_scroll_down, cx, cy) {
+                return MouseAction::ThemeScrollDown;
+            }
+        }
+        if point_in(&g.theme_combo, cx, cy) {
+            return MouseAction::ToggleThemeDropdown;
         }
         // Font-size buttons (checked before generic ConsumePanel).
         if point_in(&g.font_minus, cx, cy) {
@@ -992,6 +1013,8 @@ mod tests {
             active_tab,
             &jetty_render::EffectsParams::default(),
             0.0, // effects_scroll (default: top)
+            false, // theme_dropdown_open
+            0, // theme_scroll_offset
         )
     }
 

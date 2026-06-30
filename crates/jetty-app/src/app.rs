@@ -159,6 +159,10 @@ const DROPDOWN_SLIDE_SECS: f32 = 0.15;
 /// glyphs are rendered at physical-pixel resolution on HiDPI screens.
 const FONT_LOGICAL_DEFAULT: f32 = 16.0;
 
+/// Visible rows in the open theme dropdown. MUST match `panel::MAX_THEME_ROWS`
+/// (panel.rs owns the render-side value; this mirror bounds the scroll clamp).
+const MAX_THEME_ROWS: usize = 9;
+
 /// UI (chrome) font-size range in logical points. The chrome — tab titles, the
 /// status bar, the right-click menu, help/confirm/welcome overlays — scales
 /// across this full range. SEPARATE from the terminal font (which uses its own
@@ -383,6 +387,10 @@ pub struct App {
     active: usize,
     /// Index into jetty_core::theme::PRESETS for the current theme.
     theme_idx: usize,
+    /// Whether the Look-tab theme dropdown is expanded. Session-only (not persisted).
+    theme_dropdown_open: bool,
+    /// First visible row index into PRESETS when the theme dropdown is open.
+    theme_scroll_offset: usize,
     /// Background opacity (0.0..=1.0); modifies theme bg alpha at runtime.
     opacity: f32,
     /// Current logical (device-independent) font size in points. Changed at
@@ -728,6 +736,8 @@ impl App {
             tabs: Vec::new(),
             active: 0,
             theme_idx,
+            theme_dropdown_open: false,
+            theme_scroll_offset: 0,
             opacity,
             font_logical: FONT_LOGICAL_DEFAULT,
             reflow_pending_at: None,
@@ -907,6 +917,11 @@ impl App {
         let mut t = jetty_core::Theme::by_name(jetty_core::theme::PRESETS[self.theme_idx]);
         t.bg[3] = (self.opacity.clamp(0.0, 1.0) * 255.0) as u8;
         t
+    }
+
+    /// Largest valid `theme_scroll_offset` so the open dropdown's last page is full.
+    fn max_theme_scroll(&self) -> usize {
+        jetty_core::theme::PRESETS.len().saturating_sub(MAX_THEME_ROWS)
     }
 
     /// Build the current theme from `theme_idx`, apply `opacity` to its bg
@@ -1890,6 +1905,8 @@ impl App {
             self.settings_tab,
             &fx,
             self.effects_scroll,
+            self.theme_dropdown_open,
+            self.theme_scroll_offset,
         )
     }
 
@@ -1945,6 +1962,8 @@ impl App {
             caret_flash_color: self.fx.caret_flash_color,
         };
         let effects_scroll = self.effects_scroll;
+        let theme_dropdown_open = self.theme_dropdown_open;
+        let theme_scroll_offset = self.theme_scroll_offset;
         let (Some(gpu), Some(text), Some(quad), Some(specimen)) = (
             &mut self.settings_gpu,
             &mut self.settings_text,
@@ -1966,6 +1985,8 @@ impl App {
             settings_tab,
             &fx,
             effects_scroll,
+            theme_dropdown_open,
+            theme_scroll_offset,
         );
         if let Some((frame, view)) = gpu.acquire_frame() {
             // Pass 1: Chrome quads — panel border, bg, chips, opacity/radius tracks,
@@ -2058,6 +2079,17 @@ impl App {
         geom: &jetty_render::PanelGeom,
     ) {
         let cx = self.settings_cursor.0 as f32;
+        // Any settings interaction that isn't part of the theme picker collapses
+        // the dropdown (click-outside-to-close behavior).
+        if !matches!(
+            action,
+            input::MouseAction::ToggleThemeDropdown
+                | input::MouseAction::ThemeScrollUp
+                | input::MouseAction::ThemeScrollDown
+                | input::MouseAction::SetTheme(_)
+        ) {
+            self.theme_dropdown_open = false;
+        }
         match action {
             input::MouseAction::StartSliderDrag => {
                 self.dragging_slider = true;
@@ -2069,8 +2101,26 @@ impl App {
                 self.corner_radius = self.radius_from_cursor(cx, &geom.radius_track);
             }
             input::MouseAction::SetTheme(i) => {
-                self.theme_idx = i;
-                self.apply_theme();
+                if i < jetty_core::theme::PRESETS.len() {
+                    self.theme_idx = i;
+                    self.apply_theme();
+                }
+                self.theme_dropdown_open = false;
+            }
+            input::MouseAction::ToggleThemeDropdown => {
+                self.theme_dropdown_open = !self.theme_dropdown_open;
+                if self.theme_dropdown_open {
+                    // Open with the active theme scrolled into view (centered-ish).
+                    let start = self.theme_idx.saturating_sub(MAX_THEME_ROWS / 2);
+                    self.theme_scroll_offset = start.min(self.max_theme_scroll());
+                }
+            }
+            input::MouseAction::ThemeScrollUp => {
+                self.theme_scroll_offset = self.theme_scroll_offset.saturating_sub(1);
+            }
+            input::MouseAction::ThemeScrollDown => {
+                self.theme_scroll_offset =
+                    (self.theme_scroll_offset + 1).min(self.max_theme_scroll());
             }
             input::MouseAction::FontMinus => {
                 self.set_font_size(self.font_logical - 1.0);
@@ -3432,6 +3482,9 @@ impl ApplicationHandler<AppEvent> for App {
                     input::MouseAction::StartSliderDrag
                     | input::MouseAction::StartRadiusDrag
                     | input::MouseAction::SetTheme(_)
+                    | input::MouseAction::ToggleThemeDropdown
+                    | input::MouseAction::ThemeScrollUp
+                    | input::MouseAction::ThemeScrollDown
                     | input::MouseAction::FontMinus
                     | input::MouseAction::FontPlus
                     | input::MouseAction::FontReset

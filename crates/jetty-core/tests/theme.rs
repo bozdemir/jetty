@@ -1,6 +1,27 @@
 // Tests for the theme system.
 use jetty_core::{Terminal, Theme};
 
+/// Every PRESETS entry must resolve to a theme whose `name` round-trips exactly,
+/// carry a non-empty display name, and have a unique key + display name. This is
+/// the lockstep guard for the Settings theme dropdown (which lists every preset).
+#[test]
+fn every_preset_resolves_and_has_unique_display_name() {
+    use std::collections::HashSet;
+    let mut keys = HashSet::new();
+    let mut displays = HashSet::new();
+    for &key in jetty_core::theme::PRESETS.iter() {
+        let t = Theme::by_name(key);
+        assert_eq!(t.name, key, "by_name({key:?}) must round-trip its key");
+        assert!(!t.display_name.is_empty(), "{key} has an empty display_name");
+        assert!(keys.insert(key), "duplicate preset key: {key}");
+        assert!(
+            displays.insert(t.display_name),
+            "duplicate display_name: {}",
+            t.display_name
+        );
+    }
+}
+
 /// Unknown JETTY_THEME name falls back to the default theme (catppuccin_mocha).
 #[test]
 fn unknown_theme_env_falls_back_to_default() {

@@ -54,7 +54,22 @@ pub struct PanelGeom {
     pub tab_rects: [Rect; 5],
     pub slider_track: Rect,
     pub slider_handle: Rect,
-    pub chips: Vec<Rect>,
+    /// Collapsed theme-picker combo header (Look tab). A press toggles the open
+    /// state of the theme dropdown. Always live on the Look tab.
+    pub theme_combo: Rect,
+    /// One Rect per visible row in the OPEN theme dropdown; empty when closed.
+    /// Index i maps to preset `theme_scroll_offset + i`.
+    pub theme_rows: Vec<Rect>,
+    /// Whether the theme dropdown is currently open (so hit-testing knows the rows
+    /// and scroll arrows are live and should take priority).
+    pub theme_open: bool,
+    /// Scroll offset into PRESETS at render time (added to a clicked row index).
+    pub theme_scroll_offset: usize,
+    /// ▲ theme-list scroll button — decrements theme_scroll_offset (offscreen when
+    /// the list is closed or doesn't overflow).
+    pub theme_scroll_up: Rect,
+    /// ▼ theme-list scroll button — increments theme_scroll_offset.
+    pub theme_scroll_down: Rect,
     /// Font-size decrement button ("−").
     pub font_minus: Rect,
     /// Font-size increment button ("+").
@@ -217,8 +232,6 @@ pub struct PanelView {
     pub ui_specimen_pos: (f32, f32),
 }
 
-/// Short display names for each preset, in PRESETS order.
-const CHIP_NAMES: [&str; 5] = ["Mocha", "Tokyo", "Gruv", "Drac", "Onyx"];
 
 /// Maximum number of font-family rows displayed in the panel at once.
 /// If more families exist, the list scrolls via `font_scroll_offset`.
@@ -227,6 +240,34 @@ const MAX_FONT_ROWS: usize = 5;
 /// Maximum number of UI-font-family rows shown at once. Kept to 4 (not 5) to
 /// bound the panel's vertical growth from the new section.
 const MAX_UI_FONT_ROWS: usize = 4;
+
+/// Maximum number of theme rows shown at once in the open theme dropdown. With
+/// more presets than this the list scrolls via `theme_scroll_offset`. Sized so
+/// the expanded list still fits inside PANEL_H below the combo header.
+const MAX_THEME_ROWS: usize = 9;
+
+/// The 8 ANSI palette indices shown as the per-theme swatch strip (the 8 "normal"
+/// ANSI colors: black, red, green, yellow, blue, magenta, cyan, white).
+const THEME_SWATCH_IDX: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+
+/// Per-swatch geometry for the theme color strip.
+const THEME_SW_W: f32 = 11.0;
+const THEME_SW_H: f32 = 12.0;
+const THEME_SW_GAP: f32 = 2.0;
+/// Total width of the 8-swatch strip (8 swatches + 7 gaps).
+const THEME_STRIP_W: f32 = 8.0 * THEME_SW_W + 7.0 * THEME_SW_GAP; // 102
+
+/// Push the 8-swatch ANSI strip for `t` into `quads`, left edge at `strip_left`,
+/// vertically centered on `center_y`. Used by both the collapsed combo header and
+/// every open dropdown row so the two always render identical strips.
+fn push_theme_swatches(quads: &mut Vec<Rect>, strip_left: f32, center_y: f32, t: &jetty_core::Theme) {
+    let sy = center_y - THEME_SW_H / 2.0;
+    for (k, &idx) in THEME_SWATCH_IDX.iter().enumerate() {
+        let c = t.palette[idx];
+        let sx = strip_left + k as f32 * (THEME_SW_W + THEME_SW_GAP);
+        quads.push(Rect::rounded(sx, sy, THEME_SW_W, THEME_SW_H, [c[0], c[1], c[2], 255], 2.0));
+    }
+}
 
 /// The five settings-tab labels, in order. The active tab's bands are the only
 /// ones laid out on-screen; every other tab's widgets are positioned offscreen.
@@ -255,7 +296,7 @@ pub(crate) const CHAR_W_FALLBACK: f32 = 9.8;
 /// under the title): only the active tab's bands are laid out, so PANEL_H is
 /// sized to the TALLEST tab rather than the sum of every band:
 ///
-/// * Tab 0 "Look"    — opacity slider, corner-radius slider, theme cards.
+/// * Tab 0 "Look"    — opacity slider, corner-radius slider, theme dropdown.
 /// * Tab 1 "Fonts"   — font-size, font-family list, UI-font-size + "Aa" specimen,
 ///                     UI-font-family list. (TALLEST non-scrolling tab — drives PANEL_H.)
 /// * Tab 2 "Window"  — summon effect, window mode, dropdown height, dropdown
@@ -289,9 +330,6 @@ pub const EFFECTS_CONTENT_H: f32 = 14.0 * 44.0 + 36.0;
 /// = `[0, 192.0]`. Value: `PANEL_H − CONTENT_TOP_OFFSET = 460.0`.
 pub const EFFECTS_VISIBLE_H: f32 = PANEL_H - CONTENT_TOP_OFFSET;
 
-// Compile-time lockstep: CHIP_NAMES must always have one entry per PRESETS entry.
-// This panics at build time if PRESETS grows without updating CHIP_NAMES (or vice versa).
-const _: () = assert!(CHIP_NAMES.len() == jetty_core::theme::PRESETS.len());
 
 /// Build the settings panel for the given screen size, opacity (0.1..=1.0),
 /// selected theme index (index into `jetty_core::theme::PRESETS`), current
@@ -360,6 +398,13 @@ pub fn build_panel(
     //   Clamped to [0, max(0, content_h - visible_h)] by the caller (App).
     //   Ignored on other tabs (bands are at OFF regardless).
     effects_scroll: f32,
+    // `theme_dropdown_open`: whether the Look-tab theme picker is expanded into its
+    //   scrollable overlay list. When false only the collapsed combo header shows.
+    //   Session-only; not persisted.
+    theme_dropdown_open: bool,
+    // `theme_scroll_offset`: first visible row index into PRESETS when the theme
+    //   dropdown is open. Clamped here; ignored when closed.
+    theme_scroll_offset: usize,
 ) -> PanelView {
     let active_tab = active_tab.min(4);
 
@@ -699,31 +744,57 @@ pub fn build_panel(
         ui_font_row_rects.push(Rect::rounded(list_x, row_y, list_w, ROW_H, row_color, 3.0));
     }
 
-    // --- Theme cards — 2-column × 3-row grid (Look) ---
-    // "THEME" label at t_theme; cards start at +20.
-    // Each card: col_w = (348 − 8) / 2 = 170px; card_h = 40px; row_gap = 8px.
+    // --- Theme picker — collapsible dropdown combo (Look) ---
+    // "THEME" header at t_theme. Below it a full-width "combo" button shows the
+    // ACTIVE theme's display name + an 8-swatch ANSI strip + a ▼ caret. Clicking it
+    // toggles `theme_dropdown_open`. When open, an overlay list of EVERY preset
+    // (name + 8 swatches each) is laid out below, the active one highlighted, with
+    // ▲/▼ scroll arrows when the list exceeds MAX_THEME_ROWS. The list quads/labels
+    // are emitted LAST so they overlay anything sitting below the theme band.
     let presets = jetty_core::theme::PRESETS;
-    let num_presets = presets.len(); // 5
+    let num_presets = presets.len();
 
-    const CARD_COLS: usize = 2;
-    const CARD_H: f32 = 40.0;
-    const CARD_ROW_GAP: f32 = 8.0;
-    const CARD_COL_GAP: f32 = 8.0;
-    let card_w = (348.0 - (CARD_COLS as f32 - 1.0) * CARD_COL_GAP) / CARD_COLS as f32; // 170px
-    let card_top = t_theme + 20.0;
+    const THEME_ROW_H: f32 = 26.0;
+    const THEME_ROW_GAP: f32 = 2.0;
+    let combo_x = px + 16.0;
+    let combo_w = PANEL_W - 32.0; // 348
+    let combo_h = THEME_ROW_H + 2.0;
+    let combo_y = t_theme + 20.0;
+    let theme_combo = Rect::rounded(combo_x, combo_y, combo_w, combo_h, btn_fill, 6.0);
 
-    let mut chip_rects: Vec<Rect> = Vec::with_capacity(num_presets);
-    for i in 0..num_presets {
-        let col = (i % CARD_COLS) as f32;
-        let row = (i / CARD_COLS) as f32;
-        let card_x = px + 16.0 + col * (card_w + CARD_COL_GAP);
-        let card_y = card_top + row * (CARD_H + CARD_ROW_GAP);
-        let theme_bg = jetty_core::Theme::by_name(presets[i]).bg;
-        chip_rects.push(Rect::rounded(
-            card_x, card_y, card_w, CARD_H,
-            [theme_bg[0], theme_bg[1], theme_bg[2], 255], 6.0,
-        ));
+    // Visible-row + scroll math (only meaningful when the list is open).
+    let theme_offset = theme_scroll_offset.min(num_presets.saturating_sub(1));
+    let theme_visible = if theme_dropdown_open {
+        (num_presets - theme_offset).min(MAX_THEME_ROWS)
+    } else {
+        0
+    };
+    let theme_list_top = combo_y + combo_h + 4.0;
+    let mut theme_row_rects: Vec<Rect> = Vec::with_capacity(theme_visible);
+    for i in 0..theme_visible {
+        let row_y = theme_list_top + i as f32 * (THEME_ROW_H + THEME_ROW_GAP);
+        let preset_idx = theme_offset + i;
+        let is_selected = preset_idx == theme_idx;
+        let row_color = if is_selected { row_sel } else { row_unsel };
+        theme_row_rects.push(Rect::rounded(combo_x, row_y, combo_w, THEME_ROW_H, row_color, 4.0));
     }
+    // ▲/▼ scroll arrows sit on the combo header's right edge, but only when the
+    // list is open AND overflows. Otherwise they go offscreen (never hit-testable).
+    let theme_has_scroll = theme_dropdown_open && num_presets > MAX_THEME_ROWS;
+    let (theme_scroll_up, theme_scroll_down) = if theme_has_scroll {
+        let by = t_theme - 2.0; // on the "THEME" header row, right-aligned
+        let dn_x = px + PANEL_W - 16.0 - 20.0;
+        let up_x = dn_x - 24.0;
+        (
+            Rect::rounded(up_x, by, 20.0, 20.0, btn_fill, 4.0),
+            Rect::rounded(dn_x, by, 20.0, 20.0, btn_fill, 4.0),
+        )
+    } else {
+        (
+            Rect::rounded(OFF, OFF, 20.0, 20.0, btn_fill, 4.0),
+            Rect::rounded(OFF, OFF, 20.0, 20.0, btn_fill, 4.0),
+        )
+    };
 
     // --- Launch-at-login band (Shell) ---
     // CAPS label at t_launch; toggle pill at the right (h=28). Accent when ON.
@@ -975,42 +1046,43 @@ pub fn build_panel(
     quads.push(ui_font_scroll_down);
     quads.extend_from_slice(&ui_font_row_rects);
 
-    // Selected-chip border highlight (pushed before chip fills so chip fill sits inside).
-    if theme_idx < num_presets {
-        let chip = &chip_rects[theme_idx];
-        quads.push(Rect::rounded(
-            chip.x - 2.0, chip.y - 2.0, chip.w + 4.0, chip.h + 4.0, accent_col, 7.0,
-        ));
+    // --- Theme combo header (collapsed, always shown on the Look tab) ---
+    // Accent selection ring, the combo fill, then the ACTIVE theme's swatch strip.
+    // The name + caret are emitted in the label pass.
+    let active_theme_idx = theme_idx.min(num_presets - 1);
+    quads.push(Rect::rounded(
+        theme_combo.x - 2.0, theme_combo.y - 2.0,
+        theme_combo.w + 4.0, theme_combo.h + 4.0, accent_col, 8.0,
+    ));
+    quads.push(theme_combo);
+    {
+        let active = jetty_core::Theme::by_name(presets[active_theme_idx]);
+        let caret_x = theme_combo.x + theme_combo.w - 18.0;
+        let strip_left = caret_x - 8.0 - THEME_STRIP_W;
+        push_theme_swatches(&mut quads, strip_left, theme_combo.y + theme_combo.h / 2.0, &active);
     }
 
-    // Chip fills.
-    quads.extend_from_slice(&chip_rects);
-
-    // Color-dot quads for each theme card (3 dots: bg-neighbor, accent, bright).
-    const DOT_R: f32 = 8.0;
-    const DOT_GAP: f32 = 4.0;
-    for i in 0..num_presets {
-        let card = &chip_rects[i];
-        let t = jetty_core::Theme::by_name(presets[i]);
-        let dot_colors = [
-            // Slightly lifted bg — "surface" color.
-            {
-                let c = t.bg;
-                let lift = 40u8;
-                [
-                    c[0].saturating_add(lift),
-                    c[1].saturating_add(lift),
-                    c[2].saturating_add(lift),
-                    255,
-                ]
-            },
-            [t.palette[4][0], t.palette[4][1], t.palette[4][2], 255], // accent
-            [t.palette[2][0], t.palette[2][1], t.palette[2][2], 255], // green/bright
-        ];
-        let dot_y = card.y + 8.0; // top area of card
-        for d in 0..3_usize {
-            let dot_x = card.x + 8.0 + d as f32 * (DOT_R + DOT_GAP);
-            quads.push(Rect::rounded(dot_x, dot_y, DOT_R, DOT_R, dot_colors[d], DOT_R / 2.0));
+    // --- Theme dropdown list (open) — emitted as a floating menu over empty space
+    // below the combo. Backing panel first, then rows + their swatch strips, then
+    // the scroll-arrow button fills.
+    if theme_dropdown_open {
+        if let (Some(first), Some(last)) = (theme_row_rects.first(), theme_row_rects.last()) {
+            let pad = 4.0;
+            quads.push(Rect::rounded(
+                first.x - pad, first.y - pad,
+                first.w + 2.0 * pad, (last.y + last.h) - first.y + 2.0 * pad,
+                panel_bg, 6.0,
+            ));
+        }
+        for (i, row) in theme_row_rects.iter().enumerate() {
+            quads.push(*row);
+            let t = jetty_core::Theme::by_name(presets[theme_offset + i]);
+            let strip_left = row.x + row.w - 10.0 - THEME_STRIP_W;
+            push_theme_swatches(&mut quads, strip_left, row.y + row.h / 2.0, &t);
+        }
+        if theme_has_scroll {
+            quads.push(theme_scroll_up);
+            quads.push(theme_scroll_down);
         }
     }
 
@@ -1230,20 +1302,50 @@ pub fn build_panel(
     // THEME band (Look) — CAPS header.
     labels.push(("THEME".to_string(), px + 16.0, t_theme, text_header));
 
-    // Theme card name labels and color-dot labels.
-    for i in 0..num_presets {
-        let card = &chip_rects[i];
-        // Pick black or white text per card based on its own bg luminance so the
-        // name stays legible on any theme swatch.
-        let cb = jetty_core::Theme::by_name(presets[i]).bg;
-        let lum = 0.299 * cb[0] as f32 + 0.587 * cb[1] as f32 + 0.114 * cb[2] as f32;
-        let label_color: [u8; 3] = if lum > 140.0 { [20, 20, 20] } else { [235, 235, 240] };
+    // Truncate a display name to fit the combo/row width (leaving room for swatches).
+    let fit_theme_name = |name: &str| -> String {
+        const MAX_CHARS: usize = 18;
+        if name.chars().count() > MAX_CHARS {
+            let s: String = name.chars().take(MAX_CHARS - 1).collect();
+            format!("{}…", s)
+        } else {
+            name.to_string()
+        }
+    };
+
+    // Combo header label: active theme name (left) + ▼ / ▲ caret (right).
+    {
+        let active = jetty_core::Theme::by_name(presets[active_theme_idx]);
         labels.push((
-            CHIP_NAMES[i].to_string(),
-            card.x + 8.0,
-            card.y + 22.0, // below the 3-dot row (dots at y+8, dot_h=8 → bottom y+16)
-            label_color,
+            fit_theme_name(active.display_name),
+            theme_combo.x + 10.0,
+            theme_combo.y + 7.0,
+            text_main,
         ));
+        let caret = if theme_dropdown_open { "^" } else { "v" };
+        labels.push((
+            caret.to_string(),
+            theme_combo.x + theme_combo.w - 16.0,
+            theme_combo.y + 7.0,
+            text_btn,
+        ));
+    }
+
+    // Open list: per-row theme name labels + scroll arrows + "(shown/total)" hint.
+    if theme_dropdown_open {
+        for (i, row) in theme_row_rects.iter().enumerate() {
+            let preset_idx = theme_offset + i;
+            let name = jetty_core::Theme::by_name(presets[preset_idx]).display_name;
+            let col = if preset_idx == theme_idx { text_main } else { text_dim };
+            labels.push((fit_theme_name(name), row.x + 10.0, row.y + 5.0, col));
+        }
+        if theme_has_scroll {
+            labels.push(("^".to_string(), theme_scroll_up.x + 6.0, theme_scroll_up.y + 4.0, text_btn));
+            labels.push(("v".to_string(), theme_scroll_down.x + 6.0, theme_scroll_down.y + 4.0, text_btn));
+            let hint = format!("({}/{})", theme_offset + theme_visible, num_presets);
+            let hint_w = hint.chars().count() as f32 * char_w;
+            labels.push((hint, theme_scroll_up.x - 6.0 - hint_w, t_theme, text_dim));
+        }
     }
 
     // LAUNCH AT LOGIN band (Shell) — CAPS header with ON/OFF pill label.
@@ -1363,7 +1465,12 @@ pub fn build_panel(
         tab_rects,
         slider_track,
         slider_handle,
-        chips: chip_rects,
+        theme_combo,
+        theme_rows: theme_row_rects,
+        theme_open: theme_dropdown_open,
+        theme_scroll_offset: theme_offset,
+        theme_scroll_up,
+        theme_scroll_down,
         font_minus,
         font_plus,
         font_reset,
@@ -1452,6 +1559,18 @@ mod tests {
 
     /// Build a panel view with representative inputs for the given active tab.
     fn panel_tab(screen_w: u32, screen_h: u32, active_tab: usize) -> PanelView {
+        panel_tab_ex(screen_w, screen_h, active_tab, false, 0)
+    }
+
+    /// Like `panel_tab` but with explicit theme-dropdown state, for the theme
+    /// picker's open/closed and scrolling tests.
+    fn panel_tab_ex(
+        screen_w: u32,
+        screen_h: u32,
+        active_tab: usize,
+        theme_open: bool,
+        theme_scroll: usize,
+    ) -> PanelView {
         let theme = jetty_core::Theme::by_name("catppuccin_mocha");
         let families: Vec<String> = vec![
             "JetBrains Mono".to_string(),
@@ -1498,6 +1617,8 @@ mod tests {
             active_tab,
             &EffectsParams::default(), // effects (defaults: CRT off, caret flash on)
             0.0,             // effects_scroll (default: top)
+            theme_open,      // theme_dropdown_open
+            theme_scroll,    // theme_scroll_offset
         )
     }
 
@@ -1600,21 +1721,61 @@ mod tests {
     }
 
     #[test]
-    fn exactly_five_chips_in_presets_order() {
-        // The THEME cards live on tab 0.
+    fn theme_combo_closed_has_no_rows() {
+        // Closed (default): the combo header is present and within the panel, and
+        // no dropdown rows are laid out.
         let pv = panel_tab(1920, 1080, 0);
-        assert_eq!(pv.geom.chips.len(), 5, "expected 5 theme chips");
-        let panel = &pv.geom.panel;
-        for (i, chip) in pv.geom.chips.iter().enumerate() {
+        let g = &pv.geom;
+        assert!(!g.theme_open, "dropdown should be closed by default");
+        assert!(g.theme_rows.is_empty(), "closed dropdown must have no rows");
+        let panel = &g.panel;
+        let c = &g.theme_combo;
+        assert!(
+            c.x >= panel.x && c.x + c.w <= panel.x + panel.w + 0.5,
+            "combo x out of panel"
+        );
+        assert!(
+            c.y >= panel.y && c.y + c.h <= panel.y + panel.h + 0.5,
+            "combo y out of panel"
+        );
+    }
+
+    #[test]
+    fn theme_dropdown_open_lists_rows_in_presets_order() {
+        // Open at scroll 0: rows == min(MAX_THEME_ROWS, presets), each within the
+        // panel and stacked strictly top-down below the combo.
+        let pv = panel_tab_ex(1920, 1080, 0, true, 0);
+        let g = &pv.geom;
+        assert!(g.theme_open);
+        let expected = MAX_THEME_ROWS.min(jetty_core::theme::PRESETS.len());
+        assert_eq!(g.theme_rows.len(), expected, "wrong visible row count");
+        let panel = &g.panel;
+        let mut prev_bottom = g.theme_combo.y + g.theme_combo.h;
+        for (i, row) in g.theme_rows.iter().enumerate() {
+            assert!(row.y + 0.5 >= prev_bottom, "row {i} overlaps the one above");
             assert!(
-                chip.x >= panel.x && chip.x + chip.w <= panel.x + panel.w + 0.5,
-                "chip[{i}] x out of panel"
+                row.y + row.h <= panel.y + panel.h + 0.5,
+                "row {i} spills past the panel bottom"
             );
-            assert!(
-                chip.y >= panel.y && chip.y + chip.h <= panel.y + panel.h + 0.5,
-                "chip[{i}] y out of panel"
-            );
+            assert!((row.x - g.theme_combo.x).abs() < 0.5, "row {i} x != combo x");
+            prev_bottom = row.y + row.h;
         }
+        // With more presets than MAX_THEME_ROWS the scroll arrows are live.
+        if jetty_core::theme::PRESETS.len() > MAX_THEME_ROWS {
+            assert!(is_visible(&g.theme_scroll_up), "scroll-up should be visible");
+            assert!(is_visible(&g.theme_scroll_down), "scroll-down should be visible");
+        }
+    }
+
+    #[test]
+    fn theme_dropdown_scroll_offset_shifts_window() {
+        // Scrolling reports the offset back through the geom so app-side row clicks
+        // map to `theme_scroll_offset + i`.
+        let pv = panel_tab_ex(1920, 1080, 0, true, 3);
+        let g = &pv.geom;
+        assert_eq!(g.theme_scroll_offset, 3);
+        let remaining = jetty_core::theme::PRESETS.len() - 3;
+        assert_eq!(g.theme_rows.len(), MAX_THEME_ROWS.min(remaining));
     }
 
     #[test]
@@ -1652,12 +1813,11 @@ mod tests {
         // every band fits within the panel rect. We pick one representative rect per
         // band (for side-by-side controls, the left/primary one) in layout order.
         let representatives: [Vec<fn(&PanelGeom) -> Rect>; 5] = [
-            // Tab 0 "Look": opacity track, radius track, first card, last card.
+            // Tab 0 "Look": opacity track, radius track, theme combo (closed).
             vec![
                 |g| g.slider_track,
                 |g| g.radius_track,
-                |g| g.chips[0],
-                |g| g.chips[4],
+                |g| g.theme_combo,
             ],
             // Tab 1 "Fonts": font-size button, font scroll, last font row,
             //                ui-size button, ui scroll, last ui row.
@@ -1723,25 +1883,18 @@ mod tests {
     }
 
     #[test]
-    fn theme_cards_form_2col_grid() {
-        let pv = panel_tab(1920, 1080, 0);
-        let chips = &pv.geom.chips;
-        assert_eq!(chips.len(), 5);
-
-        let col0_x = chips[0].x;
-        assert!((chips[2].x - col0_x).abs() < 0.5, "chip[2].x != chip[0].x");
-        assert!((chips[4].x - col0_x).abs() < 0.5, "chip[4].x != chip[0].x");
-
-        let col1_x = chips[1].x;
-        assert!(col1_x > col0_x, "col1 not to the right of col0");
-        assert!((chips[3].x - col1_x).abs() < 0.5, "chip[3].x != chip[1].x");
-
-        let row0_bottom = chips[0].y + chips[0].h;
-        let row1_top = chips[2].y;
-        assert!(row1_top >= row0_bottom - 0.5, "row1 overlaps row0");
-        let row1_bottom = chips[2].y + chips[2].h;
-        let row2_top = chips[4].y;
-        assert!(row2_top >= row1_bottom - 0.5, "row2 overlaps row1");
+    fn theme_dropdown_rows_are_full_width_single_column() {
+        // Rows are a single full-width column (unlike the old 2-col card grid):
+        // every visible row shares the combo's x and width.
+        let pv = panel_tab_ex(1920, 1080, 0, true, 0);
+        let g = &pv.geom;
+        assert!(g.theme_rows.len() >= 2);
+        let x0 = g.theme_combo.x;
+        let w0 = g.theme_combo.w;
+        for (i, row) in g.theme_rows.iter().enumerate() {
+            assert!((row.x - x0).abs() < 0.5, "row {i} x != combo x");
+            assert!((row.w - w0).abs() < 0.5, "row {i} w != combo w");
+        }
     }
 
     #[test]

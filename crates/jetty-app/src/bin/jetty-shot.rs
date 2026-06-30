@@ -335,6 +335,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or(0),
                 &jetty_render::EffectsParams::default(),
                 0.0, // effects_scroll (screenshots always start at top)
+                // JETTY_SHOT_PANEL_THEME_OPEN=1 expands the theme dropdown; the
+                // scroll offset comes from JETTY_SHOT_PANEL_THEME_SCROLL (test-only).
+                std::env::var("JETTY_SHOT_PANEL_THEME_OPEN").map(|s| s != "0").unwrap_or(false),
+                std::env::var("JETTY_SHOT_PANEL_THEME_SCROLL")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0),
             );
             rects.extend(pv.quads);
             rects.extend(pv.effects_quads);

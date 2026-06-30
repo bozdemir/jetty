@@ -479,6 +479,16 @@ fn make_panel_geom_tab(active_tab: usize) -> jetty_render::PanelGeom {
 
 /// Build a PanelGeom for `active_tab` with a specific `effects_scroll` offset.
 fn make_panel_geom_tab_scroll(active_tab: usize, effects_scroll: f32) -> jetty_render::PanelGeom {
+    make_panel_geom_full(active_tab, effects_scroll, false, 0)
+}
+
+/// Build a PanelGeom with explicit theme-dropdown state (open + scroll offset).
+fn make_panel_geom_full(
+    active_tab: usize,
+    effects_scroll: f32,
+    theme_open: bool,
+    theme_scroll: usize,
+) -> jetty_render::PanelGeom {
     let theme = jetty_core::Theme::by_name("catppuccin_mocha");
     // UI-font args: size 16, a single synthetic "System Sans" row, selected "".
     let ui_families = ["System Sans (default)".to_string()];
@@ -492,11 +502,13 @@ fn make_panel_geom_tab_scroll(active_tab: usize, effects_scroll: f32) -> jetty_r
         active_tab,
         &jetty_render::EffectsParams::default(),
         effects_scroll,
+        theme_open,
+        theme_scroll,
     )
     .geom
 }
 
-/// Tab-0 ("Look") panel geometry: opacity slider, theme chips, etc.
+/// Tab-0 ("Look") panel geometry: opacity slider, theme combo, etc.
 fn make_panel_geom() -> jetty_render::PanelGeom {
     make_panel_geom_tab(0)
 }
@@ -560,13 +572,44 @@ fn click_dropdown_width_handle_starts_width_drag() {
 }
 
 #[test]
-fn click_chip_2_sets_theme_2() {
+fn click_theme_combo_toggles_dropdown() {
+    // Closed combo: clicking the header asks to open the dropdown.
     let geom = make_panel_geom();
-    let chip = &geom.chips[2];
-    let cx = chip.x + chip.w / 2.0;
-    let cy = chip.y + chip.h / 2.0;
-    let action = decide_mouse_press(Some(&geom), None, cx, cy);
+    let c = &geom.theme_combo;
+    let action = decide_mouse_press(Some(&geom), None, c.x + c.w / 2.0, c.y + c.h / 2.0);
+    assert_eq!(action, MouseAction::ToggleThemeDropdown);
+}
+
+#[test]
+fn click_open_dropdown_row_sets_theme_with_offset() {
+    // Open at scroll offset 2: clicking visible row 0 selects preset index 2.
+    let geom = make_panel_geom_full(0, 0.0, true, 2);
+    assert!(geom.theme_open);
+    let row = &geom.theme_rows[0];
+    let action = decide_mouse_press(Some(&geom), None, row.x + row.w / 2.0, row.y + row.h / 2.0);
     assert_eq!(action, MouseAction::SetTheme(2));
+    // Row 3 maps to preset 2 + 3 = 5.
+    let row3 = &geom.theme_rows[3];
+    let action3 = decide_mouse_press(Some(&geom), None, row3.x + row3.w / 2.0, row3.y + row3.h / 2.0);
+    assert_eq!(action3, MouseAction::SetTheme(5));
+}
+
+#[test]
+fn click_theme_scroll_arrows_page_list() {
+    let geom = make_panel_geom_full(0, 0.0, true, 0);
+    let up = &geom.theme_scroll_up;
+    let dn = &geom.theme_scroll_down;
+    // Only meaningful when the preset list overflows MAX_THEME_ROWS.
+    if jetty_core::theme::PRESETS.len() > geom.theme_rows.len() {
+        assert_eq!(
+            decide_mouse_press(Some(&geom), None, dn.x + dn.w / 2.0, dn.y + dn.h / 2.0),
+            MouseAction::ThemeScrollDown
+        );
+        assert_eq!(
+            decide_mouse_press(Some(&geom), None, up.x + up.w / 2.0, up.y + up.h / 2.0),
+            MouseAction::ThemeScrollUp
+        );
+    }
 }
 
 #[test]
