@@ -566,6 +566,10 @@ pub struct App {
     /// the spot the user left it instead of always re-centering. `None` until the
     /// first hide; the first open is centered.
     last_pos: Option<winit::dpi::PhysicalPosition<i32>>,
+    /// All open detached terminal windows (one `Tab` each). Created by
+    /// `detach_active_tab`; dropped (closing the OS window and reaping the PTY)
+    /// when `reattach_tab` or the window's CloseRequested removes the entry.
+    detached: Vec<crate::detached::DetachedWindow>,
 }
 
 /// Which resize zone (if any) the cursor is over on the borderless main window.
@@ -802,6 +806,7 @@ impl App {
             confirm_close: None,
             confirm_quit: false,
             last_pos: None,
+            detached: Vec::new(),
         };
         // Persisted user settings override the env-derived defaults (but env
         // vars still seed the initial values above, so an explicit JETTY_* can
@@ -1091,6 +1096,65 @@ impl App {
             self.rename_buf.clear();
         }
         self.selecting = false;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Move the active tab out of the main window into a new `DetachedWindow`.
+    ///
+    /// Guarded by `can_detach`: requires ≥ 2 tabs so the main window is never left
+    /// empty. The `Tab` (PTY + terminal grid) is moved by value; the shell is never
+    /// restarted.
+    fn detach_active_tab(&mut self, event_loop: &ActiveEventLoop) {
+        if !crate::detached::can_detach(self.tabs.len()) {
+            return; // keep at least one tab in the main window
+        }
+        let idx = self.active;
+        let Some(mut tab) = crate::detached::take_tab(&mut self.tabs, idx) else {
+            return;
+        };
+        // Keep the main window's active index valid after the removal.
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+
+        // Apply the current theme to the detached tab before it leaves.
+        tab.terminal.set_theme(self.current_theme());
+
+        // Derive LOGICAL window size from the GPU physical surface size.
+        // `build_window` takes logical px; dividing by scale_factor converts.
+        let (w_logical, h_logical) = if let (Some(gpu), Some(win)) = (&self.gpu, &self.window) {
+            let scale = win.scale_factor();
+            (
+                (gpu.config.width as f64 / scale).round() as u32,
+                (gpu.config.height as f64 / scale).round() as u32,
+            )
+        } else {
+            (1000, 640) // fallback when GPU not yet initialised
+        };
+
+        // Build the detached window with the same font settings as the main window.
+        let mut dw = crate::detached::DetachedWindow::new(
+            event_loop,
+            tab,
+            w_logical,
+            h_logical,
+            self.font_logical,
+            self.ui_font_logical,
+            &self.font_family,
+        );
+
+        // Reflow the moved tab to the detached window's grid.
+        // `grid_dims()` reads the MAIN window's GPU surface + TextLayer for cell
+        // sizes. Since the detached window was built to the same pixel size and
+        // uses the same font, the resulting cols/rows match what the detached
+        // window will compute on its first Resized event — no duplication of math.
+        let (cols, rows) = self.grid_dims();
+        dw.tab.terminal.resize(cols, rows);
+        dw.tab.pty.resize(cols as u16, rows as u16);
+
+        self.detached.push(dw);
+
+        // Redraw the main window so the tab bar reflects the removed tab.
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -3932,7 +3996,7 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                     }
                     input::KeyAction::DetachTab => {
-                        // TODO: Wired in Task 4
+                        self.detach_active_tab(event_loop);
                     }
                     input::KeyAction::NextTab => {
                         self.switch_tab(true);

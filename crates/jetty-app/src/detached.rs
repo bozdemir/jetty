@@ -34,10 +34,6 @@ use jetty_render::{GpuContext, QuadLayer, TextLayer};
 
 use crate::app::Tab;
 
-/// Default terminal font size (logical pixels) used when constructing a
-/// detached window. Mirrors `FONT_LOGICAL_DEFAULT` in `app.rs` (16.0).
-const DETACHED_FONT_DEFAULT: f32 = 16.0;
-
 /// A detached terminal window: owns one `Tab` plus its own wgpu render stack
 /// (window, GPU context, text/quad layers, offscreen texture). Mirrors the
 /// per-window resources that the main `App` holds for the main window.
@@ -59,19 +55,30 @@ pub(crate) struct DetachedWindow {
 }
 
 impl DetachedWindow {
-    /// Construct a detached window sized `w × h` (physical pixels) that owns
-    /// `tab`. Mirrors the construction in `App::toggle_settings_window` and
-    /// `App::resumed` — same `GpuContext::new`, same `TextLayer`/`QuadLayer`
-    /// descriptors, same offscreen-texture descriptor.
+    /// Construct a detached window sized `w_logical × h_logical` (logical /
+    /// device-independent pixels) that owns `tab`. Mirrors the construction in
+    /// `App::toggle_settings_window` and `App::resumed` — same `GpuContext::new`,
+    /// same `TextLayer`/`QuadLayer` descriptors, same offscreen-texture descriptor.
     ///
-    /// `DetachedWindow::new` may produce an `#[allow(dead_code)]` warning until
-    /// Task 4 wires the detach keybinding.
-    pub(crate) fn new(event_loop: &ActiveEventLoop, tab: Tab, w: u32, h: u32) -> Self {
+    /// `font_logical` and `ui_font_logical` are the caller's current logical font
+    /// sizes (same values stored in `App::font_logical` and `App::ui_font_logical`).
+    /// `font_family` is the terminal font family (same as `App::font_family`).
+    /// Both are scaled by the new window's `scale_factor` before being passed to
+    /// `TextLayer`, matching how `App::resumed` builds the main-window layers.
+    pub(crate) fn new(
+        event_loop: &ActiveEventLoop,
+        tab: Tab,
+        w_logical: u32,
+        h_logical: u32,
+        font_logical: f32,
+        ui_font_logical: f32,
+        font_family: &str,
+    ) -> Self {
         // Title the OS window from the tab (mirrors how the tab bar displays it).
         let window = jetty_platform::build_window(
             event_loop,
             &tab.title,
-            (w, h),
+            (w_logical, h_logical),
         );
         let size = window.inner_size();
         // HiDPI: same scale-factor handling as the main window in `resumed`.
@@ -82,19 +89,15 @@ impl DetachedWindow {
         let gpu = GpuContext::new(window.clone(), size.width, size.height)
             .expect("DetachedWindow: GPU init failed — no suitable adapter");
 
-        let font_px = DETACHED_FONT_DEFAULT * scale;
-
         // Terminal content layer — mirrors `TextLayer::new_with_family` used in
-        // `toggle_settings_window` (`app.rs` ~1808). Using `new_with_family`
-        // (not `new_with_family_and_fonts`) keeps the constructor synchronous;
-        // Task 4 can propagate the live font family from `App` if needed.
+        // `App::resumed` (`app.rs` ~2728): terminal font at logical × scale_factor.
         let text = TextLayer::new_with_family(
-            &gpu.device, &gpu.queue, gpu.format, font_px, "",
+            &gpu.device, &gpu.queue, gpu.format, font_logical * scale, font_family,
         );
-        // Chrome layer — mirrors the chrome TextLayer built in `resumed`
-        // (`app.rs` ~2800): same device/queue/format, UI-sized font.
+        // Chrome layer — mirrors the chrome TextLayer built in `App::resumed`
+        // (`app.rs` ~2801): UI font at ui_font_logical × scale_factor.
         let chrome_text = TextLayer::new_with_family(
-            &gpu.device, &gpu.queue, gpu.format, font_px, "",
+            &gpu.device, &gpu.queue, gpu.format, ui_font_logical * scale, font_family,
         );
         // Quad layer — same call as both sites in `app.rs` (~1823, ~2735).
         let quad = QuadLayer::new(&gpu.device, gpu.format);
@@ -120,6 +123,8 @@ impl DetachedWindow {
             (tex, view)
         };
 
+        // Focus the new window so it receives keyboard events immediately.
+        window.focus_window();
         window.request_redraw();
 
         Self { window, gpu, text, chrome_text, quad, offscreen, tab }
