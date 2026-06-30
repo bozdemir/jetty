@@ -2235,6 +2235,9 @@ impl App {
                 dw.tab.pty.resize(cols as u16, rows as u16);
                 dw.window.request_redraw();
             }
+            WindowEvent::ModifiersChanged(m) => {
+                self.modifiers = m.state();
+            }
             _ => {}
         }
     }
