@@ -2137,6 +2137,98 @@ impl App {
         }
     }
 
+    /// Route a `WindowEvent` addressed to the detached window at `self.detached[pos]`.
+    /// Only rendering is handled here (Task 5 scope) — keyboard input and resize
+    /// reflow are wired up in Task 6, and reattach (the proper meaning of the
+    /// window's close button) lands in Task 7. All other events are no-ops for now.
+    fn handle_detached_event(
+        &mut self,
+        pos: usize,
+        _event_loop: &ActiveEventLoop,
+        event: WindowEvent,
+    ) {
+        match event {
+            WindowEvent::RedrawRequested => self.render_detached_window(pos),
+            // TODO(Task 7): reattach instead of dropping.
+            WindowEvent::CloseRequested if pos < self.detached.len() => {
+                self.detached.remove(pos);
+            }
+            _ => {}
+        }
+    }
+
+    /// Render a detached window's single tab as a BARE terminal: no tab bar, no
+    /// status bar, grid top offset 0, the grid fills the whole client area minus
+    /// the scrollbar gutter. Mirrors the main window's terminal draw passes from
+    /// the `RedrawRequested` arm of `window_event` (clear + per-cell background
+    /// quads, then glyphs, then the scrollbar) using the detached window's OWN
+    /// `gpu`/`text`/`quad`/`offscreen` — every other main-window pass (tab bar,
+    /// status bar, overlays, summon/CRT effects) is intentionally omitted, since
+    /// a detached window has none of that chrome.
+    fn render_detached_window(&mut self, pos: usize) {
+        let Some(dw) = self.detached.get_mut(pos) else { return };
+
+        // Drain this tab's PTY output into its terminal before snapshotting.
+        // Detached tabs are no longer in `self.tabs`, so the main `drain_pty`
+        // loop never sees them — without this the detached grid would stay
+        // frozen at whatever it looked like the instant it was detached.
+        // Mirrors the per-tab body of `drain_pty`.
+        while let Ok(chunk) = dw.tab.pty.output().try_recv() {
+            dw.tab.terminal.feed(&chunk);
+        }
+        let replies = dw.tab.terminal.drain_pty_writes();
+        if !replies.is_empty() {
+            let _ = dw.tab.writer.write_all(&replies);
+            let _ = dw.tab.writer.flush();
+        }
+
+        // Snapshot + theme are read before the mutable gpu/text/quad borrow below
+        // (same pattern the main RedrawRequested arm uses for `snap`/`theme`).
+        let snap = dw.tab.terminal.snapshot();
+        let theme = self.current_theme();
+
+        let Some(dw) = self.detached.get_mut(pos) else { return };
+        let gpu = &mut dw.gpu;
+        let text = &mut dw.text;
+        let quad = &mut dw.quad;
+
+        let Some((frame, view)) = gpu.acquire_frame() else { return };
+        let width = gpu.config.width;
+        let height = gpu.config.height;
+
+        // Bare terminal: no tab bar, no status bar — the grid starts at y=0.
+        const GRID_TOP: f32 = 0.0;
+
+        let (cell_w, cell_h) = text.cell_size();
+        let selection_bg = selection_bg_for(&theme);
+        let scrollbar_thumb = scrollbar_thumb_for(&theme);
+
+        // Pass 1: clear to the theme bg and paint per-cell background quads
+        // (reverse-video / colored backgrounds / selection) under the text.
+        let bg_rects = jetty_render::cell_bg_rects(&snap, cell_w, cell_h, GRID_TOP, selection_bg);
+        quad.render_clear(
+            &gpu.device,
+            &gpu.queue,
+            &view,
+            width,
+            height,
+            &bg_rects,
+            jetty_render::default_bg_clear(&snap, gpu.premultiply_clear),
+        );
+        // Pass 2: glyphs on top of the painted background. No caret flash in a
+        // detached window yet (caret/keyboard wiring is Task 6).
+        let _ = text.render_to(
+            &gpu.device, &gpu.queue, &view, width, height, &snap, false, GRID_TOP, None,
+            [0.0, 0.0, 0.0],
+        );
+        // Pass 3: scrollbar, spanning the full grid height (no status bar to
+        // reserve room for in a detached window).
+        if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height, GRID_TOP, 0.0, scrollbar_thumb) {
+            quad.render(&gpu.device, &gpu.queue, &view, width, height, &[r]);
+        }
+        frame.present();
+    }
+
     /// Apply a panel `MouseAction` decoded in the settings window. Updates shared
     /// state AND the live main terminal (theme/font/opacity), then requests a
     /// redraw of BOTH windows so each reflects the change immediately.
@@ -3024,6 +3116,13 @@ impl ApplicationHandler<AppEvent> for App {
         // else falls through to the main-terminal handling below.
         if self.settings_window.as_ref().is_some_and(|w| w.id() == id) {
             self.settings_window_event(event);
+            return;
+        }
+        // Route events to a detached window when they belong to one. Only
+        // rendering is wired up here (Task 5); keyboard/resize routing and
+        // reattach are added in later tasks.
+        if let Some(pos) = self.detached.iter().position(|d| d.window.id() == id) {
+            self.handle_detached_event(pos, event_loop, event);
             return;
         }
         match event {
