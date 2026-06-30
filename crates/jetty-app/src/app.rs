@@ -1484,20 +1484,7 @@ impl App {
         // windows in the render path.
         let mut vt_read: u64 = 0;
         for (i, tab) in self.tabs.iter_mut().enumerate() {
-            let mut had = false;
-            while let Ok(chunk) = tab.pty.output().try_recv() {
-                vt_read += chunk.len() as u64;
-                tab.terminal.feed(&chunk);
-                had = true;
-            }
-            // Flush any query replies (DSR/DA, etc.) this tab produced back to its
-            // own PTY so the shell's startup probes succeed.
-            let replies = tab.terminal.drain_pty_writes();
-            if !replies.is_empty() {
-                let _ = tab.writer.write_all(&replies);
-                let _ = tab.writer.flush();
-                had = true;
-            }
+            let had = Self::drain_one_tab(tab, &mut vt_read);
             if i == self.active && had {
                 active_had_data = true;
             }
@@ -1507,6 +1494,33 @@ impl App {
         }
         self.vt_bytes += vt_read;
         (active_had_data, exited)
+    }
+
+    /// Drain one tab's PTY output into its terminal, and flush any query
+    /// replies (DSR/DA, etc.) the terminal produced back to the PTY. Returns
+    /// whether the tab fed any bytes or sent any reply (i.e. "had data").
+    /// `vt_read` accumulates bytes read, for the perf-HUD VT throughput
+    /// counter; callers that don't track that (e.g. detached windows) pass a
+    /// throwaway local.
+    ///
+    /// Shared by `drain_pty` (per `self.tabs` entry) and the `AppEvent::Wake`
+    /// handler's detached-window loop, so both paths drain identically.
+    fn drain_one_tab(tab: &mut Tab, vt_read: &mut u64) -> bool {
+        let mut had = false;
+        while let Ok(chunk) = tab.pty.output().try_recv() {
+            *vt_read += chunk.len() as u64;
+            tab.terminal.feed(&chunk);
+            had = true;
+        }
+        // Flush any query replies (DSR/DA, etc.) this tab produced back to its
+        // own PTY so the shell's startup probes succeed.
+        let replies = tab.terminal.drain_pty_writes();
+        if !replies.is_empty() {
+            let _ = tab.writer.write_all(&replies);
+            let _ = tab.writer.flush();
+            had = true;
+        }
+        had
     }
 
     /// Update the live perf-HUD metrics and return the formatted HUD string, or
@@ -3101,6 +3115,20 @@ impl ApplicationHandler<AppEvent> for App {
                         w.request_redraw();
                     }
                 }
+                // Detached windows aren't in `self.tabs`, so the loop above never
+                // sees them — without this, a detached window's live shell output
+                // wouldn't repaint until an unrelated event (resize/focus) forced
+                // a `RedrawRequested`. Drain each detached tab the same way, and
+                // redraw only the windows whose tab actually produced data
+                // (same damage-driven discipline as the active-tab check above).
+                let mut vt_read: u64 = 0;
+                for dw in self.detached.iter_mut() {
+                    let had = Self::drain_one_tab(&mut dw.tab, &mut vt_read);
+                    if had {
+                        dw.window.request_redraw();
+                    }
+                }
+                self.vt_bytes += vt_read;
             }
             AppEvent::ToggleVisibility => {
                 self.toggle_visibility(event_loop);
