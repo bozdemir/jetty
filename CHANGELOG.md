@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.1] — 2026-06-30
+
+### Fixed
+- **Effects settings tab layout** — the TINT / COLOR RGB sliders and the ANIMATE
+  (roll/flicker/jitter) pills overlapped their section headers ("TINT"+"R",
+  "ANIMATE"+"ROLL" rendered on top of each other). Controls now sit beside the
+  headers without collision.
+
+---
+
 ## [0.6.0] — 2026-06-30
 
 A visual-effects release.
