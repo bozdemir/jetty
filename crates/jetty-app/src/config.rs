@@ -171,7 +171,7 @@ pub struct EffectsConfig {
 
 fn ef_false() -> bool { false }
 fn ef_true() -> bool { true }
-fn ef_curvature() -> f32 { 0.30 }
+fn ef_curvature() -> f32 { 0.0 }
 fn ef_scanline() -> f32 { 0.50 }
 fn ef_mask() -> f32 { 0.30 }
 fn ef_bloom() -> f32 { 0.40 }
