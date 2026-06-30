@@ -3222,13 +3222,31 @@ impl ApplicationHandler<AppEvent> for App {
                 // redraw only the windows whose tab actually produced data
                 // (same damage-driven discipline as the active-tab check above).
                 let mut vt_read: u64 = 0;
-                for dw in self.detached.iter_mut() {
+                let mut exited_detached: Vec<usize> = Vec::new();
+                for (i, dw) in self.detached.iter_mut().enumerate() {
                     let had = Self::drain_one_tab(&mut dw.tab, &mut vt_read);
                     if had {
                         dw.window.request_redraw();
                     }
+                    // Shell exit (Ctrl+D / `exit`) inside a detached window closes
+                    // THAT window — never reattach an exited shell. Unlike the main
+                    // window's `close_exited_tabs`, there is no "last window" special
+                    // case here: the app keeps running even if every detached window
+                    // closes, so we never call `event_loop.exit()` for this.
+                    if dw.tab.terminal.child_exited() || dw.tab.pty.child_exited() {
+                        exited_detached.push(i);
+                    }
                 }
                 self.vt_bytes += vt_read;
+                // Remove in descending index order so earlier indices stay valid,
+                // mirroring `close_exited_tabs`. Dropping the `DetachedWindow`
+                // closes its OS window; its already-exited child is reaped
+                // harmlessly by `PtySession::Drop`.
+                for i in exited_detached.into_iter().rev() {
+                    if i < self.detached.len() {
+                        self.detached.remove(i);
+                    }
+                }
             }
             AppEvent::ToggleVisibility => {
                 self.toggle_visibility(event_loop);
