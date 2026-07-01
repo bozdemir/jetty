@@ -44,8 +44,8 @@
   - **Dropdown** — slides down from the top edge, full screen width, Yakuake/Guake style, with adjustable width & height.
 - ✨ **Summon effects** — five self-written GPU reveal shaders, selectable in settings: **Phosphor Ignition** (default — CRT power-on), **Bayer Crystallize**, **Liquid Drop**, **Focus Pull**, or **None**.
 - 📺 **Visual effects** — an optional **CRT** mode (curvature, scanlines, shadow-mask, bloom, chromatic aberration, vignette + animated roll/flicker/jitter) and a **caret flash/glow**, all under a dedicated **Effects** settings tab. Off by default, so the default look and ~0% idle CPU are untouched.
-- 🗂️ **Tabs** — `Ctrl+Shift+T` new, `Ctrl+Shift+W` close (with confirm), `Ctrl+Tab` / `Ctrl+1‒9` switch, double-click to rename.
-- 🎨 **5 beloved themes** — Catppuccin Mocha (default), Tokyo Night, Gruvbox Dark, Dracula, and Onyx, with exact community palettes. Every UI surface (panel, menus, tab bar, welcome, confirm dialogs) re-skins with the active theme.
+- 🗂️ **Tabs** — `Ctrl+Shift+T` new, `Ctrl+Shift+W` close (with confirm), `Ctrl+Tab` / `Ctrl+1‒9` switch, double-click to rename, **`Ctrl+Shift+D` detach a tab into its own window** (and reattach).
+- 🎨 **22 built-in themes** — Catppuccin (Mocha/Macchiato), Tokyo Night, Gruvbox, Dracula, Onyx, Nord, Solarized (dark/light), One Dark, Monokai (+Pro), Everforest, Rosé Pine, Kanagawa, Material, Ayu (dark/mirage), Tomorrow Night, Oceanic Next, GitHub Dark, Palenight — exact community palettes, picked from a scrollable dropdown with live color previews. Every UI surface re-skins with the active theme.
 - 🪟 **Custom-decorated window** — borderless client-side decorations, our own title bar, rounded corners (radius slider), runtime opacity.
 - 🔤 **Live font control** — change font **size** (`Ctrl + +/-/0`) and **family** (any installed monospace) at runtime, no restart.
 - 📋 **Selection & clipboard** — drag to select (auto-copies), **Shift+drag** to select even inside mouse-aware TUIs (vim/htop/tmux/Claude Code), right-click **Copy / Paste / Select All** menu, `Ctrl+Shift+C/V`, middle-click paste, bracketed-paste aware.
@@ -62,7 +62,7 @@
 | <img src="assets/screenshots/catppuccin.png" width="400"> | <img src="assets/screenshots/tokyo-night.png" width="400"> |
 | **Gruvbox Dark** | **Dracula** |
 | <img src="assets/screenshots/gruvbox.png" width="400"> | <img src="assets/screenshots/dracula.png" width="400"> |
-| **Onyx** | **Settings (theme cards)** |
+| **Onyx** | **Settings — 22 themes, live previews** |
 | <img src="assets/screenshots/onyx.png" width="400"> | <img src="assets/screenshots/settings.png" width="400"> |
 
 | CRT effect (curvature · scanlines · bloom · vignette) | Summon effect (Phosphor Ignition) |

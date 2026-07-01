@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.0] — 2026-07-01
+
+### Added
+- **Detach / reattach a tab into its own window** — `Ctrl+Shift+D` pops the
+  active tab out into its own bare terminal window (no tab bar); the same key (or
+  closing it) reattaches it to the main window. Damage-driven, so extra windows
+  don't cost idle CPU. Desktop-environment-independent (winit, no compositor code).
+- **22 built-in themes** (up from 5) — added Nord, Solarized dark/light, One Dark,
+  Monokai (+Pro), Everforest, Rosé Pine, Kanagawa, Material, Ayu dark/mirage,
+  Tomorrow Night, Oceanic Next, GitHub Dark, Palenight, and Catppuccin Macchiato.
+  The theme picker (Settings → Look) is now a scrollable dropdown with a live
+  color-swatch preview per theme instead of a fixed card grid.
+
+---
+
 ## [0.6.2] — 2026-06-30
 
 ### Changed
