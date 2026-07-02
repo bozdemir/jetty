@@ -575,6 +575,12 @@ pub struct App {
     /// `detach_tab`; dropped (closing the OS window and reaping the PTY)
     /// when `reattach_tab` or the window's CloseRequested removes the entry.
     detached: Vec<crate::detached::DetachedWindow>,
+    /// In-progress left-button drag that began on a tab in the main tab bar.
+    /// `None` when no tab is held. Becomes "tearing" once the cursor leaves the
+    /// strip by more than `detached::TEAR_THRESHOLD_PX` vertically; releasing
+    /// while tearing detaches that tab at the drop position. Cleared on release
+    /// and on focus loss (same discipline as `selecting`/`dragging_scrollbar`).
+    tab_drag: Option<TabDrag>,
     /// When `Some((x, y, tab_idx))`, the TAB context menu (Detach / Rename /
     /// Close Tab) is open at this physical-pixel anchor for tab `tab_idx`.
     /// Mutually exclusive with `context_menu` (the terminal Copy/Paste menu).
@@ -586,6 +592,15 @@ pub struct App {
     tab_menu_rects: Vec<jetty_render::Rect>,
     /// Tab-menu item currently under the cursor (hover highlight).
     tab_menu_hover: Option<usize>,
+}
+
+/// A left-button drag that began on tab `idx` in the main tab bar. `tearing`
+/// flips true once the cursor moves > `TEAR_THRESHOLD_PX` vertically out of the
+/// strip (and back false if it returns), so a plain click still selects.
+#[derive(Debug, Clone, Copy)]
+struct TabDrag {
+    idx: usize,
+    tearing: bool,
 }
 
 /// Which resize zone (if any) the cursor is over on a borderless window (the
@@ -825,6 +840,7 @@ impl App {
             confirm_quit: false,
             last_pos: None,
             detached: Vec::new(),
+            tab_drag: None,
             tab_menu: None,
             tab_menu_labels: Vec::new(),
             tab_menu_rects: Vec::new(),
@@ -1118,12 +1134,13 @@ impl App {
             self.rename_buf.clear();
         }
         self.selecting = false;
-        // The tab menu holds a raw index; the layout just changed under it, so
-        // drop it (transient state, cheap to reopen).
+        // The tab menu / a held tab drag hold raw indices; the layout just
+        // changed under them, so drop both (transient state, cheap to reopen).
         self.tab_menu = None;
         self.tab_menu_hover = None;
         self.tab_menu_rects.clear();
         self.tab_menu_labels.clear();
+        self.tab_drag = None;
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1133,9 +1150,19 @@ impl App {
     ///
     /// Guarded by `can_detach`: requires ≥ 2 tabs so the main window is never left
     /// empty. The `Tab` (PTY + terminal grid) is moved by value; the shell is never
-    /// restarted. Ctrl+Shift+D passes the active index; the tab context menu
-    /// passes an arbitrary one.
-    fn detach_tab(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
+    /// restarted. Ctrl+Shift+D passes the active index; the tab context menu and
+    /// the drag-out gesture pass an arbitrary one.
+    ///
+    /// `drop_global` is the desired GLOBAL top-left for the new window (the
+    /// drag-out release position), clamped on-screen. `None` (hotkey / menu, or
+    /// Wayland where the global cursor is unknowable) keeps the platform's
+    /// default placement, exactly as before.
+    fn detach_tab(
+        &mut self,
+        idx: usize,
+        event_loop: &ActiveEventLoop,
+        drop_global: Option<(f64, f64)>,
+    ) {
         if !crate::detached::can_detach(self.tabs.len()) {
             return; // keep at least one tab in the main window
         }
@@ -1189,6 +1216,33 @@ impl App {
             &self.font_family,
             &self.ui_font_family,
         );
+
+        // Drag-out placement: put the new window's top-left at the release
+        // cursor's global position, clamped so it stays on the monitor. When no
+        // monitor info is available, use the raw position; on Wayland
+        // set_outer_position is a no-op (accepted degradation, no DE code).
+        if let Some((gx, gy)) = drop_global {
+            let ws = dw.window.outer_size();
+            let (x, y) = match dw
+                .window
+                .current_monitor()
+                .or_else(|| dw.window.available_monitors().next())
+            {
+                Some(mon) => {
+                    let mp = mon.position();
+                    let ms = mon.size();
+                    crate::detached::clamp_pos(
+                        gx as i32,
+                        gy as i32,
+                        ws.width,
+                        ws.height,
+                        (mp.x, mp.y, ms.width, ms.height),
+                    )
+                }
+                None => (gx as i32, gy as i32),
+            };
+            dw.window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
 
         // Reflow the moved tab to the detached window's grid: the client area
         // minus its own chrome (top bar + status strip when the perf HUD is on)
@@ -1722,12 +1776,13 @@ impl App {
             self.rename_buf.clear();
         }
         self.selecting = false;
-        // Same index-invalidation as `close_tab`: drop the transient tab menu
-        // now that the tab layout changed under it.
+        // Same index-invalidation as `close_tab`: drop the transient tab menu /
+        // held tab drag now that the tab layout changed under them.
         self.tab_menu = None;
         self.tab_menu_hover = None;
         self.tab_menu_rects.clear();
         self.tab_menu_labels.clear();
+        self.tab_drag = None;
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -2532,10 +2587,39 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
-                // End of a manual top-bar drag: the window stays where the last
-                // CursorMoved put it.
-                let Some(dw) = self.detached.get_mut(pos) else { return };
-                dw.bar_drag = None;
+                // End of a manual top-bar drag: if the global cursor landed on the
+                // MAIN window's tab-bar strip, reattach; otherwise it was a move.
+                let drop_global = {
+                    let Some(dw) = self.detached.get_mut(pos) else { return };
+                    if dw.bar_drag.take().is_none() {
+                        return;
+                    }
+                    dw.window
+                        .outer_position()
+                        .ok()
+                        .map(|o| (o.x as f64 + dw.cursor.0, o.y as f64 + dw.cursor.1))
+                };
+                if let Some((gx, gy)) = drop_global {
+                    if self.visible {
+                        if let (Some(win), Some(gpu)) = (&self.window, &self.gpu) {
+                            if let Ok(mp) = win.outer_position() {
+                                if crate::detached::main_tabbar_contains(
+                                    gx,
+                                    gy,
+                                    mp.x,
+                                    mp.y,
+                                    gpu.config.width,
+                                    gpu.config.height,
+                                    TABBAR_H,
+                                    self.status_h(),
+                                    self.tab_bar_bottom,
+                                ) {
+                                    self.reattach_tab(pos);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -3740,6 +3824,13 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                // A held tab drag can never see its release once focus is gone —
+                // clear it (and its grabbing cursor) so it doesn't resume stuck.
+                if self.tab_drag.take().is_some() {
+                    if let Some(win) = &self.window {
+                        win.set_cursor(winit::window::CursorIcon::Default);
+                    }
+                }
                 // Yakuake-style auto-hide: hide when the window loses focus, but
                 // only when ENABLED, currently visible, NOT mid-summon (X11 fires
                 // a synthetic Focused(false) during set_visible/focus), and focus
@@ -3801,7 +3892,11 @@ impl ApplicationHandler<AppEvent> for App {
                     || self.help_open
                     || self.context_menu.is_some()
                     || self.tab_menu.is_some();
-                if !self.dragging_scrollbar && !self.selecting && !modal_open {
+                if !self.dragging_scrollbar
+                    && !self.selecting
+                    && !modal_open
+                    && self.tab_drag.is_none()
+                {
                     if let Some(gpu) = &self.gpu {
                         let (w, h) = (gpu.config.width, gpu.config.height);
                         let zone = resize_zone_at(position.x as f32, position.y as f32, w, h);
@@ -3842,6 +3937,36 @@ impl ApplicationHandler<AppEvent> for App {
                     self.apply_scroll_from_cursor(w, h);
                     if let Some(win) = &self.window {
                         win.request_redraw();
+                    }
+                }
+                // --- Tab drag-out (tearing) tracking ---
+                // While a tab is held, flip the tearing state as the cursor
+                // crosses the ±TEAR_THRESHOLD_PX band around the strip. The
+                // grabbing cursor is the visual cue; returning to the strip
+                // cancels tearing so the release is a plain click again.
+                if self.tab_drag.is_some() {
+                    let bar_y = self
+                        .gpu
+                        .as_ref()
+                        .map(|g| self.tabbar_y(g.config.height as f32))
+                        .unwrap_or(0.0);
+                    let now_tearing = crate::detached::tearing(
+                        position.y as f32,
+                        bar_y,
+                        TABBAR_H,
+                        crate::detached::TEAR_THRESHOLD_PX,
+                    ) && crate::detached::can_detach(self.tabs.len());
+                    if let Some(drag) = self.tab_drag.as_mut() {
+                        if drag.tearing != now_tearing {
+                            drag.tearing = now_tearing;
+                            if let Some(win) = &self.window {
+                                win.set_cursor(if now_tearing {
+                                    winit::window::CursorIcon::Grabbing
+                                } else {
+                                    winit::window::CursorIcon::Default
+                                });
+                            }
+                        }
                     }
                 }
                 // --- Tab context menu hover update (cached rects, like above) ---
@@ -3965,7 +4090,7 @@ impl ApplicationHandler<AppEvent> for App {
                         match label {
                             Some("Detach") => {
                                 // Same flow as Ctrl+Shift+D, for THAT tab.
-                                self.detach_tab(tab_idx, event_loop);
+                                self.detach_tab(tab_idx, event_loop, None);
                             }
                             Some("Rename") => {
                                 // Same inline-rename flow as double-click.
@@ -4207,7 +4332,12 @@ impl ApplicationHandler<AppEvent> for App {
                         if renaming_idx != Some(i) {
                             self.commit_rename();
                         }
+                        // Select immediately (a plain click), and ARM the
+                        // drag-out gesture: if the cursor leaves the strip by
+                        // more than TEAR_THRESHOLD_PX before release, the drag
+                        // becomes a tear-out and the release detaches this tab.
                         self.select_tab(i);
+                        self.tab_drag = Some(TabDrag { idx: i, tearing: false });
                         return;
                     }
 
@@ -4434,6 +4564,26 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                // --- Tab drag-out release ---
+                // A release while TEARING detaches that tab into a new window at
+                // the release cursor's global position (main outer position +
+                // local cursor; None on Wayland → default placement). A release
+                // that never tore (a plain click) already selected the tab on
+                // press — just clear the drag and fall through.
+                if let Some(drag) = self.tab_drag.take() {
+                    if drag.tearing {
+                        if let Some(win) = &self.window {
+                            win.set_cursor(winit::window::CursorIcon::Default);
+                        }
+                        let drop_global = self
+                            .window
+                            .as_ref()
+                            .and_then(|w| w.outer_position().ok())
+                            .map(|p| (p.x as f64 + self.cursor.0, p.y as f64 + self.cursor.1));
+                        self.detach_tab(drag.idx, event_loop, drop_global);
+                        return;
+                    }
+                }
                 // If we were dragging the scrollbar, the release just ends that
                 // drag and is never forwarded to the app. (Slider drags happen in
                 // the settings window now.)
@@ -4758,7 +4908,7 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                     }
                     input::KeyAction::DetachTab => {
-                        self.detach_tab(self.active, event_loop);
+                        self.detach_tab(self.active, event_loop, None);
                     }
                     input::KeyAction::NextTab => {
                         self.switch_tab(true);

@@ -47,6 +47,62 @@ pub(crate) fn grid_dims(
     (cols, rows)
 }
 
+/// Vertical distance (px) the cursor must travel OUT of the tab-bar strip
+/// (while the button is held) before a tab drag enters the "tearing" state.
+pub const TEAR_THRESHOLD_PX: f32 = 24.0;
+
+/// True when a held tab drag at `cursor_y` has moved more than `threshold` px
+/// vertically OUT of the tab-bar strip (`bar_y .. bar_y + bar_h`) — the
+/// "tearing" state. Returning INTO the strip (or its threshold margin) before
+/// release cancels tearing, so a plain click still just selects the tab.
+pub fn tearing(cursor_y: f32, bar_y: f32, bar_h: f32, threshold: f32) -> bool {
+    cursor_y < bar_y - threshold || cursor_y > bar_y + bar_h + threshold
+}
+
+/// True when the GLOBAL cursor `(gx, gy)` lands inside the MAIN window's
+/// tab-bar strip: the band `tabbar_h` tall at the top of the main window, or —
+/// when `tab_bar_bottom` — just above the status strip at the bottom (the same
+/// band `App::tabbar_y` computes). `main_x/main_y` is the main window's outer
+/// position; `main_w/main_h` its physical surface size.
+pub fn main_tabbar_contains(
+    gx: f64,
+    gy: f64,
+    main_x: i32,
+    main_y: i32,
+    main_w: u32,
+    main_h: u32,
+    tabbar_h: f32,
+    status_h: f32,
+    tab_bar_bottom: bool,
+) -> bool {
+    let lx = gx - main_x as f64;
+    let ly = gy - main_y as f64;
+    if lx < 0.0 || lx > main_w as f64 {
+        return false;
+    }
+    let bar_y = if tab_bar_bottom {
+        (main_h as f32 - tabbar_h - status_h).max(0.0) as f64
+    } else {
+        0.0
+    };
+    ly >= bar_y && ly < bar_y + tabbar_h as f64
+}
+
+/// Clamp a window top-left `(x, y)` so a `win_w`×`win_h` window stays inside
+/// the monitor rect `(mon_x, mon_y, mon_w, mon_h)`. If the window is larger
+/// than the monitor it pins to the monitor origin.
+pub fn clamp_pos(
+    x: i32,
+    y: i32,
+    win_w: u32,
+    win_h: u32,
+    (mon_x, mon_y, mon_w, mon_h): (i32, i32, u32, u32),
+) -> (i32, i32) {
+    let max_x = mon_x + mon_w as i32 - win_w as i32;
+    let max_y = mon_y + mon_h as i32 - win_h as i32;
+    (x.min(max_x).max(mon_x), y.min(max_y).max(mon_y))
+}
+
 /// Items of the MAIN window's tab context menu (right-click on a tab).
 /// "Detach" is present only while detaching is allowed (≥ 2 tabs).
 pub fn tab_menu_items(can_detach: bool) -> Vec<&'static str> {
@@ -291,6 +347,61 @@ mod tests {
     #[test]
     fn detached_grid_dims_zero_cell_falls_back_to_default() {
         assert_eq!(grid_dims(800.0, 600.0, 0.0, 0.0, 14.0, 36.0, 22.0), (80, 24));
+    }
+
+    // ── tear-out threshold ───────────────────────────────────────────────────
+
+    #[test]
+    fn tearing_requires_leaving_the_strip_by_more_than_threshold() {
+        // Top-mode bar at y 0..36, threshold 24.
+        assert!(!tearing(18.0, 0.0, 36.0, 24.0), "inside the strip");
+        assert!(!tearing(50.0, 0.0, 36.0, 24.0), "below strip but within threshold (36+24=60)");
+        assert!(tearing(61.0, 0.0, 36.0, 24.0), "beyond the threshold below");
+        // Above the strip: bar at y 0 means cursor_y can't go below -24 in
+        // practice, but the math still holds for a bottom-mode bar.
+        assert!(!tearing(580.0, 578.0, 36.0, 24.0), "inside a bottom-mode strip");
+        assert!(tearing(553.0, 578.0, 36.0, 24.0), "torn upward out of a bottom strip");
+        assert!(!tearing(560.0, 578.0, 36.0, 24.0), "above bottom strip but within threshold");
+    }
+
+    #[test]
+    fn tearing_cancelled_when_returning_to_the_strip() {
+        // A drag that tore out (y=100) then returned to the strip (y=20)
+        // reads as not-tearing again — the release is a plain tab click.
+        assert!(tearing(100.0, 0.0, 36.0, 24.0));
+        assert!(!tearing(20.0, 0.0, 36.0, 24.0));
+    }
+
+    // ── drop-to-reattach target rect ────────────────────────────────────────
+
+    #[test]
+    fn main_tabbar_hit_top_mode() {
+        // Main window at (100, 50), 1000×640, bar at top (y 50..86 global).
+        assert!(main_tabbar_contains(500.0, 60.0, 100, 50, 1000, 640, 36.0, 22.0, false));
+        assert!(!main_tabbar_contains(500.0, 90.0, 100, 50, 1000, 640, 36.0, 22.0, false), "below the band");
+        assert!(!main_tabbar_contains(50.0, 60.0, 100, 50, 1000, 640, 36.0, 22.0, false), "left of the window");
+        assert!(!main_tabbar_contains(1150.0, 60.0, 100, 50, 1000, 640, 36.0, 22.0, false), "right of the window");
+    }
+
+    #[test]
+    fn main_tabbar_hit_bottom_mode_respects_status_strip() {
+        // Bottom mode: band sits at h - 36 - 22 = 582..618 local → 632..668 global.
+        assert!(main_tabbar_contains(500.0, 640.0, 100, 50, 1000, 640, 36.0, 22.0, true));
+        assert!(!main_tabbar_contains(500.0, 60.0, 100, 50, 1000, 640, 36.0, 22.0, true), "top band is not a target in bottom mode");
+        assert!(!main_tabbar_contains(500.0, 680.0, 100, 50, 1000, 640, 36.0, 22.0, true), "the status strip below the band is not a target");
+    }
+
+    // ── on-screen clamp for the drop-placed window ──────────────────────────
+
+    #[test]
+    fn clamp_pos_keeps_window_on_the_monitor() {
+        let mon = (0, 0, 1920, 1080);
+        assert_eq!(clamp_pos(100, 100, 800, 600, mon), (100, 100), "already inside");
+        assert_eq!(clamp_pos(1900, 1000, 800, 600, mon), (1120, 480), "clamped to bottom-right");
+        assert_eq!(clamp_pos(-50, -50, 800, 600, mon), (0, 0), "clamped to origin");
+        // Secondary monitor with a nonzero origin.
+        let mon2 = (1920, 0, 1920, 1080);
+        assert_eq!(clamp_pos(1000, 10, 800, 600, mon2), (1920, 10), "pinned to the monitor's left edge");
     }
 
     // ── context-menu item lists ─────────────────────────────────────────────
