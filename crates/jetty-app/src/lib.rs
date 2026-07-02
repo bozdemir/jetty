@@ -84,6 +84,28 @@ fn libc_econnrefused() -> i32 {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))] { 0 }
 }
 
+/// Try to acquire the primary-instance lock: an `flock`-style exclusive lock
+/// (std `File::try_lock`) on `lock_path`, created if missing. Returns the
+/// locked `File` — hold it for the process lifetime — or `None` when another
+/// process currently holds the lock (or the file can't be created).
+///
+/// Why a kernel lock and not an O_EXCL sentinel: the kernel releases the lock
+/// automatically when the holder exits — INCLUDING crashes/SIGKILL — so there
+/// is no stale-lock state to detect or clean up (the on-disk file may linger,
+/// but an unlocked file is trivially re-lockable).
+fn try_acquire_primary_lock(lock_path: &str) -> Option<std::fs::File> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .ok()?;
+    match f.try_lock() {
+        Ok(()) => Some(f),
+        Err(_) => None,
+    }
+}
+
 pub fn run() {
     // CLI: --version/--help print and exit; --toggle/--show/--hide select the
     // summon command forwarded to a running instance. The compositor-bound
@@ -124,8 +146,49 @@ pub fn run() {
 
     // Secondary invocation: forward the command to the running primary and exit.
     // No banner, no GUI setup — a compositor-bound keypress stays instant.
-    // TOCTOU-safe: only unlink the socket on ECONNREFUSED (provably stale), never
-    // when a live primary owns it (which would race two concurrent cold starts).
+    match forward_command(&sock_path, cmd) {
+        ConnectResult::Forwarded => return,
+        ConnectResult::Stale | ConnectResult::NoSocket | ConnectResult::Other => {}
+    }
+    // No live instance: `--hide` has nothing to hide; toggle/show launch.
+    if cmd == "hide" {
+        return;
+    }
+
+    // Become the primary. The stale-socket unlink+bind below is serialized by
+    // an exclusive kernel lock (`<sock>.lock`): the plain connect→unlink→bind
+    // dance is only TOCTOU-safe against a LIVE primary — two concurrent COLD
+    // starts racing over the same stale socket could both see ECONNREFUSED and
+    // then unlink each other's freshly bound socket, yielding two primaries.
+    // With the lock, exactly one process runs remove_file+bind; the loser
+    // keeps retrying forward_command (the winner's socket appears within ms)
+    // and exits once it gets through. The winning lock `File` is intentionally
+    // leaked below (held for the process lifetime); the kernel releases it on
+    // ANY exit, crash included, so no stale-lock handling is ever needed.
+    let lock_path = format!("{sock_path}.lock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let lock_file: Option<std::fs::File> = loop {
+        if let Some(f) = try_acquire_primary_lock(&lock_path) {
+            break Some(f);
+        }
+        // Another instance is mid-startup: give it a beat, then try forwarding.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        if matches!(forward_command(&sock_path, cmd), ConnectResult::Forwarded) {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            // Could not lock and nobody answers: degrade to today's behavior
+            // (attempt the bind; a failure just disables single-instance IPC).
+            eprintln!(
+                "jetty: could not acquire the single-instance lock at {lock_path}; \
+                 proceeding without it"
+            );
+            break None;
+        }
+    };
+
+    // UNDER the lock, re-check for a live primary (one may have bound while we
+    // waited) and only now unlink a provably stale socket (ECONNREFUSED).
     match forward_command(&sock_path, cmd) {
         ConnectResult::Forwarded => return,
         ConnectResult::Stale => {
@@ -133,16 +196,9 @@ pub fn run() {
         }
         ConnectResult::NoSocket | ConnectResult::Other => {}
     }
-    // No live instance: `--hide` has nothing to hide; toggle/show launch.
-    if cmd == "hide" {
-        return;
-    }
 
     eprintln!("jetty {version} ({build})");
 
-    // No live instance found — become the primary. Bind directly (stale file
-    // was already removed above when detected; NoSocket/Other means no file or
-    // we conservatively skip the removal and let bind fail gracefully).
     let listener: Option<std::os::unix::net::UnixListener> =
         match std::os::unix::net::UnixListener::bind(&sock_path) {
             Ok(l) => {
@@ -154,6 +210,9 @@ pub fn run() {
                 None
             }
         };
+    // Hold the primary lock for the process lifetime (released by the kernel
+    // on exit). Leaking the File keeps the descriptor — and the lock — alive.
+    std::mem::forget(lock_file);
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -190,4 +249,56 @@ pub fn run() {
     // Best-effort cleanup on normal exit. Crashes are handled by the
     // remove-stale-on-bind logic at the start of the next launch.
     let _ = std::fs::remove_file(&sock_path);
+}
+
+#[cfg(test)]
+mod primary_lock_tests {
+    use super::try_acquire_primary_lock;
+
+    fn tmp_lock_path(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("jetty-lock-test-{tag}-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn lock_is_exclusive_while_held() {
+        let path = tmp_lock_path("excl");
+        let first = try_acquire_primary_lock(&path);
+        assert!(first.is_some(), "first acquire must succeed");
+        // flock-style locks are per open-file-description, so a second open —
+        // even in the same process — must be refused while the first is held.
+        // This is exactly the two-concurrent-cold-starts race: only one may
+        // enter the unlink+bind section.
+        assert!(
+            try_acquire_primary_lock(&path).is_none(),
+            "second acquire must fail while the lock is held"
+        );
+        drop(first);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lock_is_reacquirable_after_release() {
+        let path = tmp_lock_path("realock");
+        let first = try_acquire_primary_lock(&path);
+        assert!(first.is_some());
+        drop(first); // holder exits → kernel releases the lock (no stale state)
+        assert!(
+            try_acquire_primary_lock(&path).is_some(),
+            "lock must be free again once the holder is gone"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lock_survives_a_leftover_file() {
+        // A lingering lock FILE from a previous run is not a stale lock: the
+        // kernel lock died with its holder, so acquiring must succeed.
+        let path = tmp_lock_path("leftover");
+        std::fs::write(&path, b"").unwrap();
+        assert!(try_acquire_primary_lock(&path).is_some());
+        let _ = std::fs::remove_file(&path);
+    }
 }
