@@ -628,6 +628,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // Rounded-corner radius (JETTY_CORNER_RADIUS) — parsed here because BOTH the
+    // CRT pass below (which owns the corners while active, like the live app)
+    // and the CPU mask after readback consume it.
+    let corner_radius = std::env::var("JETTY_CORNER_RADIUS")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .map(|v| v.clamp(0.0, 24.0))
+        .unwrap_or(0.0);
+
     // --- CRT post-process (JETTY_SHOT_CRT) ---
     // Run the REAL CRT GPU pass (curvature/scanlines/shadow-mask/bloom/chromatic/
     // vignette) onto a SECOND texture, sampling the rendered scene — mirroring the
@@ -662,7 +671,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chromatic: getf("JETTY_SHOT_CRT_CHROMATIC", 0.22),
             vignette: getf("JETTY_SHOT_CRT_VIGNETTE", 0.45),
             tint: [1.0, 1.0, 1.0, 0.0],
-            corner_radius: getf("JETTY_SHOT_CRT_RADIUS", 0.0),
+            // The CRT pass OWNS the rounded corners while active (the live app
+            // skips the corner mask then and feeds the radius to this uniform):
+            // default to JETTY_CORNER_RADIUS so the interplay matches the app;
+            // JETTY_SHOT_CRT_RADIUS still overrides for isolated experiments.
+            corner_radius: getf("JETTY_SHOT_CRT_RADIUS", corner_radius),
             time: 0.0,
             flags: 0,
             _pad0: 0.0,
@@ -735,15 +748,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the shot shows transparent (rounded) corners over the checkerboard while the
     // center stays intact. The texture is premultiplied alpha, so multiply r/g/b/a
     // by the coverage to keep premultiplication consistent.
-    let corner_radius = std::env::var("JETTY_CORNER_RADIUS")
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .map(|v| v.clamp(0.0, 24.0))
-        .unwrap_or(0.0);
+    //
+    // SKIPPED when the CRT pass ran: CRT owns the rounded corners then (its
+    // uniform carried the radius above) — the exact mask/CRT interplay of the
+    // live app, for both the main and the detached window.
     // JETTY_SHOT_DROPDOWN — verify Dropdown mode's BOTTOM-only rounding: the two
     // top corners are square (top-flush), only the bottom corners round.
     let dropdown = std::env::var("JETTY_SHOT_DROPDOWN").is_ok();
-    if corner_radius > 0.0 {
+    if corner_radius > 0.0 && crt_tex.is_none() {
         let (r_tl, r_tr) = if dropdown { (0.0, 0.0) } else { (corner_radius, corner_radius) };
         eprintln!(
             "jetty-shot: applying rounded-corner mask (radius={corner_radius}px, dropdown={dropdown})"

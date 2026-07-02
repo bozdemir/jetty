@@ -116,6 +116,14 @@ pub fn tab_menu_items(can_detach: bool) -> Vec<&'static str> {
 /// Items of a DETACHED window's context menu (right-click anywhere).
 pub const DETACHED_MENU_ITEMS: [&str; 3] = ["Reattach", "Copy", "Paste"];
 
+/// Per-corner radii (tl, tr, bl, br) for a detached window's corner mask.
+/// A detached window is a free-floating window — it is never docked top-flush
+/// like the main window's Dropdown mode — so ALL FOUR corners round with the
+/// same configured radius (the main window's top-square nuance never applies).
+pub fn corner_radii(radius_px: f32) -> (f32, f32, f32, f32) {
+    (radius_px, radius_px, radius_px, radius_px)
+}
+
 /// Right-aligned keyboard-shortcut hint for a menu label (same symbols as
 /// `menu::MENU_HINTS`; blank when the action has no binding).
 pub fn menu_hint(label: &str) -> &'static str {
@@ -165,10 +173,23 @@ pub(crate) struct DetachedWindow {
     pub chrome_text: TextLayer,
     pub quad: QuadLayer,
     /// Surface-sized offscreen render target (same descriptor as
-    /// `App::make_offscreen`). Reserved for future CRT and Tier-B summon effects
-    /// in detached windows (built now for parity; not yet read by the renderer).
-    #[allow(dead_code)]
+    /// `App::make_offscreen`). When CRT is enabled the whole detached scene is
+    /// rendered into it and the CRT post-pass samples it onto the surface —
+    /// the same routing as the main window. Lazily re-allocated on size change
+    /// by `App::render_detached_window` (mirrors the main stale check).
     pub offscreen: (wgpu::Texture, wgpu::TextureView),
+    /// Per-window rounded-corner mask pass (same radius as the main window's;
+    /// all four corners round — see `corner_radii`). Per-window instance because
+    /// `CornerMask` caches its uniform/bind group; sharing across surfaces of
+    /// different sizes would thrash it.
+    pub corner_mask: jetty_render::CornerMask,
+    /// Per-window CRT post-pass. Per-window instance because `Crt` caches its
+    /// bind group keyed by the sampled src view — sharing the main window's
+    /// instance would thrash the cache between windows.
+    pub crt: jetty_render::Crt,
+    /// Caret flash burst clock for keystrokes typed in THIS window (mirrors
+    /// `App::caret_anim` for the main window). `None` = no burst live.
+    pub caret_anim: Option<std::time::Instant>,
     /// The single terminal session owned by this detached window.
     pub tab: Tab,
     /// Last known cursor position inside THIS window (physical px).
@@ -273,6 +294,12 @@ impl DetachedWindow {
             (tex, view)
         };
 
+        // Rounded-corner mask + CRT post-pass — same unconditional construction
+        // as the main window's in `App::resumed` (app.rs ~3523/~3537), but as
+        // PER-WINDOW instances (both cache uniforms/bind groups; see field docs).
+        let corner_mask = jetty_render::CornerMask::new(&gpu.device, gpu.format);
+        let crt = jetty_render::Crt::new(&gpu.device, gpu.format);
+
         // Focus the new window so it receives keyboard events immediately.
         window.focus_window();
         window.request_redraw();
@@ -284,6 +311,9 @@ impl DetachedWindow {
             chrome_text,
             quad,
             offscreen,
+            corner_mask,
+            crt,
+            caret_anim: None,
             tab,
             cursor: (0.0, 0.0),
             bar_drag: None,
@@ -402,6 +432,32 @@ mod tests {
         // Secondary monitor with a nonzero origin.
         let mon2 = (1920, 0, 1920, 1080);
         assert_eq!(clamp_pos(1000, 10, 800, 600, mon2), (1920, 10), "pinned to the monitor's left edge");
+    }
+
+    // ── corner-mask radii ────────────────────────────────────────────────────
+
+    #[test]
+    fn detached_rounds_all_four_corners() {
+        // A detached window is free-floating: unlike Dropdown (top-flush) mode,
+        // ALL FOUR corners get the same configured radius.
+        assert_eq!(corner_radii(12.0), (12.0, 12.0, 12.0, 12.0));
+        assert_eq!(corner_radii(0.0), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn detached_corner_mask_carves_every_corner() {
+        // Feed the detached radii through the SAME coverage math the GPU mask
+        // uses: with radius 12 every corner pixel of a 100×100 frame goes
+        // transparent while the center stays opaque.
+        let (tl, tr, bl, br) = corner_radii(12.0);
+        for &(x, y) in &[(0.0, 0.0), (99.0, 0.0), (0.0, 99.0), (99.0, 99.0)] {
+            let cov =
+                jetty_render::rounded_rect_coverage_per(x, y, 100.0, 100.0, tl, tr, bl, br);
+            assert!(cov < 0.01, "corner ({x},{y}) should round, got {cov}");
+        }
+        let center =
+            jetty_render::rounded_rect_coverage_per(50.0, 50.0, 100.0, 100.0, tl, tr, bl, br);
+        assert!((center - 1.0).abs() < 1e-4, "center should stay opaque, got {center}");
     }
 
     // ── context-menu item lists ─────────────────────────────────────────────

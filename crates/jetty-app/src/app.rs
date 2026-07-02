@@ -968,11 +968,17 @@ impl App {
     }
 
     /// Build the current theme from `theme_idx`, apply `opacity` to its bg
-    /// alpha, and push it into EVERY tab's terminal.
+    /// alpha, and push it into EVERY tab's terminal — including the tabs living
+    /// in detached windows, so a live theme/opacity change repaints them too
+    /// (visual parity: one redraw request each, no polling).
     fn apply_theme(&mut self) {
         let t = self.current_theme();
         for tab in &mut self.tabs {
             tab.terminal.set_theme(t.clone());
+        }
+        for dw in &mut self.detached {
+            dw.tab.terminal.set_theme(t.clone());
+            dw.window.request_redraw();
         }
     }
 
@@ -2397,6 +2403,14 @@ impl App {
                         }
                         let _ = dw.tab.writer.write_all(&bytes);
                         let _ = dw.tab.writer.flush();
+                        // Caret flash on printable keystrokes — same trigger as
+                        // the main window (app.rs ~5010), on THIS window's own
+                        // burst clock. Glow is main-window-only (its CaretFx
+                        // pass isn't replicated per-window), so gate on the
+                        // flash toggle alone.
+                        if self.fx.caret_flash_enabled && is_printable_keystroke(&bytes) {
+                            dw.caret_anim = Some(std::time::Instant::now());
+                        }
                         dw.window.request_redraw();
                     }
                     // Every other action (new/close/nav tab, font, opacity,
@@ -2688,8 +2702,11 @@ impl App {
     /// (perf HUD) when `show_perf_hud`, and the Reattach/Copy/Paste context menu
     /// when open. Mirrors the main window's terminal draw passes from the
     /// `RedrawRequested` arm of `window_event` using the detached window's OWN
-    /// `gpu`/`text`/`chrome_text`/`quad` — the remaining main-window passes
-    /// (overlays, summon/CRT effects) are intentionally omitted.
+    /// `gpu`/`text`/`chrome_text`/`quad`, and applies the SAME final effects:
+    /// the rounded-corner mask (all four corners — a detached window is never
+    /// top-flush), the transparent theme-bg clear, the caret flash, and the CRT
+    /// post-pass (which owns the rounded corners while active, exactly like the
+    /// main window). Summon/Tier-B reveals stay main-window-only.
     fn render_detached_window(&mut self, pos: usize) {
         let Some(dw) = self.detached.get_mut(pos) else { return };
 
@@ -2719,16 +2736,51 @@ impl App {
         // Same global HUD string the main status bar shows (built on the main
         // window's frames). Reading the cache never wakes anything.
         let perf_label = self.perf_label.clone();
+        // Effects inputs, captured before the mutable dw borrow below — the
+        // SAME settings the main window renders with (visual parity).
+        let corner_radius = self.corner_radius;
+        let fx = self.fx.clone();
+        let crt_time = self.crt_clock.elapsed().as_secs_f32();
+        let crt_anim_live = fx.crt_anim_live();
 
         let Some(dw) = self.detached.get_mut(pos) else { return };
+        // Caret flash progress on THIS window's burst clock: t∈[0,1], expired at
+        // 1.0 — mirrors the main window's caret_t handling (app.rs ~5214).
+        let caret_t = dw.caret_anim.map(|s| {
+            (s.elapsed().as_secs_f32() / (fx.caret_flash_ms / 1000.0)).min(1.0)
+        });
+        if caret_t == Some(1.0) {
+            dw.caret_anim = None;
+        }
+        let caret_t_for_flash = if fx.caret_flash_enabled { caret_t } else { None };
+        // Corner radius in physical px (HiDPI-correct, same scaling as main).
+        let scale = dw.window.scale_factor() as f32;
+        let corner_radius_px = corner_radius * scale;
+        // CRT routing: when enabled, the whole scene renders into this window's
+        // offscreen texture and the CRT pass samples it onto the surface — the
+        // exact main-window flow (no Tier-B summons here, so no bypass case).
+        // Re-allocate the offscreen lazily when stale (same check as main).
+        let crt_active = fx.crt_enabled;
+        if crt_active
+            && (dw.offscreen.0.width() != dw.gpu.config.width
+                || dw.offscreen.0.height() != dw.gpu.config.height)
+        {
+            dw.offscreen = Self::make_offscreen(&dw.gpu);
+        }
         let gpu = &mut dw.gpu;
         let text = &mut dw.text;
         let chrome_text = &mut dw.chrome_text;
         let quad = &mut dw.quad;
+        let corner_mask = &dw.corner_mask;
+        let crt = &dw.crt;
+        let offscreen = &dw.offscreen;
 
         let Some((frame, view)) = gpu.acquire_frame() else { return };
         let width = gpu.config.width;
         let height = gpu.config.height;
+        // Scene target: the offscreen when CRT is on, else the surface directly
+        // (byte-identical to the pre-CRT hot path).
+        let scene_view: &wgpu::TextureView = if crt_active { &offscreen.1 } else { &view };
 
         // The grid sits below the top bar (and above the status strip).
         let grid_top = TABBAR_H;
@@ -2744,34 +2796,37 @@ impl App {
         quad.render_clear(
             &gpu.device,
             &gpu.queue,
-            &view,
+            scene_view,
             width,
             height,
             &bg_rects,
+            // Same premultiplied theme-bg-at-opacity clear as the main window,
+            // so a transparent theme is see-through here too.
             jetty_render::default_bg_clear(&snap, gpu.premultiply_clear),
         );
         // Pass 2: glyphs on top of the painted background, offset by the bar.
+        // Caret flash rides this window's own burst clock (parity with main).
         let _ = text.render_to(
-            &gpu.device, &gpu.queue, &view, width, height, &snap, false, grid_top, None,
-            [0.0, 0.0, 0.0],
+            &gpu.device, &gpu.queue, scene_view, width, height, &snap, false, grid_top,
+            caret_t_for_flash, fx.caret_flash_color,
         );
         // Pass 3: the top bar (title pill + close ✕) over the grid.
         let bar = jetty_render::build_detached_bar(width, &title, &theme, close_hover, chrome_char_w);
-        quad.render(&gpu.device, &gpu.queue, &view, width, height, &bar.quads);
+        quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &bar.quads);
         if !bar.labels.is_empty() {
             let _ = chrome_text.render_overlays(
-                &gpu.device, &gpu.queue, &view, width, height, &bar.labels,
+                &gpu.device, &gpu.queue, scene_view, width, height, &bar.labels,
             );
         }
         if !bar.title_labels.is_empty() {
             // Title in the platform's proportional sans, like main tab titles.
             let _ = chrome_text.render_overlays_sans(
-                &gpu.device, &gpu.queue, &view, width, height, &bar.title_labels,
+                &gpu.device, &gpu.queue, scene_view, width, height, &bar.title_labels,
             );
         }
         // Pass 4: scrollbar, spanning the grid area between the bars.
         if let Some(r) = jetty_render::scrollbar_rect(&snap, width, height, grid_top, status_h, scrollbar_thumb) {
-            quad.render(&gpu.device, &gpu.queue, &view, width, height, &[r]);
+            quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &[r]);
         }
         // Pass 5: bottom STATUS strip (perf HUD) when enabled — the same slim
         // theme-derived strip as the main window; it may show the same global
@@ -2792,14 +2847,14 @@ impl App {
                 x: 0.0, y: sy, w: width as f32, h: status_h,
                 color: nl(0.05), ..Default::default()
             };
-            quad.render(&gpu.device, &gpu.queue, &view, width, height, &[strip]);
+            quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &[strip]);
             if let Some(perf) = perf_label.as_deref() {
                 let perf_w = perf.chars().count() as f32 * chrome_char_w;
                 let px = (width as f32 - perf_w - 12.0).max(8.0);
                 let dim = nl(0.5);
                 let py = sy + (status_h - 16.0) / 2.0;
                 let _ = chrome_text.render_overlays(
-                    &gpu.device, &gpu.queue, &view, width, height,
+                    &gpu.device, &gpu.queue, scene_view, width, height,
                     &[(perf.to_string(), px, py, [dim[0], dim[1], dim[2]])],
                 );
             }
@@ -2813,14 +2868,66 @@ impl App {
             let menu = jetty_render::build_menu(
                 mx, my, width, height, menu_hover, &theme, chrome_char_w, &items, &[],
             );
-            quad.render(&gpu.device, &gpu.queue, &view, width, height, &menu.quads);
+            quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &menu.quads);
             if !menu.labels.is_empty() {
                 let _ = chrome_text.render_overlays(
-                    &gpu.device, &gpu.queue, &view, width, height, &menu.labels,
+                    &gpu.device, &gpu.queue, scene_view, width, height, &menu.labels,
                 );
             }
         }
+        // Final pass: round the window corners — the SAME mask pass the main
+        // window runs, at the SAME configured radius. A detached window is a
+        // free-floating window, so ALL FOUR corners round (the main window's
+        // Dropdown top-square nuance never applies here). Skipped while CRT is
+        // active: the CRT pass owns the rounded corners then (exactly like the
+        // main window's mask/CRT interplay).
+        if !crt_active {
+            let (r_tl, r_tr, r_bl, r_br) = crate::detached::corner_radii(corner_radius_px);
+            corner_mask.apply(
+                &gpu.device, &gpu.queue, scene_view, width, height, r_tl, r_tr, r_bl, r_br,
+            );
+        }
+        // CRT post-pass: sample the offscreen scene onto the surface with the
+        // same parameters (and free-running clock) as the main window. The CRT
+        // uniform carries the corner radius, so corners stay rounded under CRT.
+        if crt_active {
+            crt.apply(
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                &offscreen.1,
+                width,
+                height,
+                &jetty_render::CrtUniform {
+                    resolution: [width as f32, height as f32],
+                    curvature: fx.crt_curvature,
+                    scanline: fx.crt_scanline,
+                    mask: fx.crt_mask,
+                    bloom: fx.crt_bloom,
+                    chromatic: fx.crt_chromatic,
+                    vignette: fx.crt_vignette,
+                    tint: [
+                        fx.crt_scanline_tint[0],
+                        fx.crt_scanline_tint[1],
+                        fx.crt_scanline_tint[2],
+                        0.0,
+                    ],
+                    corner_radius: corner_radius_px,
+                    time: crt_time,
+                    flags: (if fx.crt_animate_roll { jetty_render::CRT_FLAG_ROLL } else { 0 })
+                        | (if fx.crt_flicker { jetty_render::CRT_FLAG_FLICKER } else { 0 })
+                        | (if fx.crt_jitter { jetty_render::CRT_FLAG_JITTER } else { 0 }),
+                    _pad0: 0.0,
+                },
+            );
+        }
         frame.present();
+        // Self-drive the next frame ONLY while the caret flash is mid-burst or
+        // an animated CRT sub-effect is on — the same damage-driven gates as the
+        // main window (app.rs ~5654). Idle returns to 0-CPU once both clear.
+        if dw.caret_anim.is_some() || crt_anim_live {
+            dw.window.request_redraw();
+        }
     }
 
     /// Apply a panel `MouseAction` decoded in the settings window. Updates shared
@@ -3078,6 +3185,12 @@ impl App {
         if let Some(w) = &self.settings_window {
             w.request_redraw();
         }
+        // Detached windows share the same theme/opacity/radius/CRT settings —
+        // repaint them too so every surface reflects the change immediately
+        // (one damage-driven request each; no polling).
+        for dw in &self.detached {
+            dw.window.request_redraw();
+        }
     }
 
     /// Handle a `WindowEvent` that belongs to the settings window. Hit-testing
@@ -3168,6 +3281,11 @@ impl App {
                     }
                     if let Some(w) = &self.settings_window {
                         w.request_redraw();
+                    }
+                    // Radius/opacity/CRT sliders apply to detached windows too —
+                    // repaint them live during the drag (damage-driven, no polling).
+                    for dw in &self.detached {
+                        dw.window.request_redraw();
                     }
                 }
             }
@@ -3373,6 +3491,17 @@ impl ApplicationHandler<AppEvent> for App {
                 w.request_redraw();
             }
         }
+        // Detached windows animate under the SAME gates: an animated CRT
+        // sub-effect (shared setting) or a live caret-flash burst in one of
+        // them. False whenever no detached window exists or nothing animates,
+        // so this term can never force Poll at idle (0-CPU preserved).
+        let detached_pending = (!self.detached.is_empty() && self.fx.crt_anim_live())
+            || self.detached.iter().any(|d| d.caret_anim.is_some());
+        if detached_pending {
+            for dw in &self.detached {
+                dw.window.request_redraw();
+            }
+        }
         let settings_pending = self.settings_window.is_some()
             && self
                 .settings_paint_until
@@ -3411,7 +3540,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
 
-        let control_flow = if main_pending || settings_pending {
+        let control_flow = if main_pending || settings_pending || detached_pending {
             winit::event_loop::ControlFlow::Poll
         } else if let Some(d) = wake_at {
             // Wake exactly once at the soonest pending deadline instead of polling.
