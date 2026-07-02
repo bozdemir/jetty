@@ -1194,6 +1194,15 @@ impl App {
         if self.renaming.is_none() {
             self.rename_buf.clear();
         }
+        // The tab menu / a held tab drag hold raw indices; the layout just
+        // changed under them, so drop both — same invariant as `close_tab` /
+        // `close_exited_tabs` (a stale index would rename/close/tear the
+        // WRONG tab after Ctrl+Shift+D with the menu open).
+        self.tab_menu = None;
+        self.tab_menu_hover = None;
+        self.tab_menu_rects.clear();
+        self.tab_menu_labels.clear();
+        self.tab_drag = None;
 
         // Apply the current theme to the detached tab before it leaves.
         tab.terminal.set_theme(self.current_theme());
@@ -1316,6 +1325,24 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    /// Dismiss the terminal Copy/Paste context menu AND the tab context menu,
+    /// clearing their cached hit rects and hover state. The item rects are
+    /// ABSOLUTE positions cached once at open (the menu clamps against the
+    /// window size then); a window resize re-clamps the DRAWN menu against the
+    /// new size while hover/click would keep hit-testing the stale cache —
+    /// clicking the visible row would do nothing and clicking where the menu
+    /// used to be would fire an invisible action. Closing on resize is the
+    /// standard (and cheapest correct) behavior.
+    fn dismiss_menus(&mut self) {
+        self.context_menu = None;
+        self.menu_hover = None;
+        self.menu_item_rects.clear();
+        self.tab_menu = None;
+        self.tab_menu_hover = None;
+        self.tab_menu_rects.clear();
+        self.tab_menu_labels.clear();
     }
 
     /// Adjust an `Option<usize>` index after the tab at `removed` is removed:
@@ -2484,6 +2511,11 @@ impl App {
                 dw.gpu.resize(size.width, size.height);
                 dw.text.resize(&dw.gpu);
                 dw.chrome_text.resize(&dw.gpu);
+                // Same stale-cache rule as the main window: the context menu's
+                // hit rects were clamped against the old size — close it.
+                dw.menu_open = None;
+                dw.menu_hover = None;
+                dw.menu_rects.clear();
                 // Chrome heights: the top bar plus (when the perf HUD is on)
                 // the bottom status strip — same convention as `detach_tab`'s
                 // initial sizing and the main window's `reflow`.
@@ -3964,6 +3996,12 @@ impl ApplicationHandler<AppEvent> for App {
                 if let (Some(gpu), Some(text)) = (&self.gpu, &mut self.text) {
                     text.resize(gpu);
                 }
+                // A resize invalidates the menus' cached absolute hit rects
+                // (built at open against the OLD window size) — close them so
+                // hover/click never hit-test stale geometry. Resizes reachable
+                // while a menu is open need no in-window click (tiling
+                // shortcuts, un-maximize).
+                self.dismiss_menus();
                 // Invalidate the Tier-B offscreen scene texture (now the wrong
                 // size). It is rebuilt LAZILY at the correct size on the next
                 // Tier-B summon frame — previously it was eagerly re-created on
