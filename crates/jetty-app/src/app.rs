@@ -153,6 +153,16 @@ impl WindowMode {
 /// per-frame reposition). A const, not persisted.
 const DROPDOWN_SLIDE_SECS: f32 = 0.15;
 
+/// Grace period (ms) between the main window losing focus and the Yakuake-style
+/// auto-hide actually firing. X11 can deliver the main window's Focused(false)
+/// BEFORE the Focused(true) of the JeTTY window the user clicked (an already-
+/// open detached or Settings window) — the switching_to_* flags only pre-arm
+/// window CREATION, so refocusing an existing sibling would wrongly hide the
+/// terminal. Deferring the hide lets any of OUR windows' Focused(true) cancel
+/// it; 100ms is far above real X11 FocusOut→FocusIn gaps yet imperceptible
+/// when focus genuinely leaves JeTTY.
+const AUTOHIDE_GRACE_MS: u64 = 100;
+
 /// Default logical (device-independent) font size in points. This is the value
 /// used when the user resets the font size with Ctrl+0 and on first launch.
 /// Scaled by the display's scale_factor before being passed to TextLayer so
@@ -347,6 +357,13 @@ pub struct App {
     /// Focused(false) to suppress auto-hide so detaching a tab does not hide the
     /// main window — mirrors `switching_to_settings` for the Settings window.
     switching_to_detached: bool,
+    /// When `Some`, a focus-loss auto-hide of the main window is SCHEDULED for
+    /// this instant (`AUTOHIDE_GRACE_MS` after the Focused(false)). Cancelled by
+    /// any JeTTY window (main/settings/detached) gaining focus in the interim —
+    /// this closes the X11 race where the main FocusOut is delivered before the
+    /// FocusIn of the sibling JeTTY window the user actually clicked. Fired by
+    /// `about_to_wait`; also cleared by any explicit visibility change.
+    pending_autohide_at: Option<std::time::Instant>,
     /// Whether the user is dragging the Dropdown-height slider in Settings.
     dragging_dropdown: bool,
     /// Whether the user is dragging the Dropdown-width slider in Settings.
@@ -765,6 +782,7 @@ impl App {
             last_focused_window: None,
             switching_to_settings: false,
             switching_to_detached: false,
+            pending_autohide_at: None,
             dragging_dropdown: false,
             dragging_dropdown_width: false,
             wayland_warned: false,
@@ -1122,16 +1140,24 @@ impl App {
         }
     }
 
-    /// Close tab `i` (its PtySession Drop kills the child). Fix up `active`. If no
-    /// tabs remain, exit the event loop.
+    /// Close tab `i` (its PtySession Drop kills the child). Fix up `active`. If
+    /// no tabs remain ANYWHERE (main window or detached), exit the event loop;
+    /// when detached windows still hold live shells, the first detached tab is
+    /// pulled back into the main window instead — exiting would drop every
+    /// `DetachedWindow` and silently SIGKILL their shells mid-job.
     fn close_tab(&mut self, i: usize, event_loop: &ActiveEventLoop) {
         if i >= self.tabs.len() {
             return;
         }
         self.tabs.remove(i);
         if self.tabs.is_empty() {
-            event_loop.exit();
-            return;
+            if self.detached.is_empty() {
+                event_loop.exit();
+                return;
+            }
+            // Adopt the first detached tab (its window closes; the shell
+            // survives) and continue with the normal fix-ups below.
+            self.reattach_tab(0);
         }
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
@@ -1798,7 +1824,9 @@ impl App {
     }
 
     /// Close every tab index in `exited` (descending so earlier indices stay
-    /// valid), fixing up `active`. If no tabs remain, exit the event loop.
+    /// valid), fixing up `active`. If no tabs remain anywhere, exit the event
+    /// loop; if detached windows still exist, the first detached tab is
+    /// reattached instead so their shells survive.
     /// Returns true if the app should keep running.
     fn close_exited_tabs(&mut self, mut exited: Vec<usize>, event_loop: &ActiveEventLoop) -> bool {
         if exited.is_empty() {
@@ -1821,8 +1849,14 @@ impl App {
             Self::adjust_index_after_remove(&mut self.confirm_close, i);
         }
         if self.tabs.is_empty() {
-            event_loop.exit();
-            return false;
+            // Exit only when NO tabs exist anywhere: while detached windows
+            // hold live shells, adopt the first detached tab into the main
+            // window instead (its window closes; the shell keeps running).
+            if self.detached.is_empty() {
+                event_loop.exit();
+                return false;
+            }
+            self.reattach_tab(0);
         }
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
@@ -1994,6 +2028,32 @@ impl App {
         }
     }
 
+    /// Perform the Yakuake-style focus-loss auto-hide of the main window.
+    /// Called from `about_to_wait` when the `pending_autohide_at` grace period
+    /// elapsed without any JeTTY window regaining focus (see the field docs).
+    fn autohide_main_window(&mut self) {
+        if !self.visible {
+            return;
+        }
+        if let Some(win) = &self.window {
+            if self.window_mode == WindowMode::Center {
+                self.last_pos = win.outer_position().ok();
+            }
+            self.slide_anim = None;
+            // Also stop a mid-flight summon animation: its only expiry point is
+            // inside the acquire_frame success path, which a hidden surface may
+            // never reach — a stuck summon_anim would pin the loop in Poll.
+            self.summon_anim = None;
+            self.summon_pending = false;
+            win.set_visible(false);
+        }
+        self.visible = false;
+        // The matching button-release never arrives once hidden — clear the
+        // terminal drag state so it doesn't resume stuck on the next summon.
+        self.selecting = false;
+        self.dragging_scrollbar = false;
+    }
+
     /// Toggle window visibility (F9 / Yakuake-style summon).
     ///
     /// When summoning (making visible), the window is re-centred on its
@@ -2016,6 +2076,8 @@ impl App {
             return;
         }
         self.visible = want;
+        // An explicit visibility change supersedes any scheduled auto-hide.
+        self.pending_autohide_at = None;
         let mode = self.window_mode;
         if let Some(win) = &self.window {
             if self.visible {
@@ -2064,6 +2126,13 @@ impl App {
                     self.last_pos = win.outer_position().ok();
                 }
                 self.slide_anim = None;
+                // Expire a mid-flight summon animation as well: its only other
+                // expiry point is inside the acquire_frame success path, which a
+                // hidden surface may never reach (Occluded/Timeout) — a stuck
+                // summon_anim would pin about_to_wait in Poll (busy loop) for as
+                // long as the window stays hidden.
+                self.summon_anim = None;
+                self.summon_pending = false;
                 win.set_visible(false);
             }
         }
@@ -2506,7 +2575,6 @@ impl App {
                 }
             }
             WindowEvent::Resized(size) => {
-                let status_h = self.status_h();
                 let Some(dw) = self.detached.get_mut(pos) else { return };
                 dw.gpu.resize(size.width, size.height);
                 dw.text.resize(&dw.gpu);
@@ -2516,21 +2584,15 @@ impl App {
                 dw.menu_open = None;
                 dw.menu_hover = None;
                 dw.menu_rects.clear();
-                // Chrome heights: the top bar plus (when the perf HUD is on)
-                // the bottom status strip — same convention as `detach_tab`'s
-                // initial sizing and the main window's `reflow`.
-                let (cw, ch) = dw.text.cell_size();
-                let (cols, rows) = crate::detached::grid_dims(
-                    size.width as f32,
-                    size.height as f32,
-                    cw,
-                    ch,
-                    SCROLLBAR_GUTTER,
-                    TABBAR_H,
-                    status_h,
-                );
-                dw.tab.terminal.resize(cols, rows);
-                dw.tab.pty.resize(cols as u16, rows as u16);
+                // DEBOUNCE the grid+PTY reflow (mirrors the main window's
+                // Resized arm): a borderless-edge drag fires many Resized
+                // events, and reflowing + a SIGWINCH on each bombards p10k with
+                // redraws and scatters its prompt. The surface already resized
+                // above so the window tracks the drag live; ONE reflow fires
+                // ~250ms after the drag settles (run by `about_to_wait`, which
+                // computes the grid from the settled surface + cell size).
+                dw.reflow_pending_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
                 dw.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => {
@@ -2764,6 +2826,10 @@ impl App {
                 // Settings window suppresses auto-hide.
                 self.last_focused_window = Some(self.detached[pos].window.id());
                 self.switching_to_detached = true;
+                // Cancel any scheduled main-window auto-hide: focus moved to one
+                // of OUR windows (this arm can arrive AFTER the main FocusOut on
+                // X11 — the exact race the deferred hide exists for).
+                self.pending_autohide_at = None;
             }
             WindowEvent::Focused(false) if pos < self.detached.len() => {
                 // The detached window lost focus. Clear the switch flag so a later
@@ -3512,6 +3578,9 @@ impl App {
                 if let Some(w) = &self.settings_window {
                     self.last_focused_window = Some(w.id());
                     self.switching_to_settings = true;
+                    // Cancel any scheduled main-window auto-hide (focus moved to
+                    // one of OUR windows; the main FocusOut may have come first).
+                    self.pending_autohide_at = None;
                     // macOS first-paint nudge: a request_redraw issued while the
                     // window was still being shown can be dropped, leaving it blank
                     // until the user clicks. Re-request now that it is shown+focused.
@@ -3560,6 +3629,40 @@ impl ApplicationHandler<AppEvent> for App {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
+        }
+        // Same debounced reflow for the detached windows (their Resized arm
+        // only resizes the surface and arms `reflow_pending_at`, exactly like
+        // the main window's — one SIGWINCH per drag, no p10k prompt scatter).
+        {
+            let status_h = self.status_h();
+            let now = std::time::Instant::now();
+            for dw in &mut self.detached {
+                if dw.reflow_pending_at.is_some_and(|d| now >= d) {
+                    dw.reflow_pending_at = None;
+                    let (cw, ch) = dw.text.cell_size();
+                    let (cols, rows) = crate::detached::grid_dims(
+                        dw.gpu.config.width as f32,
+                        dw.gpu.config.height as f32,
+                        cw,
+                        ch,
+                        SCROLLBAR_GUTTER,
+                        TABBAR_H,
+                        status_h,
+                    );
+                    dw.tab.terminal.resize(cols, rows);
+                    dw.tab.pty.resize(cols as u16, rows as u16);
+                    dw.window.request_redraw();
+                }
+            }
+        }
+        // Deferred focus-loss auto-hide: the grace period elapsed without any
+        // JeTTY window regaining focus (which would have cancelled it) — hide.
+        if self
+            .pending_autohide_at
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            self.pending_autohide_at = None;
+            self.autohide_main_window();
         }
         // A pending (debounced) reflow does NOT keep the loop in Poll. The old
         // code folded `reflow_pending_at.is_some()` into `main_pending`, so for up
@@ -3615,6 +3718,25 @@ impl ApplicationHandler<AppEvent> for App {
         // the future or None.)
         let now = std::time::Instant::now();
         let mut wake_at = self.reflow_pending_at;
+        // Merge the earliest future deadline into wake_at (single-wake, no poll).
+        let merge_wake = |wake_at: &mut Option<std::time::Instant>,
+                          d: std::time::Instant| {
+            *wake_at = Some(match *wake_at {
+                Some(w) if w <= d => w,
+                _ => d,
+            });
+        };
+        // Detached-window debounced reflows (any already-elapsed deadline was
+        // run above, so these are strictly in the future).
+        for dw in &self.detached {
+            if let Some(d) = dw.reflow_pending_at {
+                merge_wake(&mut wake_at, d);
+            }
+        }
+        // The scheduled focus-loss auto-hide (elapsed ones ran above).
+        if let Some(d) = self.pending_autohide_at {
+            merge_wake(&mut wake_at, d);
+        }
         // Idle-HUD one-shot: flip the HUD from its last live value to an honest
         // "idle" reading once the app settles, then go fully idle.
         let perf_idle_pending = self.show_perf_hud
@@ -3955,7 +4077,18 @@ impl ApplicationHandler<AppEvent> for App {
                 // harmlessly by `PtySession::Drop`.
                 for i in exited_detached.into_iter().rev() {
                     if i < self.detached.len() {
-                        self.detached.remove(i);
+                        let dw = self.detached.remove(i);
+                        // The dying window usually holds focus (the user typed
+                        // `exit` in it); once the entry is gone its Focused(false)
+                        // can no longer be routed here, so clear the focus
+                        // bookkeeping NOW (mirrors reattach_tab) — otherwise
+                        // switching_to_detached stays latched true and the main
+                        // window's focus auto-hide is silently disabled until the
+                        // next detach/reattach cycle.
+                        if self.last_focused_window == Some(dw.window.id()) {
+                            self.last_focused_window = None;
+                            self.switching_to_detached = false;
+                        }
                     }
                 }
             }
@@ -4054,6 +4187,14 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::Focused(true) => {
                 // The main terminal window gained focus.
                 self.last_focused_window = Some(id);
+                // A scheduled auto-hide is void: focus is back on us.
+                self.pending_autohide_at = None;
+                // Any pending "switching to a sibling window" latch is over too.
+                // Without this, a detach whose new window the WM never focused
+                // (focus-stealing prevention) would leave switching_to_detached
+                // stuck true and silently disable auto-hide.
+                self.switching_to_detached = false;
+                self.switching_to_settings = false;
                 // macOS first-paint nudge (see the settings window above): ensure a
                 // frame is drawn once the window is actually shown + focused.
                 if let Some(w) = &self.window {
@@ -4100,20 +4241,17 @@ impl ApplicationHandler<AppEvent> for App {
                     && !to_settings
                     && !to_detached
                 {
-                    if let Some(win) = &self.window {
-                        if self.window_mode == WindowMode::Center {
-                            self.last_pos = win.outer_position().ok();
-                        }
-                        self.slide_anim = None;
-                        win.set_visible(false);
-                    }
-                    self.visible = false;
-                    // If auto-hide fired mid-drag, the matching button-release
-                    // never arrives — clear the terminal drag state so it doesn't
-                    // resume stuck (a no-button selection/scrollbar drag) on the
-                    // next summon.
-                    self.selecting = false;
-                    self.dragging_scrollbar = false;
+                    // SCHEDULE the hide instead of hiding now: X11 can deliver
+                    // this FocusOut BEFORE the FocusIn of an already-open JeTTY
+                    // sibling window (detached/Settings) the user clicked — the
+                    // switching_to_* flags only pre-arm window CREATION. Any of
+                    // our windows gaining focus within the grace period cancels
+                    // it; a genuine focus departure hides AUTOHIDE_GRACE_MS
+                    // later (imperceptible). Fired by `about_to_wait`.
+                    self.pending_autohide_at = Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_millis(AUTOHIDE_GRACE_MS),
+                    );
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {

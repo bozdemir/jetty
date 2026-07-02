@@ -190,6 +190,11 @@ pub(crate) struct DetachedWindow {
     /// Caret flash burst clock for keystrokes typed in THIS window (mirrors
     /// `App::caret_anim` for the main window). `None` = no burst live.
     pub caret_anim: Option<std::time::Instant>,
+    /// When `Some`, a grid+PTY reflow is scheduled for this instant (mirrors
+    /// `App::reflow_pending_at`): a border drag fires many Resized events, and
+    /// reflow+SIGWINCH per event scatters p10k's prompt — the surface resizes
+    /// live, ONE reflow fires ~250ms after the drag settles (`about_to_wait`).
+    pub reflow_pending_at: Option<std::time::Instant>,
     /// The single terminal session owned by this detached window.
     pub tab: Tab,
     /// Last known cursor position inside THIS window (physical px).
@@ -318,6 +323,7 @@ impl DetachedWindow {
             corner_mask,
             crt,
             caret_anim: None,
+            reflow_pending_at: None,
             tab,
             cursor: (0.0, 0.0),
             bar_drag: None,
