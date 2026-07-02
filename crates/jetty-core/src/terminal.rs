@@ -404,6 +404,15 @@ impl Terminal {
         self.term.mode().contains(TermMode::APP_CURSOR)
     }
 
+    /// Whether the terminal is on the alternate screen (`\e[?1049h` etc.) —
+    /// i.e. a full-screen app (less/vim/htop) owns the display. Alt-screen apps
+    /// have no scrollback, so PageUp/PageDown should be forwarded to the PTY
+    /// (`\e[5~`/`\e[6~`) instead of paging the (empty) host scrollback.
+    pub fn alt_screen(&self) -> bool {
+        use alacritty_terminal::term::TermMode;
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
     /// Resize the terminal grid to the given `cols` × `rows`, preserving
     /// existing content and scrollback via alacritty's `Term::resize`.
     ///
@@ -655,6 +664,18 @@ mod tests {
 
         assert_eq!(inverted.fg, normal.bg, "reverse video: fg should be old bg");
         assert_eq!(inverted.bg, normal.fg, "reverse video: bg should be old fg");
+    }
+
+    #[test]
+    fn alt_screen_toggles() {
+        let mut t = Terminal::new(20, 5);
+        assert!(!t.alt_screen(), "primary screen by default");
+        // \e[?1049h: enter the alternate screen (what less/vim/htop use).
+        t.feed(b"\x1b[?1049h");
+        assert!(t.alt_screen(), "alt screen after \\e[?1049h");
+        // \e[?1049l: back to the primary screen.
+        t.feed(b"\x1b[?1049l");
+        assert!(!t.alt_screen(), "primary screen after \\e[?1049l");
     }
 
     #[test]

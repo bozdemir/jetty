@@ -2330,17 +2330,24 @@ impl App {
             WindowEvent::CloseRequested if pos < self.detached.len() => {
                 self.reattach_tab(pos);
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } if event.state.is_pressed() => {
+                // Ignore X11's synthetic focus-gain key presses (keys physically
+                // held while this window takes focus) — same guard as the main
+                // window's KeyboardInput arm.
+                if is_synthetic {
+                    return;
+                }
                 let Some(dw) = self.detached.get_mut(pos) else { return };
                 // Same modifier/decode pipeline as the main window's
-                // `KeyboardInput` arm (app.rs ~4043-4076), except `app_cursor`
-                // is sourced from THIS window's own terminal, not the main one,
-                // and `panel_open` is always false — detached windows have no
-                // settings panel.
+                // `KeyboardInput` arm (app.rs ~4043-4076), except `app_cursor`/
+                // `alt_screen` are sourced from THIS window's own terminal, not
+                // the main one, and `panel_open` is always false — detached
+                // windows have no settings panel.
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
                 let app_cursor = dw.tab.terminal.app_cursor_keys();
+                let alt_screen = dw.tab.terminal.alt_screen();
                 // macOS Option-compose: see the matching comment on the main
                 // window's arm — Alt + a composed non-ASCII glyph is sent as
                 // text instead of being ESC-prefixed by decide_key.
@@ -2355,7 +2362,11 @@ impl App {
                 } else {
                     None
                 };
-                let action = match composed {
+                // Dead-key composition fallback — mirrors the main window's arm.
+                let dead_key = input::dead_key_text_override(
+                    ctrl, alt, &event.logical_key, event.text.as_deref(),
+                );
+                let action = match composed.or(dead_key) {
                     Some(bytes) => input::KeyAction::Send(bytes),
                     None => input::decide_key(
                         ctrl,
@@ -2365,6 +2376,7 @@ impl App {
                         &event.logical_key,
                         false,
                         app_cursor,
+                        alt_screen,
                     ),
                 };
                 match action {
@@ -2372,6 +2384,17 @@ impl App {
                     input::KeyAction::DetachTab => {
                         self.reattach_tab(pos);
                         return;
+                    }
+                    // Scrollback paging on THIS window's own terminal (plain
+                    // PageUp/Down on the primary screen, Shift+PageUp/Down
+                    // always; the alt screen arrives here as Send instead).
+                    input::KeyAction::ScrollPageUp => {
+                        dw.tab.terminal.scroll_page(true);
+                        dw.window.request_redraw();
+                    }
+                    input::KeyAction::ScrollPageDown => {
+                        dw.tab.terminal.scroll_page(false);
+                        dw.window.request_redraw();
                     }
                     input::KeyAction::Copy => {
                         // Same copy-then-clear flow as the main window.
@@ -2417,6 +2440,20 @@ impl App {
                     // panel, scroll, ...) is a main-window-only feature for
                     // this MVP — ignored in a detached window.
                     _ => {}
+                }
+            }
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                // IME commit → typed text to THIS window's PTY (no bracketed
+                // paste). Mirrors the main window's Ime::Commit arm.
+                if !text.is_empty() {
+                    let caret_flash_enabled = self.fx.caret_flash_enabled;
+                    let Some(dw) = self.detached.get_mut(pos) else { return };
+                    let _ = dw.tab.writer.write_all(text.as_bytes());
+                    let _ = dw.tab.writer.flush();
+                    if caret_flash_enabled && is_printable_keystroke(text.as_bytes()) {
+                        dw.caret_anim = Some(std::time::Instant::now());
+                    }
+                    dw.window.request_redraw();
                 }
             }
             WindowEvent::Resized(size) => {
@@ -3400,7 +3437,12 @@ impl App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } if event.state.is_pressed() => {
+                // Ignore X11's synthetic focus-gain presses: an Escape held while
+                // the settings window takes focus must not instantly close it.
+                if is_synthetic {
+                    return;
+                }
                 // Escape closes the settings window.
                 if matches!(event.logical_key, winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape)) {
                     self.close_settings_window();
@@ -3572,6 +3614,12 @@ impl ApplicationHandler<AppEvent> for App {
         });
 
         let window = jetty_platform::build_window(event_loop, "JeTTY", (1000, 640));
+        // Allow IME on the terminal window (winit disables it by default):
+        // without this, CJK/complex input methods can never commit text and
+        // dead-key composition is degraded. Commits arrive as
+        // `WindowEvent::Ime(Ime::Commit)` and are sent to the PTY as typed
+        // text; preedit rendering is intentionally not implemented.
+        window.set_ime_allowed(true);
         // First open: place the window per the configured mode. Center mode
         // centers; Dropdown mode docks as a top strip and slides in.
         match self.window_mode {
@@ -4832,7 +4880,14 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } if event.state.is_pressed() => {
+                // X11 synthesizes PRESSED events for every key physically held
+                // the moment a window gains focus (e.g. the F9 summon key, or
+                // Tab during an Alt+Tab switch). Those keys were never typed at
+                // this window — ignore them so no garbage reaches the PTY.
+                if is_synthetic {
+                    return;
+                }
                 // --- Quit confirmation popup captures Enter / Esc (highest priority) ---
                 if self.confirm_quit {
                     use winit::keyboard::{Key, NamedKey};
@@ -4955,6 +5010,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
                 let app_cursor = self.active_tab().terminal.app_cursor_keys();
+                let alt_screen = self.active_tab().terminal.alt_screen();
                 // Escape in the main window never closes the settings window
                 // (that window handles its own Escape), so panel_open is always
                 // false here — Escape forwards an ESC byte to the PTY as normal.
@@ -4981,9 +5037,17 @@ impl ApplicationHandler<AppEvent> for App {
                 } else {
                     None
                 };
-                let action = match composed {
+                // Dead-key composition fallback: when a compose sequence puts
+                // the composed glyph in `event.text` (e.g. ' then e → "é") while
+                // logical_key still reports the base char, prefer the text —
+                // otherwise the accent is silently dropped. Never fires for
+                // Ctrl/Alt chords or Named keys (see dead_key_text_override).
+                let dead_key = input::dead_key_text_override(
+                    ctrl, alt, &event.logical_key, event.text.as_deref(),
+                );
+                let action = match composed.or(dead_key) {
                     Some(bytes) => input::KeyAction::Send(bytes),
-                    None => input::decide_key(ctrl, shift, alt, event.physical_key.clone(), &event.logical_key, false, app_cursor),
+                    None => input::decide_key(ctrl, shift, alt, event.physical_key.clone(), &event.logical_key, false, app_cursor, alt_screen),
                 };
                 if self.debug {
                     let action_name = match &action {
@@ -5146,6 +5210,32 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                     }
                     input::KeyAction::None => {}
+                }
+            }
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                // IME commit (CJK input methods, dead-key composition routed
+                // through the IME): send the composed text to the PTY as TYPED
+                // text — no bracketed-paste wrapping. Preedit is not rendered
+                // (Commit-only IME support); Enabled/Preedit/Disabled are
+                // intentionally ignored below.
+                if !text.is_empty() && !self.tabs.is_empty() {
+                    if self.welcome_open {
+                        self.welcome_open = false;
+                    }
+                    // Same discipline as the Send arm: jump to the live bottom
+                    // so the user sees their input.
+                    self.active_tab_mut().terminal.scroll_to_bottom();
+                    let w = &mut self.tabs[self.active].writer;
+                    let _ = w.write_all(text.as_bytes());
+                    let _ = w.flush();
+                    if (self.fx.caret_flash_enabled || self.fx.caret_glow_enabled)
+                        && is_printable_keystroke(text.as_bytes())
+                    {
+                        self.caret_anim = Some(std::time::Instant::now());
+                    }
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {

@@ -26,6 +26,7 @@ fn ctrl_comma_physical_toggles_panel_closed() {
         &Key::Character(",".into()),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::TogglePanel);
 }
@@ -41,6 +42,7 @@ fn ctrl_comma_physical_toggles_panel_open() {
         &Key::Character(",".into()),
         true,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::TogglePanel);
 }
@@ -54,6 +56,7 @@ fn ctrl_comma_logical_fallback_toggles_panel() {
         false,
         PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Unidentified),
         &Key::Character(",".into()),
+        false,
         false,
         false,
     );
@@ -72,6 +75,7 @@ fn ctrl_shift_o_toggles_panel() {
         &Key::Character("O".into()),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::TogglePanel);
 }
@@ -79,22 +83,22 @@ fn ctrl_shift_o_toggles_panel() {
 #[test]
 fn ctrl_c_sends_sigint() {
     // Ctrl+C must send 0x03 (SIGINT), not the literal letter "c".
-    let a = decide_key(true, false, false, phys(KeyCode::KeyC), &Key::Character("c".into()), false, false);
+    let a = decide_key(true, false, false, phys(KeyCode::KeyC), &Key::Character("c".into()), false, false, false);
     assert_eq!(a, KeyAction::Send(vec![3]));
 }
 
 #[test]
 fn ctrl_letters_send_control_bytes() {
     assert_eq!(
-        decide_key(true, false, false, phys(KeyCode::KeyD), &Key::Character("d".into()), false, false),
+        decide_key(true, false, false, phys(KeyCode::KeyD), &Key::Character("d".into()), false, false, false),
         KeyAction::Send(vec![4]) // Ctrl+D = EOF
     );
     assert_eq!(
-        decide_key(true, false, false, phys(KeyCode::KeyZ), &Key::Character("z".into()), false, false),
+        decide_key(true, false, false, phys(KeyCode::KeyZ), &Key::Character("z".into()), false, false, false),
         KeyAction::Send(vec![26]) // Ctrl+Z = suspend
     );
     assert_eq!(
-        decide_key(true, false, false, phys(KeyCode::KeyL), &Key::Character("l".into()), false, false),
+        decide_key(true, false, false, phys(KeyCode::KeyL), &Key::Character("l".into()), false, false, false),
         KeyAction::Send(vec![12]) // Ctrl+L = clear
     );
 }
@@ -109,6 +113,7 @@ fn escape_closes_open_panel() {
         &Key::Named(NamedKey::Escape),
         true,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::ClosePanel);
 }
@@ -121,6 +126,7 @@ fn escape_sends_esc_byte_when_panel_closed() {
         false,
         phys(KeyCode::Escape),
         &Key::Named(NamedKey::Escape),
+        false,
         false,
         false,
     );
@@ -138,6 +144,7 @@ fn ctrl_shift_t_opens_new_tab() {
         &Key::Character("T".into()),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::NewTab);
 }
@@ -150,6 +157,7 @@ fn ctrl_shift_equal_increases_opacity() {
         false,
         phys(KeyCode::Equal),
         &Key::Character("+".into()),
+        false,
         false,
         false,
     );
@@ -166,6 +174,7 @@ fn ctrl_shift_minus_decreases_opacity() {
         &Key::Character("_".into()),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::OpacityDown);
 }
@@ -178,6 +187,7 @@ fn page_up_scrolls_up() {
         false,
         phys(KeyCode::PageUp),
         &Key::Named(NamedKey::PageUp),
+        false,
         false,
         false,
     );
@@ -194,6 +204,7 @@ fn page_down_scrolls_down() {
         &Key::Named(NamedKey::PageDown),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::ScrollPageDown);
 }
@@ -206,6 +217,7 @@ fn plain_s_sends_byte() {
         false,
         phys(KeyCode::KeyS),
         &Key::Character("s".into()),
+        false,
         false,
         false,
     );
@@ -222,6 +234,7 @@ fn enter_sends_cr() {
         &Key::Named(NamedKey::Enter),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::Send(b"\r".to_vec()));
 }
@@ -236,6 +249,7 @@ fn unknown_key_returns_none() {
         false,
         phys(KeyCode::F13),
         &Key::Named(NamedKey::F13),
+        false,
         false,
         false,
     );
@@ -257,6 +271,7 @@ fn alt_b_sends_esc_prefixed_b() {
         &Key::Character("b".into()),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::Send(vec![0x1b, b'b']));
 }
@@ -270,6 +285,7 @@ fn alt_enter_sends_esc_prefixed_cr() {
         true,
         phys(KeyCode::Enter),
         &Key::Named(NamedKey::Enter),
+        false,
         false,
         false,
     );
@@ -291,6 +307,7 @@ fn ctrl_space_sends_nul() {
         &Key::Named(NamedKey::Space),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::Send(vec![0x00]));
 }
@@ -304,6 +321,7 @@ fn ctrl_bracket_left_sends_esc() {
         false,
         phys(KeyCode::BracketLeft),
         &Key::Character("[".into()),
+        false,
         false,
         false,
     );
@@ -321,6 +339,7 @@ fn ctrl_backslash_sends_fs() {
         &Key::Character("\\".into()),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::Send(vec![0x1c]));
 }
@@ -334,6 +353,7 @@ fn ctrl_bracket_right_sends_gs() {
         false,
         phys(KeyCode::BracketRight),
         &Key::Character("]".into()),
+        false,
         false,
         false,
     );
@@ -356,6 +376,7 @@ fn ctrl_alt_b_sends_esc_prefixed_control_byte() {
         &Key::Character("b".into()),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::Send(vec![0x1b, 0x02]));
 }
@@ -376,6 +397,7 @@ fn ctrl_shift_c_sends_sigint() {
         &Key::Character("C".into()),
         false,
         false,
+        false,
     );
     assert_eq!(action, KeyAction::Copy);
 }
@@ -389,6 +411,7 @@ fn ctrl_shift_v_pastes() {
         false,
         phys(KeyCode::KeyV),
         &Key::Character("V".into()),
+        false,
         false,
         false,
     );
@@ -405,6 +428,7 @@ fn ctrl_shift_o_still_toggles_panel() {
         false,
         phys(KeyCode::KeyO),
         &Key::Character("O".into()),
+        false,
         false,
         false,
     );
@@ -426,6 +450,7 @@ fn arrow_up_normal_mode_sends_csi() {
         &Key::Named(NamedKey::ArrowUp),
         false,
         false, // app_cursor off
+        false,
     );
     assert_eq!(action, KeyAction::Send(b"\x1b[A".to_vec()));
 }
@@ -441,6 +466,7 @@ fn arrow_up_app_cursor_mode_sends_ss3() {
         &Key::Named(NamedKey::ArrowUp),
         false,
         true, // app_cursor on
+        false,
     );
     assert_eq!(action, KeyAction::Send(b"\x1bOA".to_vec()));
 }
@@ -463,6 +489,7 @@ fn arrow_keys_app_cursor_mode_all_directions() {
             &Key::Named(named),
             false,
             true,
+            false,
         );
         assert_eq!(action, KeyAction::Send(expected.to_vec()));
     }
@@ -695,7 +722,7 @@ fn nav_editing_keys_send_xterm_sequences() {
         (NamedKey::Insert, b"\x1b[2~"),
     ];
     for (k, want) in cases {
-        let a = decide_key(false, false, false, phys(KeyCode::Home), &named(k.clone()), false, false);
+        let a = decide_key(false, false, false, phys(KeyCode::Home), &named(k.clone()), false, false, false);
         assert_eq!(a, send(want), "key {:?}", k);
     }
 }
@@ -709,7 +736,7 @@ fn function_keys_send_xterm_sequences() {
         (NamedKey::F12, b"\x1b[24~"),
     ];
     for (k, want) in cases {
-        let a = decide_key(false, false, false, phys(KeyCode::F1), &named(k.clone()), false, false);
+        let a = decide_key(false, false, false, phys(KeyCode::F1), &named(k.clone()), false, false, false);
         assert_eq!(a, send(want), "key {:?}", k);
     }
 }
@@ -717,31 +744,31 @@ fn function_keys_send_xterm_sequences() {
 #[test]
 fn modified_arrows_use_csi_1_mod_form() {
     // Ctrl+Left = mod 5, Shift+Right = mod 2, Alt+Up = mod 3, Ctrl+Shift+Down = mod 6.
-    let ctrl_left = decide_key(true, false, false, phys(KeyCode::ArrowLeft), &named(NamedKey::ArrowLeft), false, false);
+    let ctrl_left = decide_key(true, false, false, phys(KeyCode::ArrowLeft), &named(NamedKey::ArrowLeft), false, false, false);
     assert_eq!(ctrl_left, send(b"\x1b[1;5D"));
-    let shift_right = decide_key(false, true, false, phys(KeyCode::ArrowRight), &named(NamedKey::ArrowRight), false, false);
+    let shift_right = decide_key(false, true, false, phys(KeyCode::ArrowRight), &named(NamedKey::ArrowRight), false, false, false);
     assert_eq!(shift_right, send(b"\x1b[1;2C"));
-    let alt_up = decide_key(false, false, true, phys(KeyCode::ArrowUp), &named(NamedKey::ArrowUp), false, false);
+    let alt_up = decide_key(false, false, true, phys(KeyCode::ArrowUp), &named(NamedKey::ArrowUp), false, false, false);
     assert_eq!(alt_up, send(b"\x1b[1;3A"));
-    let ctrl_shift_down = decide_key(true, true, false, phys(KeyCode::ArrowDown), &named(NamedKey::ArrowDown), false, false);
+    let ctrl_shift_down = decide_key(true, true, false, phys(KeyCode::ArrowDown), &named(NamedKey::ArrowDown), false, false, false);
     assert_eq!(ctrl_shift_down, send(b"\x1b[1;6B"));
 }
 
 #[test]
 fn plain_arrows_unchanged_in_both_decckm_modes() {
     // No modifier → DECCKM-aware bare arrows (regression guard for the modified branch).
-    let normal = decide_key(false, false, false, phys(KeyCode::ArrowLeft), &named(NamedKey::ArrowLeft), false, false);
+    let normal = decide_key(false, false, false, phys(KeyCode::ArrowLeft), &named(NamedKey::ArrowLeft), false, false, false);
     assert_eq!(normal, send(b"\x1b[D"));
-    let app = decide_key(false, false, false, phys(KeyCode::ArrowLeft), &named(NamedKey::ArrowLeft), false, true);
+    let app = decide_key(false, false, false, phys(KeyCode::ArrowLeft), &named(NamedKey::ArrowLeft), false, true, false);
     assert_eq!(app, send(b"\x1bOD"));
 }
 
 #[test]
 fn shift_tab_sends_back_tab() {
-    let a = decide_key(false, true, false, phys(KeyCode::Tab), &named(NamedKey::Tab), false, false);
+    let a = decide_key(false, true, false, phys(KeyCode::Tab), &named(NamedKey::Tab), false, false, false);
     assert_eq!(a, send(b"\x1b[Z"));
     // Plain Tab still sends a literal TAB.
-    let plain = decide_key(false, false, false, phys(KeyCode::Tab), &named(NamedKey::Tab), false, false);
+    let plain = decide_key(false, false, false, phys(KeyCode::Tab), &named(NamedKey::Tab), false, false, false);
     assert_eq!(plain, send(b"\t"));
 }
 

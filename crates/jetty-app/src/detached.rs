@@ -245,6 +245,10 @@ impl DetachedWindow {
             &tab.title,
             (w_logical, h_logical),
         );
+        // Allow IME so CJK/dead-key commits reach this window's PTY too
+        // (mirrors the main terminal window; commits are handled in
+        // `handle_detached_event`'s `Ime::Commit` arm).
+        window.set_ime_allowed(true);
         let size = window.inner_size();
         // HiDPI: same scale-factor handling as the main window in `resumed`.
         let scale = window.scale_factor() as f32;

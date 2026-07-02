@@ -48,6 +48,11 @@ pub enum KeyAction {
 /// * `app_cursor` – whether DECCKM application cursor keys are enabled
 ///   (`\e[?1h`); when true, arrow keys are encoded with the SS3 (`\eO`) prefix
 ///   instead of CSI (`\e[`).
+/// * `alt_screen` – whether the terminal is on the alternate screen (a
+///   full-screen app like less/vim/htop owns the display). Plain PageUp/PageDown
+///   are forwarded to the PTY there (`\e[5~`/`\e[6~`) — the alt screen has no
+///   scrollback to page. Shift+PageUp/Down is ALWAYS host scrollback (the
+///   standard escape hatch).
 ///
 /// The rules mirror `app.rs` exactly:
 /// 1. Ctrl+, (no shift)         → TogglePanel
@@ -56,13 +61,14 @@ pub enum KeyAction {
 /// 4. Ctrl+Shift+T              → CycleTheme
 /// 5. Ctrl+Shift+Equal          → OpacityUp
 /// 6. Ctrl+Shift+Minus          → OpacityDown
-/// 7. PageUp                    → ScrollPageUp
-/// 8. PageDown                  → ScrollPageDown
+/// 7. PageUp                    → ScrollPageUp (primary screen) / `\e[5~` (alt screen)
+/// 8. PageDown                  → ScrollPageDown (primary screen) / `\e[6~` (alt screen)
 /// 9. Ctrl+<letter/symbol> → control byte, regardless of shift (the explicit
 ///    Ctrl+Shift shortcuts in rules 3-6 are intercepted first). When Alt is also
 ///    held, the control byte is ESC-prefixed (Ctrl+Alt+b → ESC + 0x02).
 /// 10. Alt+<key> that yields bytes → ESC-prefixed Send(esc + bytes)
 /// 11. Otherwise: key_to_bytes  → Send(bytes) or None
+#[allow(clippy::too_many_arguments)]
 pub fn decide_key(
     ctrl: bool,
     shift: bool,
@@ -71,6 +77,7 @@ pub fn decide_key(
     logical: &Key,
     panel_open: bool,
     app_cursor: bool,
+    alt_screen: bool,
 ) -> KeyAction {
     // Rule 1: Ctrl+, → toggle panel.
     // Match the PHYSICAL key; keep a logical fallback for platforms where
@@ -134,11 +141,26 @@ pub fn decide_key(
         }
     }
 
-    // Rules 6-7: PageUp / PageDown.
-    match logical {
-        Key::Named(NamedKey::PageUp) => return KeyAction::ScrollPageUp,
-        Key::Named(NamedKey::PageDown) => return KeyAction::ScrollPageDown,
-        _ => {}
+    // Rules 6-7: PageUp / PageDown — alt-screen aware.
+    // * Shift+PageUp/Down → ALWAYS host scrollback (the standard escape hatch).
+    // * Plain PageUp/Down on the ALT screen → forward `\e[5~`/`\e[6~` to the PTY
+    //   so pagers/editors (less/man/vim/htop) actually page; the alt screen has
+    //   no scrollback, so the old unconditional ScrollPage* was a dead key there.
+    // * Plain PageUp/Down on the PRIMARY screen → host scrollback, as before.
+    if let Key::Named(page @ (NamedKey::PageUp | NamedKey::PageDown)) = logical {
+        let up = *page == NamedKey::PageUp;
+        if !shift && alt_screen {
+            return KeyAction::Send(if up {
+                b"\x1b[5~".to_vec()
+            } else {
+                b"\x1b[6~".to_vec()
+            });
+        }
+        return if up {
+            KeyAction::ScrollPageUp
+        } else {
+            KeyAction::ScrollPageDown
+        };
     }
 
     // Font-size bindings: Ctrl (no shift) + Equal/Minus/Digit0.
@@ -167,6 +189,22 @@ pub fn decide_key(
     //
     // When Alt/Meta is also held, the control byte is ESC-prefixed (the classic
     // "Meta sends Escape" convention), e.g. Ctrl+Alt+b → ESC + 0x02.
+    //
+    // Ctrl+/ and Ctrl+_ → 0x1f (US: unit separator — readline/emacs undo).
+    // Keyed on the LOGICAL character, not the physical position: physical Slash
+    // produces "-" on e.g. German layouts (which must keep falling through to
+    // the literal "-"), and "_" reaches here only on layouts where it is not
+    // Ctrl+Shift+Minus (that chord is intercepted above as OpacityDown).
+    if ctrl {
+        if let Key::Character(s) = logical {
+            if matches!(s.as_str(), "/" | "_") {
+                if alt {
+                    return KeyAction::Send(vec![0x1b, 0x1f]);
+                }
+                return KeyAction::Send(vec![0x1f]);
+            }
+        }
+    }
     if ctrl {
         if let PhysicalKey::Code(code) = physical {
             if let Some(b) = ctrl_byte(code) {
@@ -196,6 +234,28 @@ pub fn decide_key(
         if let Some(fin) = arrow_final {
             let m = 1 + (shift as u8) + ((alt as u8) << 1) + ((ctrl as u8) << 2);
             return KeyAction::Send(format!("\x1b[1;{}{}", m, fin as char).into_bytes());
+        }
+        // Modified Home/End/Delete/Insert: the xterm modified forms. Home/End
+        // use the CSI-1 letter form (`\e[1;<mod>H` / `\e[1;<mod>F`); Insert and
+        // Delete keep their tilde form with the modifier param (`\e[2;<mod>~` /
+        // `\e[3;<mod>~`). Without these, Shift+Home (select-to-line-start) and
+        // Ctrl+Delete (delete-word-forward) collapsed to the plain sequences and
+        // apps could not see the modifiers at all.
+        let m = 1 + (shift as u8) + ((alt as u8) << 1) + ((ctrl as u8) << 2);
+        match logical {
+            Key::Named(NamedKey::Home) => {
+                return KeyAction::Send(format!("\x1b[1;{m}H").into_bytes());
+            }
+            Key::Named(NamedKey::End) => {
+                return KeyAction::Send(format!("\x1b[1;{m}F").into_bytes());
+            }
+            Key::Named(NamedKey::Insert) => {
+                return KeyAction::Send(format!("\x1b[2;{m}~").into_bytes());
+            }
+            Key::Named(NamedKey::Delete) => {
+                return KeyAction::Send(format!("\x1b[3;{m}~").into_bytes());
+            }
+            _ => {}
         }
         if shift && !ctrl && !alt && matches!(logical, Key::Named(NamedKey::Tab)) {
             return KeyAction::Send(b"\x1b[Z".to_vec());
@@ -709,6 +769,38 @@ pub fn key_to_bytes(key: &Key) -> Option<Vec<u8>> {
     }
 }
 
+/// Dead-key / compose fallback for the plain printable-send path.
+///
+/// When a dead-key sequence composes (e.g. `'` then `e` on US-International),
+/// the composed glyph ("é") lives only in the event's `text`, while
+/// `logical_key` still reports the base character ("e"). Returns
+/// `Some(text bytes)` when the composed `text` should be sent INSTEAD of the
+/// logical character:
+/// * no Ctrl/Alt held (those paths — control bytes, Meta-ESC, macOS
+///   Option-compose — must keep their existing behavior),
+/// * the logical key is a plain `Character` (Named keys like Enter/Tab produce
+///   control text that must keep going through `key_to_bytes`),
+/// * `text` is non-empty, differs from the logical character, and contains no
+///   control characters.
+pub fn dead_key_text_override(
+    ctrl: bool,
+    alt: bool,
+    logical: &Key,
+    text: Option<&str>,
+) -> Option<Vec<u8>> {
+    if ctrl || alt {
+        return None;
+    }
+    let Key::Character(s) = logical else {
+        return None;
+    };
+    let t = text?;
+    if t.is_empty() || t == s.as_str() || t.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    Some(t.as_bytes().to_vec())
+}
+
 /// A mouse event to encode for an application that enabled mouse reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseEvent {
@@ -814,7 +906,7 @@ mod tests {
             true, false, false,
             make_physical(KeyCode::Equal),
             &make_logical_char("="),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::FontUp);
     }
@@ -825,7 +917,7 @@ mod tests {
             true, false, false,
             make_physical(KeyCode::Minus),
             &make_logical_char("-"),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::FontDown);
     }
@@ -836,7 +928,7 @@ mod tests {
             true, false, false,
             make_physical(KeyCode::Digit0),
             &make_logical_char("0"),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::FontReset);
     }
@@ -848,7 +940,7 @@ mod tests {
             true, true, false,
             make_physical(KeyCode::Equal),
             &make_logical_char("="),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::OpacityUp);
     }
@@ -859,7 +951,7 @@ mod tests {
             true, true, false,
             make_physical(KeyCode::KeyT),
             &make_logical_char("T"),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::NewTab);
     }
@@ -870,7 +962,7 @@ mod tests {
             true, true, false,
             make_physical(KeyCode::KeyW),
             &make_logical_char("W"),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::CloseTab);
     }
@@ -881,7 +973,7 @@ mod tests {
             true, true, false,
             make_physical(KeyCode::KeyD),
             &make_logical_char("D"),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::DetachTab);
     }
@@ -892,7 +984,7 @@ mod tests {
             true, false, false,
             make_physical(KeyCode::Tab),
             &Key::Named(NamedKey::Tab),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::NextTab);
     }
@@ -903,7 +995,7 @@ mod tests {
             true, true, false,
             make_physical(KeyCode::Tab),
             &Key::Named(NamedKey::Tab),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::PrevTab);
     }
@@ -914,7 +1006,7 @@ mod tests {
             true, false, false,
             make_physical(KeyCode::Digit3),
             &make_logical_char("3"),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::SelectTab(2));
     }
@@ -926,9 +1018,213 @@ mod tests {
             true, false, false,
             make_physical(KeyCode::Digit0),
             &make_logical_char("0"),
-            false, false,
+            false, false, false,
         );
         assert_eq!(action, KeyAction::FontReset);
+    }
+
+    // ── PageUp/PageDown: alt-screen aware (C1) ──────────────────────────────
+
+    #[test]
+    fn page_keys_scroll_on_primary_screen() {
+        let up = decide_key(
+            false, false, false,
+            make_physical(KeyCode::PageUp),
+            &Key::Named(NamedKey::PageUp),
+            false, false, false,
+        );
+        assert_eq!(up, KeyAction::ScrollPageUp);
+        let down = decide_key(
+            false, false, false,
+            make_physical(KeyCode::PageDown),
+            &Key::Named(NamedKey::PageDown),
+            false, false, false,
+        );
+        assert_eq!(down, KeyAction::ScrollPageDown);
+    }
+
+    #[test]
+    fn page_keys_forward_to_pty_on_alt_screen() {
+        // less/vim/htop (alt screen): plain PageUp/Down must reach the app.
+        let up = decide_key(
+            false, false, false,
+            make_physical(KeyCode::PageUp),
+            &Key::Named(NamedKey::PageUp),
+            false, false, true,
+        );
+        assert_eq!(up, KeyAction::Send(b"\x1b[5~".to_vec()));
+        let down = decide_key(
+            false, false, false,
+            make_physical(KeyCode::PageDown),
+            &Key::Named(NamedKey::PageDown),
+            false, false, true,
+        );
+        assert_eq!(down, KeyAction::Send(b"\x1b[6~".to_vec()));
+    }
+
+    #[test]
+    fn shift_page_keys_always_scroll_even_on_alt_screen() {
+        // Shift+PageUp/Down is the standard host-scrollback escape hatch.
+        let up = decide_key(
+            false, true, false,
+            make_physical(KeyCode::PageUp),
+            &Key::Named(NamedKey::PageUp),
+            false, false, true,
+        );
+        assert_eq!(up, KeyAction::ScrollPageUp);
+        let down = decide_key(
+            false, true, false,
+            make_physical(KeyCode::PageDown),
+            &Key::Named(NamedKey::PageDown),
+            false, false, true,
+        );
+        assert_eq!(down, KeyAction::ScrollPageDown);
+    }
+
+    // ── Ctrl+/ and Ctrl+_ → 0x1f (C4) ───────────────────────────────────────
+
+    #[test]
+    fn ctrl_slash_sends_unit_separator() {
+        let action = decide_key(
+            true, false, false,
+            make_physical(KeyCode::Slash),
+            &make_logical_char("/"),
+            false, false, false,
+        );
+        assert_eq!(action, KeyAction::Send(vec![0x1f]));
+    }
+
+    #[test]
+    fn ctrl_underscore_sends_unit_separator() {
+        // A layout where "_" is produced by some non-Minus physical key.
+        let action = decide_key(
+            true, false, false,
+            make_physical(KeyCode::IntlRo),
+            &make_logical_char("_"),
+            false, false, false,
+        );
+        assert_eq!(action, KeyAction::Send(vec![0x1f]));
+    }
+
+    #[test]
+    fn ctrl_shift_minus_still_opacity_down() {
+        // US: Ctrl+Shift+Minus stays the OpacityDown app shortcut even though
+        // its logical character is "_" (the explicit chord wins).
+        let action = decide_key(
+            true, true, false,
+            make_physical(KeyCode::Minus),
+            &make_logical_char("_"),
+            false, false, false,
+        );
+        assert_eq!(action, KeyAction::OpacityDown);
+    }
+
+    #[test]
+    fn ctrl_minus_on_physical_slash_is_not_unit_separator() {
+        // German layouts: physical Slash produces "-". Ctrl+- there must NOT be
+        // hijacked as 0x1f (it is keyed on the logical character, not position).
+        let action = decide_key(
+            true, false, false,
+            make_physical(KeyCode::Slash),
+            &make_logical_char("-"),
+            false, false, false,
+        );
+        assert_ne!(action, KeyAction::Send(vec![0x1f]));
+    }
+
+    // ── Modified Home/End/Delete/Insert (C5) ────────────────────────────────
+
+    #[test]
+    fn shift_home_end_send_modified_csi() {
+        let home = decide_key(
+            false, true, false,
+            make_physical(KeyCode::Home),
+            &Key::Named(NamedKey::Home),
+            false, false, false,
+        );
+        assert_eq!(home, KeyAction::Send(b"\x1b[1;2H".to_vec()));
+        let end = decide_key(
+            false, true, false,
+            make_physical(KeyCode::End),
+            &Key::Named(NamedKey::End),
+            false, false, false,
+        );
+        assert_eq!(end, KeyAction::Send(b"\x1b[1;2F".to_vec()));
+    }
+
+    #[test]
+    fn ctrl_delete_sends_modified_tilde_form() {
+        let action = decide_key(
+            true, false, false,
+            make_physical(KeyCode::Delete),
+            &Key::Named(NamedKey::Delete),
+            false, false, false,
+        );
+        assert_eq!(action, KeyAction::Send(b"\x1b[3;5~".to_vec()));
+    }
+
+    #[test]
+    fn alt_insert_sends_modified_tilde_form() {
+        let action = decide_key(
+            false, false, true,
+            make_physical(KeyCode::Insert),
+            &Key::Named(NamedKey::Insert),
+            false, false, false,
+        );
+        assert_eq!(action, KeyAction::Send(b"\x1b[2;3~".to_vec()));
+    }
+
+    #[test]
+    fn plain_home_end_delete_insert_unchanged() {
+        // No modifiers → the plain xterm forms, exactly as before.
+        for (named, code, bytes) in [
+            (NamedKey::Home, KeyCode::Home, &b"\x1b[H"[..]),
+            (NamedKey::End, KeyCode::End, &b"\x1b[F"[..]),
+            (NamedKey::Delete, KeyCode::Delete, &b"\x1b[3~"[..]),
+            (NamedKey::Insert, KeyCode::Insert, &b"\x1b[2~"[..]),
+        ] {
+            let action = decide_key(
+                false, false, false,
+                make_physical(code),
+                &Key::Named(named),
+                false, false, false,
+            );
+            assert_eq!(action, KeyAction::Send(bytes.to_vec()));
+        }
+    }
+
+    // ── Dead-key composed text override (C3) ────────────────────────────────
+
+    #[test]
+    fn dead_key_override_prefers_composed_text() {
+        // ' then e on US-International: logical "e", text "é" → send "é".
+        let out = dead_key_text_override(false, false, &make_logical_char("e"), Some("é"));
+        assert_eq!(out, Some("é".as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn dead_key_override_noop_when_text_matches_logical() {
+        assert_eq!(
+            dead_key_text_override(false, false, &make_logical_char("e"), Some("e")),
+            None,
+        );
+    }
+
+    #[test]
+    fn dead_key_override_ignores_ctrl_alt_named_and_control_text() {
+        // Ctrl/Alt held → None (control-byte / Meta-ESC paths must win).
+        assert_eq!(dead_key_text_override(true, false, &make_logical_char("e"), Some("é")), None);
+        assert_eq!(dead_key_text_override(false, true, &make_logical_char("e"), Some("é")), None);
+        // Named keys (Enter yields text "\r") → None.
+        assert_eq!(
+            dead_key_text_override(false, false, &Key::Named(NamedKey::Enter), Some("\r")),
+            None,
+        );
+        // Control chars in text → None.
+        assert_eq!(dead_key_text_override(false, false, &make_logical_char("e"), Some("\x08")), None);
+        // Empty / missing text → None.
+        assert_eq!(dead_key_text_override(false, false, &make_logical_char("e"), Some("")), None);
+        assert_eq!(dead_key_text_override(false, false, &make_logical_char("e"), None), None);
     }
 
     #[test]

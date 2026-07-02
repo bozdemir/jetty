@@ -40,9 +40,13 @@ impl ApplicationHandler for Probe {
                     self.mods.super_key()
                 );
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } if event.state.is_pressed() => {
+                // X11 synthesizes presses for keys held at focus gain; the real
+                // app ignores those, so the probe labels them instead of mixing
+                // them silently into the log.
+                let tag = if is_synthetic { "KEY(synthetic, ignored by jetty)" } else { "KEY  " };
                 eprintln!(
-                    "KEY   physical={:?}  logical={:?}  key_no_mods={:?}  text={:?}  | mods ctrl={} shift={}",
+                    "{tag} physical={:?}  logical={:?}  key_no_mods={:?}  text={:?}  | mods ctrl={} shift={}",
                     event.physical_key,
                     event.logical_key,
                     event.key_without_modifiers(),
