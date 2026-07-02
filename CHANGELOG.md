@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] — 2026-07-01
+
+Detached tabs grew up: real window chrome, context menus, and drag & drop.
+
+### Added
+- **Detached-window chrome** — a detached tab's window now has a proper top bar
+  (title + ✕, drag to move), edge/corner resizing, and the bottom perf-HUD strip;
+  the terminal grid sits between them. Previously the window was bare and could
+  not even be moved.
+- **Tab context menu** — right-click a tab for **Detach / Rename / Close Tab**
+  (Detach hidden when only one tab). Right-click inside a detached window for
+  **Reattach / Copy / Paste**.
+- **Drag & drop detach/reattach** — drag a tab off the bar (>24 px) to pop it
+  into its own window at the drop point; drag a detached window by its top bar
+  and drop it onto the main tab bar to reattach. On platforms without window
+  positioning (Wayland), moving falls back to the compositor drag and
+  drop-to-reattach is unavailable — no DE-specific code.
+- Detach/reattach + the new gestures are documented in the Help overlay ("?")
+  and README.
+
+---
+
 ## [0.7.0] — 2026-07-01
 
 ### Added
