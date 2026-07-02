@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] — 2026-07-01
+
+A polish + hardening release: detached windows reach full visual parity, the
+Settings panel got a design overhaul, and a 60-agent audit's 25 verified bugs
+were fixed.
+
+### Added
+- **Settings panel redesign** — one consistent control system (segmented
+  `‹ value ›` cyclers, knob-in-track switches, matching steppers/chips/sliders),
+  calm header/value hierarchy on an 8px grid, inset list wells with accent-edge
+  selection, a floating theme menu, roomier tab strip, and a footer hint. All
+  theme-derived; verified on dark and light themes.
+- **IME & dead-key input** — CJK commit text and dead-key accents (´+e → é) now
+  reach the shell; composed text is preferred over the raw key. (No preedit
+  overlay yet.)
+
+### Changed
+- **Detached windows: full visual parity** — corner radius (all four corners),
+  background opacity, the CRT effect, and caret flash now apply to detached
+  windows, live with the sliders. No more square opaque pop-outs.
+- **PageUp/PageDown are alt-screen aware** — they page inside less/man/vim/htop
+  and scroll history in the shell; **Shift+PageUp/Down** always scrolls history.
+- **PTY writes are asynchronous** — a dedicated writer thread per session; a
+  huge paste into a non-reading program can no longer freeze the UI.
+- Closing the last main tab while detached windows exist now pulls a detached
+  tab back into the main window instead of quitting (no more killed shells).
+- Config saves are atomic (temp + rename); a crash mid-save can no longer wipe
+  settings.
+
+### Fixed
+- X11 synthetic key presses on focus gain no longer inject garbage (e.g. `~`
+  right after an F9 summon).
+- Slow touchpad scrolling is no longer dropped (fractional deltas accumulate).
+- Spurious mouse-release reports to mouse-mode apps after UI-consumed clicks.
+- Ctrl+/ and Ctrl+_ now send readline undo (0x1f); modified Home/End/Delete/
+  Insert carry their modifiers.
+- Auto-hide no longer fires when focus moves between JeTTY's own windows
+  (detached/settings), and a shell exit in a focused detached window no longer
+  permanently disables auto-hide.
+- CRT roll/flicker/jitter no longer renders while the window is hidden; the CRT
+  pass keeps Dropdown top corners square; caret glow no longer bleeds outside
+  rounded corners.
+- Detached windows debounce resize reflow like the main window; detaching a tab
+  invalidates its context menu/drag; menus dismiss on window resize.
+- NaN values in a hand-edited config are sanitized; the autostart `.desktop`
+  Exec path is properly quoted; two simultaneous cold starts can no longer
+  destroy each other's IPC socket; summon animation no longer wedges the event
+  loop in Poll when the window hides mid-reveal; mouse reports are clamped to
+  the grid.
+
+---
+
 ## [0.8.0] — 2026-07-01
 
 Detached tabs grew up: real window chrome, context menus, and drag & drop.
