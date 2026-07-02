@@ -33,10 +33,10 @@
 //   chromatic     f32        @ 24
 //   vignette      f32        @ 28
 //   tint          vec4<f32>  @ 32   (align 16; rgb + pad)
-//   corner_radius f32        @ 48
+//   corner_radius f32        @ 48   (BOTTOM corners)
 //   time          f32        @ 52   (animation phase, seconds — Task 10)
 //   flags         u32        @ 56   (roll/flicker/jitter bitfield — Task 10)
-//   _pad0         f32        @ 60
+//   corner_radius_top f32    @ 60   (TOP corners; 0 when top-flush Dropdown)
 //   => size 64, align 16.
 
 /// CRT animation flag bits packed into [`CrtUniform::flags`]. This is the single
@@ -61,7 +61,7 @@ struct P {
     corner_radius: f32,
     time: f32,
     flags: u32,
-    _pad0: f32,
+    corner_radius_top: f32,
 };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var src_tex: texture_2d<f32>;
@@ -201,14 +201,23 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     // --- 7) Rounded-corner alpha on the UN-WARPED output coords (so the rounding
     // is NOT distorted by curvature) — replicates mask.rs's SDF, feather and
-    // radius clamp exactly so the corners match the non-CRT look. ---
+    // radius clamp exactly so the corners match the non-CRT look. The TOP
+    // corners use their own radius (0 for a top-flush Dropdown, mirroring the
+    // corner mask's per-corner radii) so CRT-on never opens a transparent
+    // notch at the monitor's top edge. ---
     let frag = in.uv * res;                 // un-warped output pixel position
     let half = res * 0.5;
-    let rr = min(p.corner_radius, min(res.x, res.y) * 0.5);
-    let d = sd_round_rect(frag - half, half, rr);
+    let pt = frag - half;
+    let max_r = min(res.x, res.y) * 0.5;
+    let rr_bot = clamp(p.corner_radius, 0.0, max_r);
+    let rr_top = clamp(p.corner_radius_top, 0.0, max_r);
+    // Quadrant-select the radius (top vs bottom half), like mask.rs's
+    // sd_round_rect_per restricted to a top/bottom split.
+    let rr = select(rr_top, rr_bot, pt.y > 0.0);
+    let d = sd_round_rect(pt, half, rr);
     let cov_raw = 1.0 - smoothstep(-0.75, 0.75, d);
-    // radius <= 0 => fully opaque everywhere (square window, matches mask.rs skip).
-    let cov = select(1.0, cov_raw, p.corner_radius > 0.0);
+    // both radii <= 0 => fully opaque everywhere (square window, matches mask.rs skip).
+    let cov = select(1.0, cov_raw, max(p.corner_radius, p.corner_radius_top) > 0.0);
 
     // Multiply BOTH (premultiplied) color and alpha by the combined coverage so
     // corners + bezel fade out without re-opaquing (mirrors mask.rs dst-multiply).
@@ -244,15 +253,18 @@ pub struct CrtUniform {
     pub vignette: f32,
     /// Scanline tint: rgb in `[0..2]`, `[3]` is padding. (offset 32, align 16)
     pub tint: [f32; 4],
-    /// Rounded-corner radius in physical px (matches the corner mask). (offset 48)
+    /// Rounded-corner radius of the BOTTOM corners in physical px (matches the
+    /// corner mask). (offset 48)
     pub corner_radius: f32,
     /// Animation phase in seconds (free-running clock). Drives roll/flicker/jitter
     /// via `sin`, so unbounded growth is fine. (offset 52)
     pub time: f32,
     /// Roll/flicker/jitter bitfield (`CRT_FLAG_*`). 0 => static look. (offset 56)
     pub flags: u32,
-    /// Padding — keep the struct 16-byte aligned (size 64). (offset 60)
-    pub _pad0: f32,
+    /// Rounded-corner radius of the TOP corners in physical px. 0 when the
+    /// window is top-flush (Dropdown mode keeps the top corners square, exactly
+    /// like the non-CRT corner mask's per-corner radii). (offset 60)
+    pub corner_radius_top: f32,
 }
 
 pub struct Crt {
@@ -484,7 +496,7 @@ mod tests {
         assert_eq!(offset_of!(CrtUniform, corner_radius), 48);
         assert_eq!(offset_of!(CrtUniform, time), 52);
         assert_eq!(offset_of!(CrtUniform, flags), 56);
-        assert_eq!(offset_of!(CrtUniform, _pad0), 60);
+        assert_eq!(offset_of!(CrtUniform, corner_radius_top), 60);
         // bytemuck::Pod requires no padding gaps; size is a multiple of align.
         assert_eq!(size_of::<CrtUniform>() % align_of::<CrtUniform>(), 0);
     }

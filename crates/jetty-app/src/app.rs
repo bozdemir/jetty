@@ -3074,7 +3074,9 @@ impl App {
                     flags: (if fx.crt_animate_roll { jetty_render::CRT_FLAG_ROLL } else { 0 })
                         | (if fx.crt_flicker { jetty_render::CRT_FLAG_FLICKER } else { 0 })
                         | (if fx.crt_jitter { jetty_render::CRT_FLAG_JITTER } else { 0 }),
-                    _pad0: 0.0,
+                    // A detached window is free-floating (never top-flush), so
+                    // all four corners round — same as its corner mask.
+                    corner_radius_top: corner_radius_px,
                 },
             );
         }
@@ -3678,12 +3680,16 @@ impl ApplicationHandler<AppEvent> for App {
         // (0-CPU idle). When animation is ON it selects Poll, which Fifo present
         // throttles to ~60fps vsync — exactly how summon/slide animate on macOS,
         // where a `request_redraw` issued under Wait is not delivered until input.
+        // The CRT-animation term is gated on the window being VISIBLE: a hidden
+        // dropdown must not keep the loop in Poll rendering invisible frames
+        // forever (a permanent CPU+GPU burn violating the 0-CPU-idle design);
+        // summoning the window resumes the animation (free-running clock).
         let main_pending = self.summon_anim.is_some()
             || self.slide_anim.is_some()
             || self.summon_pending
             || self.pending_dock_frames > 0
             || self.pending_center_frames > 0
-            || self.fx.crt_anim_live()
+            || (self.visible && self.fx.crt_anim_live())
             || self.caret_anim.is_some();
         if main_pending {
             if let Some(w) = &self.window {
@@ -5976,6 +5982,68 @@ impl ApplicationHandler<AppEvent> for App {
                             );
                         }
                     }
+                    // Caret glow/ripple pass (Task 12). Additive GPU burst at the
+                    // cursor position on each keystroke. Dispatched only when the
+                    // toggle is on AND an animation is live AND the cursor is visible.
+                    //
+                    // Runs BEFORE the corner mask below, so the mask's coverage
+                    // multiply clips the halo/ring at the rounded corners — an
+                    // additive pass AFTER the mask would add RGB into alpha=0
+                    // corner pixels, which a PreMultiplied compositor still
+                    // displays (glow visibly bleeding outside the window shape).
+                    //
+                    // Target is always `scene_view`, which routes correctly for all
+                    // three compositing cases:
+                    //   CRT ON:   scene_view == offscreen → glow composites into the
+                    //             offscreen; the CRT pass below samples and rounds
+                    //             the corners. Glow gets full CRT treatment.
+                    //   CRT OFF:  scene_view == &view (surface) → glow lands before
+                    //             the corner mask, which clips it to the shape.
+                    //   Tier-B:   scene_view == offscreen (Tier-B owns it); the
+                    //             effect samples it after the mask bakes in, so
+                    //             the glow is displaced/blurred with the scene.
+                    //
+                    // No new redraw scheduling — the caret_anim guard in the
+                    // self-drive block below keeps frames coming while the burst
+                    // is live.
+                    if self.fx.caret_glow_enabled {
+                        if let (Some(cfx), Some(t_val)) = (caret_fx, caret_t) {
+                            if snap.cursor_visible
+                                && snap.cursor_col < snap.cols
+                                && snap.cursor_row < snap.rows
+                                && t_val < 1.0
+                            {
+                                // Cursor cell centre in physical pixels. x and y both
+                                // start from (0,0) at the top-left of the viewport,
+                                // matching @builtin(position) in the WGSL fragment.
+                                // Mirrors text.rs:585-596's cursor_left/top formula.
+                                let cursor_px_x = snap.cursor_col as f32 * cell_w
+                                    + cell_w * 0.5;
+                                let cursor_px_y = snap.cursor_row as f32 * cell_h
+                                    + grid_top + slide_y_offset + cell_h * 0.5;
+                                cfx.apply(
+                                    &gpu.device,
+                                    &gpu.queue,
+                                    scene_view,
+                                    &jetty_render::CaretFxUniform {
+                                        resolution: [width as f32, height as f32],
+                                        cursor_px: [cursor_px_x, cursor_px_y],
+                                        cell: [cell_w, cell_h],
+                                        t: t_val,
+                                        // Tasteful default intensity; bright enough to
+                                        // be visible, subtle enough not to dominate.
+                                        intensity: 0.5,
+                                        color: [
+                                            caret_flash_color[0],
+                                            caret_flash_color[1],
+                                            caret_flash_color[2],
+                                            0.0, // pad
+                                        ],
+                                    },
+                                );
+                            }
+                        }
+                    }
                     // Final pass: round the window corners by zeroing alpha
                     // outside a rounded rect. No-op when radius == 0 (square).
                     // Applied to `scene_view`: for Tier-A this is the surface; for a
@@ -6084,7 +6152,9 @@ impl ApplicationHandler<AppEvent> for App {
                     // term feeds `about_to_wait`'s `main_pending`, so on macOS the
                     // loop sits in `Poll` (vsync-throttled by Fifo present) while
                     // animating and returns to `Wait`/idle the moment it clears.
-                    let crt_anim_live = self.fx.crt_anim_live();
+                    // Gated on `self.visible` like the `main_pending` term: a
+                    // hidden window must never self-drive CRT frames.
+                    let crt_anim_live = self.visible && self.fx.crt_anim_live();
                     if self.summon_anim.is_some()
                         || self.slide_anim.is_some()
                         || hint_live
@@ -6093,65 +6163,6 @@ impl ApplicationHandler<AppEvent> for App {
                     {
                         if let Some(w) = &self.window {
                             w.request_redraw();
-                        }
-                    }
-                    // Caret glow/ripple pass (Task 12). Additive GPU burst at the
-                    // cursor position on each keystroke. Dispatched only when the
-                    // toggle is on AND an animation is live AND the cursor is visible.
-                    //
-                    // Target is always `scene_view`, which routes correctly for all
-                    // three compositing cases:
-                    //   CRT ON:   scene_view == offscreen → glow composites into the
-                    //             offscreen; the CRT pass below samples and re-rounds
-                    //             the corners. Glow gets full CRT treatment.
-                    //   CRT OFF:  scene_view == &view (surface) → glow goes directly
-                    //             onto the surface after the corner mask above.
-                    //             Alpha=0 output keeps corner transparency intact.
-                    //   Tier-B:   scene_view == offscreen (Tier-B owns it). NOTE: by
-                    //             this point the Tier-B effect has ALREADY composited
-                    //             the offscreen onto the surface; the glow is written
-                    //             to the now-unused offscreen and is NOT presented.
-                    //             Silently absent during a Tier-B summon — safe but
-                    //             not visible.
-                    //
-                    // No new redraw scheduling — the caret_anim guard in the self-drive
-                    // block above already keeps frames coming while the burst is live.
-                    if self.fx.caret_glow_enabled {
-                        if let (Some(cfx), Some(t_val)) = (caret_fx, caret_t) {
-                            if snap.cursor_visible
-                                && snap.cursor_col < snap.cols
-                                && snap.cursor_row < snap.rows
-                                && t_val < 1.0
-                            {
-                                // Cursor cell centre in physical pixels. x and y both
-                                // start from (0,0) at the top-left of the viewport,
-                                // matching @builtin(position) in the WGSL fragment.
-                                // Mirrors text.rs:585-596's cursor_left/top formula.
-                                let cursor_px_x = snap.cursor_col as f32 * cell_w
-                                    + cell_w * 0.5;
-                                let cursor_px_y = snap.cursor_row as f32 * cell_h
-                                    + grid_top + slide_y_offset + cell_h * 0.5;
-                                cfx.apply(
-                                    &gpu.device,
-                                    &gpu.queue,
-                                    scene_view,
-                                    &jetty_render::CaretFxUniform {
-                                        resolution: [width as f32, height as f32],
-                                        cursor_px: [cursor_px_x, cursor_px_y],
-                                        cell: [cell_w, cell_h],
-                                        t: t_val,
-                                        // Tasteful default intensity; bright enough to
-                                        // be visible, subtle enough not to dominate.
-                                        intensity: 0.5,
-                                        color: [
-                                            caret_flash_color[0],
-                                            caret_flash_color[1],
-                                            caret_flash_color[2],
-                                            0.0, // pad
-                                        ],
-                                    },
-                                );
-                            }
                         }
                     }
                     // CRT post-pass: when CRT is active (enabled AND not bypassed by
@@ -6191,12 +6202,18 @@ impl ApplicationHandler<AppEvent> for App {
                                     ],
                                     // The CRT pass owns the rounded corners (the
                                     // corner mask is skipped while CRT is active),
-                                    // so feed it the same physical radius the mask
-                                    // would use. NOTE: a single radius rounds all
-                                    // four corners; in Dropdown (top-flush) mode the
-                                    // mask keeps the top corners square — that nuance
-                                    // is not modeled here (single corner_radius).
+                                    // so feed it the same per-position radii the
+                                    // mask would use: bottom corners always round;
+                                    // the TOP corners stay square when the window
+                                    // is top-flush (Dropdown), so CRT-on never
+                                    // opens a transparent notch at the monitor's
+                                    // top edge.
                                     corner_radius: corner_radius_px,
+                                    corner_radius_top: if top_flush {
+                                        0.0
+                                    } else {
+                                        corner_radius_px
+                                    },
                                     // Animation (Task 10): free-running phase +
                                     // roll/flicker/jitter bitfield. When all three
                                     // toggles are off, flags == 0 and the shader
@@ -6217,7 +6234,6 @@ impl ApplicationHandler<AppEvent> for App {
                                     } else {
                                         0
                                     }),
-                                    _pad0: 0.0,
                                 },
                             );
                         }

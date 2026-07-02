@@ -716,7 +716,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             corner_radius: getf("JETTY_SHOT_CRT_RADIUS", corner_radius),
             time: 0.0,
             flags: 0,
-            _pad0: 0.0,
+            // The shot renders a free-floating (non-top-flush) window look:
+            // all four corners round, so the top radius matches the bottom.
+            corner_radius_top: getf("JETTY_SHOT_CRT_RADIUS", corner_radius),
         });
         Some(ct)
     } else {

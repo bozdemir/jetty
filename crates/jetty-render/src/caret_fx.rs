@@ -6,8 +6,10 @@
 //! `caret_anim.is_some()`; otherwise it is a true zero-cost no-op.
 //!
 //! Additive blending (src=One / dst=One): the pass only ever BRIGHTENS pixels.
-//! Alpha output is 0 so the window's premultiplied transparency is untouched —
-//! transparent rounded corners stay at alpha=0 regardless of cursor proximity.
+//! Alpha output is 0 so the destination alpha is untouched. NOTE: on a
+//! PreMultiplied surface the compositor still displays nonzero RGB at alpha=0
+//! (`src.rgb + dst*(1-src.a)`), so this pass must run BEFORE the corner mask —
+//! the mask's coverage multiply then clips the glow at the rounded corners.
 //!
 //! Self-contained: our own wgpu/WGSL, no offscreen texture, no scene sampling.
 //! Model: phosphor.rs (`fs_glow` additive pass).
@@ -216,11 +218,14 @@ impl CaretFx {
     /// additive blending. Call only when the glow effect is enabled AND
     /// `caret_anim.is_some()` AND the cursor is visible.
     ///
-    /// Compositing targets (caller must pick the right `dst`):
+    /// Compositing targets (caller must pick the right `dst`; dispatch BEFORE
+    /// the corner mask so the mask's coverage multiply clips the glow at the
+    /// rounded corners — an additive pass after the mask would put nonzero RGB
+    /// into alpha=0 corner pixels, which PreMultiplied compositors display):
     /// - CRT ON:    `scene_view` (the offscreen) — the CRT pass then processes
     ///              and rounds corners. Glow gets full CRT treatment.
-    /// - CRT OFF:   `scene_view` (== surface view) — corner mask already ran,
-    ///              alpha=0 output keeps corners transparent.
+    /// - CRT OFF:   `scene_view` (== surface view) — the corner mask runs
+    ///              after this pass and clips the glow to the window shape.
     /// - Tier-B:    `scene_view` (== offscreen) — the Tier-B effect resamples
     ///              it; glow is displaced/blurred like the rest of the scene.
     pub fn apply(
