@@ -575,6 +575,17 @@ pub struct App {
     /// `detach_tab`; dropped (closing the OS window and reaping the PTY)
     /// when `reattach_tab` or the window's CloseRequested removes the entry.
     detached: Vec<crate::detached::DetachedWindow>,
+    /// When `Some((x, y, tab_idx))`, the TAB context menu (Detach / Rename /
+    /// Close Tab) is open at this physical-pixel anchor for tab `tab_idx`.
+    /// Mutually exclusive with `context_menu` (the terminal Copy/Paste menu).
+    tab_menu: Option<(f32, f32, usize)>,
+    /// Item labels of the open tab menu, snapshotted when it opened (the
+    /// "Detach" row is present only when detaching was allowed at open time).
+    tab_menu_labels: Vec<&'static str>,
+    /// Cached hit-test rects for the open tab menu (built once on open).
+    tab_menu_rects: Vec<jetty_render::Rect>,
+    /// Tab-menu item currently under the cursor (hover highlight).
+    tab_menu_hover: Option<usize>,
 }
 
 /// Which resize zone (if any) the cursor is over on a borderless window (the
@@ -814,6 +825,10 @@ impl App {
             confirm_quit: false,
             last_pos: None,
             detached: Vec::new(),
+            tab_menu: None,
+            tab_menu_labels: Vec::new(),
+            tab_menu_rects: Vec::new(),
+            tab_menu_hover: None,
         };
         // Persisted user settings override the env-derived defaults (but env
         // vars still seed the initial values above, so an explicit JETTY_* can
@@ -1103,6 +1118,12 @@ impl App {
             self.rename_buf.clear();
         }
         self.selecting = false;
+        // The tab menu holds a raw index; the layout just changed under it, so
+        // drop it (transient state, cheap to reopen).
+        self.tab_menu = None;
+        self.tab_menu_hover = None;
+        self.tab_menu_rects.clear();
+        self.tab_menu_labels.clear();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1493,17 +1514,25 @@ impl App {
         Some((line, col))
     }
 
-    /// Paste `text` to the PTY, wrapping in bracketed-paste sequences if the
-    /// running application has enabled `\e[?2004h`.
+    /// Paste `text` to the ACTIVE tab's PTY, wrapping in bracketed-paste
+    /// sequences if the running application has enabled `\e[?2004h`.
     fn paste_text(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
         if self.tabs.is_empty() {
             return;
         }
-        let bracketed = self.active_tab().terminal.bracketed_paste();
-        let w = &mut self.tabs[self.active].writer;
+        let active = self.active;
+        Self::paste_to_tab(&mut self.tabs[active], text);
+    }
+
+    /// Paste `text` into `tab`'s PTY (bracketed when the app enabled it).
+    /// Shared by the main window's paste paths and the detached windows'
+    /// context-menu / Ctrl+Shift+V paste, so all windows paste identically.
+    fn paste_to_tab(tab: &mut Tab, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let bracketed = tab.terminal.bracketed_paste();
+        let w = &mut tab.writer;
         if bracketed {
             let _ = w.write_all(b"\x1b[200~");
         }
@@ -1693,6 +1722,12 @@ impl App {
             self.rename_buf.clear();
         }
         self.selecting = false;
+        // Same index-invalidation as `close_tab`: drop the transient tab menu
+        // now that the tab layout changed under it.
+        self.tab_menu = None;
+        self.tab_menu_hover = None;
+        self.tab_menu_rects.clear();
+        self.tab_menu_labels.clear();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -2277,14 +2312,41 @@ impl App {
                         self.reattach_tab(pos);
                         return;
                     }
+                    input::KeyAction::Copy => {
+                        // Same copy-then-clear flow as the main window.
+                        let copied = dw
+                            .tab
+                            .terminal
+                            .selection_text()
+                            .filter(|t| !t.is_empty());
+                        if let Some(text) = copied {
+                            clipboard::set(&text);
+                            dw.tab.terminal.selection_clear();
+                            dw.window.request_redraw();
+                        }
+                    }
+                    input::KeyAction::Paste => {
+                        if let Some(text) = clipboard::get() {
+                            Self::paste_to_tab(&mut dw.tab, &text);
+                        }
+                    }
                     input::KeyAction::Send(bytes) => {
+                        // Escape closes this window's context menu (if open)
+                        // before anything reaches the PTY — mirrors the main window.
+                        if bytes == [0x1b] && dw.menu_open.is_some() {
+                            dw.menu_open = None;
+                            dw.menu_hover = None;
+                            dw.menu_rects.clear();
+                            dw.window.request_redraw();
+                            return;
+                        }
                         let _ = dw.tab.writer.write_all(&bytes);
                         let _ = dw.tab.writer.flush();
                         dw.window.request_redraw();
                     }
                     // Every other action (new/close/nav tab, font, opacity,
-                    // panel, copy/paste, scroll, ...) is a main-window-only
-                    // feature for this MVP — ignored in a detached window.
+                    // panel, scroll, ...) is a main-window-only feature for
+                    // this MVP — ignored in a detached window.
                     _ => {}
                 }
             }
@@ -2336,6 +2398,18 @@ impl App {
                 let (w, h) = (dw.gpu.config.width, dw.gpu.config.height);
                 let cx = position.x as f32;
                 let cy = position.y as f32;
+                if dw.menu_open.is_some() {
+                    // Menu hover tracking from the cached rects (menu is modal;
+                    // no resize/close hover underneath it).
+                    let new_hover = dw.menu_rects.iter().position(|r| {
+                        cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
+                    });
+                    if new_hover != dw.menu_hover {
+                        dw.menu_hover = new_hover;
+                        dw.window.request_redraw();
+                    }
+                    return;
+                }
                 // --- Resize-edge cursor feedback (borderless window) ---
                 let zone = resize_zone_at(cx, cy, w, h);
                 if zone != dw.resize_zone {
@@ -2355,55 +2429,102 @@ impl App {
                 ..
             } => {
                 // Decide inside the dw borrow, act on `self` afterwards.
-                let reattach = {
+                enum Act {
+                    None,
+                    Reattach,
+                    Copy,
+                    Paste,
+                }
+                let act = {
                     let Some(dw) = self.detached.get_mut(pos) else { return };
                     let (cx, cy) = (dw.cursor.0 as f32, dw.cursor.1 as f32);
                     let (w, h) = (dw.gpu.config.width, dw.gpu.config.height);
-                    // --- Resize edges: corners > edges, before the bar. ---
-                    let zone = resize_zone_at(cx, cy, w, h);
-                    if let Some(dir) = zone.direction() {
-                        let _ = dw.window.drag_resize_window(dir);
-                        return;
-                    }
-                    // --- Top bar: close ✕ → reattach; empty bar → move. ---
-                    if cy < TABBAR_H {
-                        if input::point_in(&jetty_render::detached_close_rect(w), cx, cy) {
-                            true
-                        } else {
-                            // Double-click on the bar toggles maximize (same
-                            // ~400ms/5px window as the main strip).
-                            let now = std::time::Instant::now();
-                            let is_double = matches!(
-                                dw.last_bar_click,
-                                Some((t, px, py))
-                                    if now.duration_since(t)
-                                        <= std::time::Duration::from_millis(400)
-                                        && (cx - px).abs() <= 5.0
-                                        && (cy - py).abs() <= 5.0
-                            );
-                            dw.last_bar_click = Some((now, cx, cy));
-                            if is_double {
-                                dw.window.set_maximized(!dw.window.is_maximized());
-                                dw.last_bar_click = None;
-                            } else if dw.window.outer_position().is_ok() {
-                                // Manual drag: record the press offset; the
-                                // CursorMoved arm moves the window from it.
-                                dw.bar_drag = Some(dw.cursor);
-                            } else {
-                                // Wayland: no readable outer position — fall
-                                // back to the compositor drag.
-                                let _ = dw.window.drag_window();
-                            }
-                            return;
+                    if dw.menu_open.take().is_some() {
+                        // --- Context menu hit-test (consume the click entirely) ---
+                        dw.menu_hover = None;
+                        let hit = dw.menu_rects.iter().position(|r| {
+                            cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
+                        });
+                        dw.menu_rects.clear();
+                        dw.window.request_redraw();
+                        // Index → DETACHED_MENU_ITEMS order (Reattach/Copy/Paste).
+                        match hit {
+                            Some(0) => Act::Reattach,
+                            Some(1) => Act::Copy,
+                            Some(2) => Act::Paste,
+                            _ => Act::None,
                         }
                     } else {
-                        // Grid-area press: nothing to do (no selection wiring
-                        // in detached windows yet).
-                        return;
+                        // --- Resize edges: corners > edges, before the bar. ---
+                        let zone = resize_zone_at(cx, cy, w, h);
+                        if let Some(dir) = zone.direction() {
+                            let _ = dw.window.drag_resize_window(dir);
+                            return;
+                        }
+                        // --- Top bar: close ✕ → reattach; empty bar → move. ---
+                        if cy < TABBAR_H {
+                            if input::point_in(&jetty_render::detached_close_rect(w), cx, cy) {
+                                Act::Reattach
+                            } else {
+                                // Double-click on the bar toggles maximize (same
+                                // ~400ms/5px window as the main strip).
+                                let now = std::time::Instant::now();
+                                let is_double = matches!(
+                                    dw.last_bar_click,
+                                    Some((t, px, py))
+                                        if now.duration_since(t)
+                                            <= std::time::Duration::from_millis(400)
+                                            && (cx - px).abs() <= 5.0
+                                            && (cy - py).abs() <= 5.0
+                                );
+                                dw.last_bar_click = Some((now, cx, cy));
+                                if is_double {
+                                    dw.window.set_maximized(!dw.window.is_maximized());
+                                    dw.last_bar_click = None;
+                                } else if dw.window.outer_position().is_ok() {
+                                    // Manual drag: record the press offset; the
+                                    // CursorMoved arm moves the window and the
+                                    // Released arm checks drop-to-reattach.
+                                    dw.bar_drag = Some(dw.cursor);
+                                } else {
+                                    // Wayland: no readable outer position — fall
+                                    // back to the compositor drag. Drop-to-reattach
+                                    // is silently unavailable on this path.
+                                    let _ = dw.window.drag_window();
+                                }
+                                return;
+                            }
+                        } else {
+                            // Grid-area press: nothing to do (no selection wiring
+                            // in detached windows yet).
+                            return;
+                        }
                     }
                 };
-                if reattach {
-                    self.reattach_tab(pos);
+                match act {
+                    Act::Reattach => self.reattach_tab(pos),
+                    Act::Copy => {
+                        if let Some(dw) = self.detached.get_mut(pos) {
+                            let copied = dw
+                                .tab
+                                .terminal
+                                .selection_text()
+                                .filter(|t| !t.is_empty());
+                            if let Some(text) = copied {
+                                clipboard::set(&text);
+                                dw.tab.terminal.selection_clear();
+                                dw.window.request_redraw();
+                            }
+                        }
+                    }
+                    Act::Paste => {
+                        if let Some(text) = clipboard::get() {
+                            if let Some(dw) = self.detached.get_mut(pos) {
+                                Self::paste_to_tab(&mut dw.tab, &text);
+                            }
+                        }
+                    }
+                    Act::None => {}
                 }
             }
             WindowEvent::MouseInput {
@@ -2415,6 +2536,37 @@ impl App {
                 // CursorMoved put it.
                 let Some(dw) = self.detached.get_mut(pos) else { return };
                 dw.bar_drag = None;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                // Right-click anywhere → Reattach / Copy / Paste context menu.
+                let theme = self.current_theme();
+                let Some(dw) = self.detached.get_mut(pos) else { return };
+                let (cx, cy) = (dw.cursor.0 as f32, dw.cursor.1 as f32);
+                dw.menu_open = Some((cx, cy));
+                dw.menu_hover = None;
+                // Cache the item hit-test rects once (anchor + size fixed for the
+                // menu's lifetime), same pattern as the main context menu.
+                let items: Vec<(&str, &str)> = crate::detached::DETACHED_MENU_ITEMS
+                    .iter()
+                    .map(|&l| (l, crate::detached::menu_hint(l)))
+                    .collect();
+                let menu = jetty_render::build_menu(
+                    cx,
+                    cy,
+                    dw.gpu.config.width,
+                    dw.gpu.config.height,
+                    None,
+                    &theme,
+                    dw.chrome_text.cell_size().0,
+                    &items,
+                    &[],
+                );
+                dw.menu_rects = menu.item_rects;
+                dw.window.request_redraw();
             }
             WindowEvent::Focused(true) if pos < self.detached.len() => {
                 // OUR detached window now holds focus: record it and keep the
@@ -2433,10 +2585,13 @@ impl App {
                     self.last_focused_window = None;
                 }
                 // If focus left mid-interaction, the matching release/click may
-                // never arrive — clear the per-window drag state so nothing
+                // never arrive — clear the per-window drag/menu state so nothing
                 // resumes stuck (same discipline as the main window's auto-hide).
                 if let Some(dw) = self.detached.get_mut(pos) {
                     dw.bar_drag = None;
+                    dw.menu_open = None;
+                    dw.menu_hover = None;
+                    dw.menu_rects.clear();
                     dw.last_bar_click = None;
                 }
             }
@@ -2473,6 +2628,8 @@ impl App {
         let snap = dw.tab.terminal.snapshot();
         let title = dw.tab.title.clone();
         let close_hover = dw.close_hover;
+        let menu_open = dw.menu_open;
+        let menu_hover = dw.menu_hover;
         let theme = self.current_theme();
         let status_h = self.status_h();
         // Same global HUD string the main status bar shows (built on the main
@@ -2560,6 +2717,22 @@ impl App {
                 let _ = chrome_text.render_overlays(
                     &gpu.device, &gpu.queue, &view, width, height,
                     &[(perf.to_string(), px, py, [dim[0], dim[1], dim[2]])],
+                );
+            }
+        }
+        // Pass 6: the Reattach/Copy/Paste context menu on top of everything.
+        if let Some((mx, my)) = menu_open {
+            let items: Vec<(&str, &str)> = crate::detached::DETACHED_MENU_ITEMS
+                .iter()
+                .map(|&l| (l, crate::detached::menu_hint(l)))
+                .collect();
+            let menu = jetty_render::build_menu(
+                mx, my, width, height, menu_hover, &theme, chrome_char_w, &items, &[],
+            );
+            quad.render(&gpu.device, &gpu.queue, &view, width, height, &menu.quads);
+            if !menu.labels.is_empty() {
+                let _ = chrome_text.render_overlays(
+                    &gpu.device, &gpu.queue, &view, width, height, &menu.labels,
                 );
             }
         }
@@ -3626,7 +3799,8 @@ impl ApplicationHandler<AppEvent> for App {
                 let modal_open = self.confirm_quit
                     || self.confirm_close.is_some()
                     || self.help_open
-                    || self.context_menu.is_some();
+                    || self.context_menu.is_some()
+                    || self.tab_menu.is_some();
                 if !self.dragging_scrollbar && !self.selecting && !modal_open {
                     if let Some(gpu) = &self.gpu {
                         let (w, h) = (gpu.config.width, gpu.config.height);
@@ -3668,6 +3842,20 @@ impl ApplicationHandler<AppEvent> for App {
                     self.apply_scroll_from_cursor(w, h);
                     if let Some(win) = &self.window {
                         win.request_redraw();
+                    }
+                }
+                // --- Tab context menu hover update (cached rects, like above) ---
+                if self.tab_menu.is_some() {
+                    let cx = self.cursor.0 as f32;
+                    let cy = self.cursor.1 as f32;
+                    let new_hover = self.tab_menu_rects.iter().position(|r| {
+                        cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
+                    });
+                    if new_hover != self.tab_menu_hover {
+                        self.tab_menu_hover = new_hover;
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
                     }
                 }
                 // --- Text selection drag continuation ---
@@ -3754,6 +3942,44 @@ impl ApplicationHandler<AppEvent> for App {
                         // Cancel button or click-outside cancels.
                         self.confirm_close = None;
                     }
+                    if let Some(win) = &self.window {
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
+                // --- Tab context menu hit-test (consume the click entirely) ---
+                if let Some((_, _, tab_idx)) = self.tab_menu.take() {
+                    self.tab_menu_hover = None;
+                    let cx = self.cursor.0 as f32;
+                    let cy = self.cursor.1 as f32;
+                    let hit = self.tab_menu_rects.iter().position(|r| {
+                        cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h
+                    });
+                    // Map the hit through the labels snapshotted at open time
+                    // ("Detach" is present only when detaching was allowed).
+                    let label = hit.and_then(|i| self.tab_menu_labels.get(i).copied());
+                    self.tab_menu_labels.clear();
+                    self.tab_menu_rects.clear();
+                    if tab_idx < self.tabs.len() {
+                        match label {
+                            Some("Detach") => {
+                                // Same flow as Ctrl+Shift+D, for THAT tab.
+                                self.detach_tab(tab_idx, event_loop);
+                            }
+                            Some("Rename") => {
+                                // Same inline-rename flow as double-click.
+                                self.renaming = Some(tab_idx);
+                                self.rename_buf = self.tabs[tab_idx].title.clone();
+                            }
+                            Some("Close Tab") => {
+                                // Same confirm-close flow as the × / Ctrl+Shift+W.
+                                self.confirm_close = Some(tab_idx);
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Hit or not, the menu is closed — consume the click.
                     if let Some(win) = &self.window {
                         win.request_redraw();
                     }
@@ -4123,19 +4349,75 @@ impl ApplicationHandler<AppEvent> for App {
                 let cx = self.cursor.0 as f32;
                 let cy = self.cursor.1 as f32;
                 // A right-click on the tab bar must NOT open the terminal Copy/
-                // Paste menu (the strip has its own affordances).
+                // Paste menu (the strip has its own affordances): a right-click
+                // ON A TAB opens the tab context menu (Detach / Rename / Close
+                // Tab); empty strip space stays a no-op.
                 let bar_y = if let Some(gpu) = &self.gpu {
                     self.tabbar_y(gpu.config.height as f32)
                 } else {
                     0.0
                 };
                 if cy >= bar_y && cy < bar_y + TABBAR_H {
+                    let Some(gpu) = &self.gpu else { return };
+                    let (w, h) = (gpu.config.width, gpu.config.height);
+                    let theme = self.current_theme();
+                    // Rebuild the bar for hit-testing exactly like the left-press
+                    // handler (same tabs/rename/HUD inputs → identical rects).
+                    let tabs_meta: Vec<(String, bool)> = self
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| (t.title.clone(), i == self.active))
+                        .collect();
+                    let rename_ref = self.renaming.map(|i| (i, self.rename_buf.as_str()));
+                    let perf_ref = self.perf_label.as_deref();
+                    let mut bar = jetty_render::build_tab_bar_ex(
+                        w, &tabs_meta, &theme, rename_ref, jetty_render::CtrlHover::None, perf_ref, self.chrome_char_w(),
+                    );
+                    if bar_y != 0.0 {
+                        translate_bar_rects(&mut bar, bar_y);
+                    }
+                    if let Some(i) = bar
+                        .tab_rects
+                        .iter()
+                        .position(|r| input::point_in(r, cx, cy))
+                    {
+                        // Close the other overlays so the menu can't be orphaned
+                        // under them (mutually exclusive with the terminal menu).
+                        self.commit_rename();
+                        self.help_open = false;
+                        self.context_menu = None;
+                        self.menu_hover = None;
+                        self.tab_menu = Some((cx, cy, i));
+                        self.tab_menu_hover = None;
+                        self.tab_menu_labels = crate::detached::tab_menu_items(
+                            crate::detached::can_detach(self.tabs.len()),
+                        );
+                        // Cache the item hit-test rects once, same as context_menu.
+                        let items: Vec<(&str, &str)> = self
+                            .tab_menu_labels
+                            .iter()
+                            .map(|&l| (l, crate::detached::menu_hint(l)))
+                            .collect();
+                        let menu = jetty_render::build_menu(
+                            cx, cy, w, h, None, &theme, self.chrome_char_w(), &items, &[],
+                        );
+                        self.tab_menu_rects = menu.item_rects;
+                        if let Some(win) = &self.window {
+                            win.request_redraw();
+                        }
+                    }
                     return;
                 }
                 // Commit any in-progress rename and close the help overlay so the
-                // menu can't be orphaned under it.
+                // menu can't be orphaned under it. The tab menu is mutually
+                // exclusive with the terminal menu.
                 self.commit_rename();
                 self.help_open = false;
+                self.tab_menu = None;
+                self.tab_menu_hover = None;
+                self.tab_menu_rects.clear();
+                self.tab_menu_labels.clear();
                 self.context_menu = Some((cx, cy));
                 self.menu_hover = None;
                 // Cache the item hit-test rects once (anchor + size fixed for the
@@ -4547,10 +4829,16 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                     }
                     input::KeyAction::Send(bytes) => {
-                        // Escape closes the context menu (if open) before forwarding to PTY.
-                        if bytes == [0x1b] && self.context_menu.is_some() {
+                        // Escape closes an open context/tab menu before forwarding to PTY.
+                        if bytes == [0x1b]
+                            && (self.context_menu.is_some() || self.tab_menu.is_some())
+                        {
                             self.context_menu = None;
                             self.menu_hover = None;
+                            self.tab_menu = None;
+                            self.tab_menu_hover = None;
+                            self.tab_menu_rects.clear();
+                            self.tab_menu_labels.clear();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
@@ -4666,6 +4954,9 @@ impl ApplicationHandler<AppEvent> for App {
                 self.perf_label = perf_string.clone();
                 let context_menu = self.context_menu;
                 let menu_hover = self.menu_hover;
+                let tab_menu = self.tab_menu;
+                let tab_menu_hover = self.tab_menu_hover;
+                let tab_menu_labels = self.tab_menu_labels.clone();
                 let help_open = self.help_open;
                 let welcome_open = self.welcome_open;
                 let shift_hint_show = self
@@ -5025,6 +5316,28 @@ impl ApplicationHandler<AppEvent> for App {
                     // Draw the right-click context menu on top of everything.
                     if let Some((mx, my)) = context_menu {
                         let menu = jetty_render::build_context_menu(mx, my, width, height, menu_hover, &theme, chrome_char_w);
+                        quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &menu.quads);
+                        if !menu.labels.is_empty() {
+                            let _ = chrome_text.render_overlays(
+                                &gpu.device,
+                                &gpu.queue,
+                                scene_view,
+                                width,
+                                height,
+                                &menu.labels,
+                            );
+                        }
+                    }
+                    // Draw the TAB context menu (Detach / Rename / Close Tab) —
+                    // mutually exclusive with the terminal menu above.
+                    if let Some((mx, my, _)) = tab_menu {
+                        let items: Vec<(&str, &str)> = tab_menu_labels
+                            .iter()
+                            .map(|&l| (l, crate::detached::menu_hint(l)))
+                            .collect();
+                        let menu = jetty_render::build_menu(
+                            mx, my, width, height, tab_menu_hover, &theme, chrome_char_w, &items, &[],
+                        );
                         quad.render(&gpu.device, &gpu.queue, scene_view, width, height, &menu.quads);
                         if !menu.labels.is_empty() {
                             let _ = chrome_text.render_overlays(

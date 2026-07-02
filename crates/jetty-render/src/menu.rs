@@ -33,9 +33,13 @@ const ROW_H: f32 = 28.0;
 /// Extra vertical gap inserted between "Select All" (idx 2) and "Clear"
 /// (idx 3) to house the separator line.
 const SEP_GAP: f32 = 10.0;
-/// Total clickable items count (5).
+/// Total clickable items count of the STANDARD menu (5). The generic
+/// `build_menu` derives its count from the item list; this and `MENU_H` remain
+/// as the standard menu's reference values (asserted by the unit tests).
+#[allow(dead_code)]
 const N: usize = MENU_ITEMS.len();
-/// Menu content height: N rows × ROW_H + one separator gap.
+/// Standard menu content height: N rows × ROW_H + one separator gap.
+#[allow(dead_code)]
 const MENU_H: f32 = ROW_H * N as f32 + SEP_GAP;
 // 2px halo to match every other overlay (panel/help/confirm all use a 2px
 // border with a radius delta of 2 over the bg).
@@ -54,25 +58,22 @@ pub struct ContextMenu {
     pub item_rects: Vec<Rect>,
 }
 
-/// Row-top Y for item `i` in content-space (relative to `cy`), accounting for
-/// the separator gap that sits between items 2 and 3.
+/// Row-top Y for item `i` in content-space, accounting for the separator gaps
+/// that sit before each index in `sep_before`.
 #[inline]
-fn row_y(i: usize) -> f32 {
-    let gap = if i >= 3 { SEP_GAP } else { 0.0 };
-    i as f32 * ROW_H + gap
+fn row_y_in(i: usize, sep_before: &[usize]) -> f32 {
+    let gaps = sep_before.iter().filter(|&&s| s <= i && s > 0).count() as f32;
+    i as f32 * ROW_H + gaps * SEP_GAP
 }
 
-/// Build the right-click context menu anchored at `(x, y)` (physical pixels).
-///
-/// The menu is clamped so its right and bottom edges stay within the window.
-/// `hovered` is the index (0-based) of the item under the cursor, if any.
+/// Build the standard right-click context menu (Copy / Paste / Select All /
+/// Clear / Close Tab) anchored at `(x, y)` (physical pixels). A thin wrapper
+/// over the generic `build_menu` with `MENU_ITEMS`/`MENU_HINTS` and the visual
+/// separator before "Clear" (idx 3).
 ///
 /// `char_w` is the measured physical-pixel advance of one chrome-font character
 /// (from `TextLayer::cell_size().0`). Pass `9.8` when a real measurement is not
-/// available (scale-1 fallback used by tests). The shortcut-hint glyphs (⇧ ⌃)
-/// are wider than ASCII; the hint width is computed as `char_w * 1.25` to
-/// account for this — at scale 1 this gives ≈ 12.25 px/glyph, matching the
-/// previous hardcoded 12.0 estimate.
+/// available (scale-1 fallback used by tests).
 pub fn build_context_menu(
     x: f32,
     y: f32,
@@ -82,8 +83,45 @@ pub fn build_context_menu(
     theme: &jetty_core::Theme,
     char_w: f32,
 ) -> ContextMenu {
+    let items: Vec<(&str, &str)> = MENU_ITEMS
+        .iter()
+        .copied()
+        .zip(MENU_HINTS.iter().copied())
+        .collect();
+    build_menu(x, y, win_w, win_h, hovered, theme, char_w, &items, &[3])
+}
+
+/// Build a context menu from an arbitrary `(label, hint)` item list anchored at
+/// `(x, y)` (physical pixels) — the generic builder behind `build_context_menu`,
+/// also used for the tab context menu (Detach / Rename / Close Tab) and the
+/// detached-window menu (Reattach / Copy / Paste).
+///
+/// The menu is clamped so its right and bottom edges stay within the window.
+/// `hovered` is the index (0-based) of the item under the cursor, if any.
+/// `sep_before` lists item indices that get a thin separator line (in a
+/// `SEP_GAP` dead zone) drawn ABOVE them; pass `&[]` for no separators.
+///
+/// `char_w` is the measured chrome-font advance (see `build_context_menu`).
+/// The shortcut-hint glyphs (⇧ ⌃) are wider than ASCII; the hint width is
+/// computed as `char_w * 1.25` to account for this — at scale 1 this gives
+/// ≈ 12.25 px/glyph, matching the previous hardcoded 12.0 estimate.
+#[allow(clippy::too_many_arguments)]
+pub fn build_menu(
+    x: f32,
+    y: f32,
+    win_w: u32,
+    win_h: u32,
+    hovered: Option<usize>,
+    theme: &jetty_core::Theme,
+    char_w: f32,
+    items: &[(&str, &str)],
+    sep_before: &[usize],
+) -> ContextMenu {
     let sw = win_w as f32;
     let sh = win_h as f32;
+    let n_items = items.len();
+    let n_seps = sep_before.iter().filter(|&&s| s > 0 && s < n_items).count();
+    let menu_h = ROW_H * n_items as f32 + SEP_GAP * n_seps as f32;
 
     // --- Theme-derived menu colors (mirrors panel.rs::build_panel) ---
     let tbg = theme.bg;
@@ -113,7 +151,7 @@ pub fn build_context_menu(
 
     // Clamp so the full menu (plus border) stays on-screen.
     let total_w = MENU_W + BORDER * 2.0;
-    let total_h = MENU_H + BORDER * 2.0;
+    let total_h = menu_h + BORDER * 2.0;
     let mx = x.min(sw - total_w).max(0.0);
     let my = y.min(sh - total_h).max(0.0);
 
@@ -122,13 +160,13 @@ pub fn build_context_menu(
     let cy = my + BORDER;
 
     // Build item rects (also serve as hit-test rects).
-    // Each rect sits at its visual row position; the separator gap between
-    // items 2 and 3 is dead space — not a hit rect.
-    let mut item_rects: Vec<Rect> = Vec::with_capacity(N);
-    for i in 0..N {
+    // Each rect sits at its visual row position; separator gaps are dead
+    // space — not hit rects.
+    let mut item_rects: Vec<Rect> = Vec::with_capacity(n_items);
+    for i in 0..n_items {
         item_rects.push(Rect {
             x: cx,
-            y: cy + row_y(i),
+            y: cy + row_y_in(i, sep_before),
             w: MENU_W,
             h: ROW_H,
             color: row_bg,
@@ -143,17 +181,17 @@ pub fn build_context_menu(
     quads.push(Rect::rounded(mx, my, total_w, total_h, border_col, 8.0));
 
     // Background panel (rounded; hover rows stay sharp inside).
-    quads.push(Rect::rounded(cx, cy, MENU_W, MENU_H, menu_bg, 6.0));
+    quads.push(Rect::rounded(cx, cy, MENU_W, menu_h, menu_bg, 6.0));
 
     // Hover highlight quad (drawn on top of background, under labels). The top
     // and bottom rows get the bg's corner radius so the highlight doesn't square
     // off the rounded card corners; interior rows stay sharp.
     if let Some(idx) = hovered {
-        if idx < N {
-            let radius = if idx == 0 || idx == N - 1 { 6.0 } else { 0.0 };
+        if idx < n_items {
+            let radius = if idx == 0 || idx == n_items - 1 { 6.0 } else { 0.0 };
             quads.push(Rect {
                 x: cx,
-                y: cy + row_y(idx),
+                y: cy + row_y_in(idx, sep_before),
                 w: MENU_W,
                 h: ROW_H,
                 color: hover_col,
@@ -162,10 +200,10 @@ pub fn build_context_menu(
         }
     }
 
-    // Separator line: a thin (1px) dim quad in the middle of the SEP_GAP,
+    // Separator lines: a thin (1px) dim quad in the middle of each SEP_GAP,
     // inset by 10px on each side so it doesn't butt against the rounded corners.
-    {
-        let sep_y = cy + row_y(2) + ROW_H + (SEP_GAP - 1.0) * 0.5;
+    for &s in sep_before.iter().filter(|&&s| s > 0 && s < n_items) {
+        let sep_y = cy + row_y_in(s, sep_before) - SEP_GAP + (SEP_GAP - 1.0) * 0.5;
         quads.push(Rect {
             x: cx + 10.0,
             y: sep_y,
@@ -178,11 +216,10 @@ pub fn build_context_menu(
 
     // Labels: item name (left-aligned) + shortcut hint (right-aligned, dim).
     let mut labels: Vec<(String, f32, f32, [u8; 3])> = Vec::new();
-    for (i, &name) in MENU_ITEMS.iter().enumerate() {
-        let label_y = cy + row_y(i) + 7.0; // 7px from row top — matches original
+    for (i, &(name, hint)) in items.iter().enumerate() {
+        let label_y = cy + row_y_in(i, sep_before) + 7.0; // 7px from row top — matches original
         labels.push((name.to_string(), cx + 10.0, label_y, text_col));
 
-        let hint = MENU_HINTS[i];
         if !hint.is_empty() {
             // Right-align the shortcut hint. Unicode glyph hints (⇧ ⌃) render
             // wider than plain ASCII; use char_w * 1.25 so the reservation
@@ -320,6 +357,62 @@ mod tests {
             click_x >= r.x && click_x < r.x + r.w && click_y >= r.y && click_y < r.y + r.h
         });
         assert!(!hit, "click in separator gap (y={click_y}) should hit no item_rect");
+    }
+
+    #[test]
+    fn generic_menu_one_rect_per_item_no_separator() {
+        // The generic builder (used by the tab / detached context menus) emits
+        // exactly one hit-rect per item, adjacent when no separator is passed.
+        let items = [("Detach", "⇧⌃D"), ("Rename", ""), ("Close Tab", "⇧⌃W")];
+        let menu = build_menu(50.0, 50.0, 1280, 800, None, &theme(), TEST_CHAR_W, &items, &[]);
+        assert_eq!(menu.item_rects.len(), 3);
+        for pair in menu.item_rects.windows(2) {
+            assert_eq!(
+                pair[0].y + pair[0].h,
+                pair[1].y,
+                "rows must be adjacent without a separator"
+            );
+        }
+        let texts: Vec<&str> = menu.labels.iter().map(|(t, ..)| t.as_str()).collect();
+        for (label, _) in items.iter() {
+            assert!(texts.contains(label), "item {label:?} missing from labels");
+        }
+        assert!(texts.contains(&"⇧⌃D"), "hint missing from labels");
+    }
+
+    #[test]
+    fn generic_menu_hover_aligns_and_stays_on_screen() {
+        let items = [("Reattach", "⇧⌃D"), ("Copy", "⇧⌃C"), ("Paste", "⇧⌃V")];
+        for hovered in 0..items.len() {
+            let menu = build_menu(
+                790.0, 590.0, 800, 600, Some(hovered), &theme(), TEST_CHAR_W, &items, &[],
+            );
+            // Quad order without separators: [0] border, [1] bg, [2] hover.
+            let hover_quad = &menu.quads[2];
+            assert_eq!(hover_quad.y, menu.item_rects[hovered].y);
+            // Clamped fully on-screen even when anchored at the corner.
+            let outer = &menu.quads[0];
+            assert!(outer.x >= 0.0 && outer.y >= 0.0);
+            assert!(outer.x + MENU_W + BORDER * 2.0 <= 800.0 + 1.0);
+        }
+    }
+
+    #[test]
+    fn legacy_menu_matches_generic_with_separator_at_3() {
+        // build_context_menu is now a wrapper over build_menu; pin that the
+        // separator layout (gap before item 3) is preserved exactly.
+        let legacy = build_context_menu(100.0, 100.0, 1280, 800, Some(4), &theme(), TEST_CHAR_W);
+        let items: Vec<(&str, &str)> = MENU_ITEMS
+            .iter()
+            .copied()
+            .zip(MENU_HINTS.iter().copied())
+            .collect();
+        let generic = build_menu(100.0, 100.0, 1280, 800, Some(4), &theme(), TEST_CHAR_W, &items, &[3]);
+        assert_eq!(legacy.item_rects.len(), generic.item_rects.len());
+        for (a, b) in legacy.item_rects.iter().zip(&generic.item_rects) {
+            assert_eq!(a.y, b.y);
+        }
+        assert_eq!(legacy.quads.len(), generic.quads.len());
     }
 
     #[test]

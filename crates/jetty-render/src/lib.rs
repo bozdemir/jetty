@@ -26,7 +26,7 @@ pub use liquid::LiquidDrop;
 pub use focus::FocusPull;
 pub use crt::{Crt, CrtUniform, CRT_FLAG_ROLL, CRT_FLAG_FLICKER, CRT_FLAG_JITTER};
 pub use caret_fx::{CaretFx, CaretFxUniform};
-pub use menu::{build_context_menu, ContextMenu};
+pub use menu::{build_context_menu, build_menu, ContextMenu};
 pub use help::{build_help_overlay, HelpOverlay, HELP_ROWS};
 pub use confirm::{build_confirm, build_confirm_close, ConfirmPopup};
 pub use tabbar::{

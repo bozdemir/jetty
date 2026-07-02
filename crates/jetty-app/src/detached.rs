@@ -47,6 +47,31 @@ pub(crate) fn grid_dims(
     (cols, rows)
 }
 
+/// Items of the MAIN window's tab context menu (right-click on a tab).
+/// "Detach" is present only while detaching is allowed (≥ 2 tabs).
+pub fn tab_menu_items(can_detach: bool) -> Vec<&'static str> {
+    if can_detach {
+        vec!["Detach", "Rename", "Close Tab"]
+    } else {
+        vec!["Rename", "Close Tab"]
+    }
+}
+
+/// Items of a DETACHED window's context menu (right-click anywhere).
+pub const DETACHED_MENU_ITEMS: [&str; 3] = ["Reattach", "Copy", "Paste"];
+
+/// Right-aligned keyboard-shortcut hint for a menu label (same symbols as
+/// `menu::MENU_HINTS`; blank when the action has no binding).
+pub fn menu_hint(label: &str) -> &'static str {
+    match label {
+        "Detach" | "Reattach" => "⇧⌃D",
+        "Copy" => "⇧⌃C",
+        "Paste" => "⇧⌃V",
+        "Close Tab" => "⇧⌃W",
+        _ => "",
+    }
+}
+
 /// True if `last_focused` is one of the live detached-window ids, i.e. focus
 /// moved from the main window into one of the app's OWN detached windows. The
 /// main window's Yakuake-style auto-hide must be suppressed in that case (the
@@ -101,6 +126,13 @@ pub(crate) struct DetachedWindow {
     /// Cached resize-edge zone so `set_cursor` fires only on zone changes
     /// (mirrors `App::resize_cursor` for the borderless main window).
     pub resize_zone: crate::app::ResizeZone,
+    /// When `Some`, this window's context menu (Reattach / Copy / Paste) is open
+    /// at this physical-pixel anchor.
+    pub menu_open: Option<(f32, f32)>,
+    /// Cached hit-test rects for the open context menu (built once on open).
+    pub menu_rects: Vec<jetty_render::Rect>,
+    /// Menu item currently under the cursor (hover highlight).
+    pub menu_hover: Option<usize>,
     /// Whether the cursor is over the close ✕ (drives the red hover highlight).
     pub close_hover: bool,
     /// Time + position of the last left press on the top bar, for the
@@ -200,6 +232,9 @@ impl DetachedWindow {
             cursor: (0.0, 0.0),
             bar_drag: None,
             resize_zone: crate::app::ResizeZone::None,
+            menu_open: None,
+            menu_rects: Vec::new(),
+            menu_hover: None,
             close_hover: false,
             last_bar_click: None,
         }
@@ -256,6 +291,29 @@ mod tests {
     #[test]
     fn detached_grid_dims_zero_cell_falls_back_to_default() {
         assert_eq!(grid_dims(800.0, 600.0, 0.0, 0.0, 14.0, 36.0, 22.0), (80, 24));
+    }
+
+    // ── context-menu item lists ─────────────────────────────────────────────
+
+    #[test]
+    fn tab_menu_hides_detach_at_one_tab() {
+        assert_eq!(tab_menu_items(can_detach(2)), vec!["Detach", "Rename", "Close Tab"]);
+        assert_eq!(tab_menu_items(can_detach(1)), vec!["Rename", "Close Tab"]);
+    }
+
+    #[test]
+    fn detached_menu_is_reattach_copy_paste() {
+        assert_eq!(DETACHED_MENU_ITEMS, ["Reattach", "Copy", "Paste"]);
+    }
+
+    #[test]
+    fn menu_hints_match_key_bindings() {
+        assert_eq!(menu_hint("Detach"), "⇧⌃D");
+        assert_eq!(menu_hint("Reattach"), "⇧⌃D");
+        assert_eq!(menu_hint("Copy"), "⇧⌃C");
+        assert_eq!(menu_hint("Paste"), "⇧⌃V");
+        assert_eq!(menu_hint("Close Tab"), "⇧⌃W");
+        assert_eq!(menu_hint("Rename"), "");
     }
 
     #[test]
