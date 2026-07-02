@@ -1,7 +1,7 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 pub struct PtySession {
@@ -10,6 +10,41 @@ pub struct PtySession {
     exited: Arc<AtomicBool>,
     /// The shell child. `Option` so `Drop` can move it to a reaper thread.
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// Feeds the dedicated WRITER thread (see `writer()`): the UI thread sends
+    /// byte buffers here and the thread — which owns the blocking Write half —
+    /// performs the actual fd writes. Kept on the session so `writer()` can be
+    /// called any number of times; the thread exits (dropping the Write half)
+    /// once every sender clone is gone or a write fails (child exited → EIO).
+    write_tx: Sender<Vec<u8>>,
+}
+
+/// `Write` adapter handed to the app: forwards buffers to the PTY writer
+/// thread over an unbounded channel, so a caller on the UI thread NEVER blocks
+/// on a full kernel PTY buffer (e.g. pasting into a program that doesn't read
+/// stdin used to freeze the whole event loop inside `write_all`). Per-session
+/// write ordering is preserved: one channel, one consumer thread. `flush()` is
+/// a no-op — the writer thread flushes after every chunk.
+struct ChannelWriter {
+    tx: Sender<Vec<u8>>,
+}
+
+impl Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.tx.send(buf.to_vec()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "pty writer thread closed",
+            )
+        })?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Drop for PtySession {
@@ -124,6 +159,28 @@ impl PtySession {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         drop(pair.slave);
 
+        // Dedicated WRITER thread (mirrors the reader thread below): it owns
+        // the blocking Write half of the master; the UI thread only ever sends
+        // buffers over the unbounded channel, so a full kernel PTY input buffer
+        // (a big paste into `sleep 300`) can no longer freeze the winit event
+        // loop — the blocking write_all happens here instead. Ordering is
+        // preserved (single channel → single consumer). The loop ends when all
+        // senders drop (session + writers gone) or a write errors (child
+        // exited → EIO); either way the Write half drops and closes cleanly.
+        let mut pty_writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let (write_tx, write_rx) = channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            while let Ok(chunk) = write_rx.recv() {
+                if pty_writer.write_all(&chunk).is_err() {
+                    break;
+                }
+                let _ = pty_writer.flush();
+            }
+        });
+
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -162,6 +219,7 @@ impl PtySession {
             rx,
             exited,
             child: Some(child),
+            write_tx,
         })
     }
 
@@ -176,13 +234,16 @@ impl PtySession {
         self.exited.load(Ordering::SeqCst)
     }
 
-    /// Returns a writer for the PTY master (send keystrokes to the shell).
+    /// Returns a writer for the PTY (send keystrokes to the shell).
     ///
-    /// # Panics
-    /// `take_writer()` is one-shot: this may only be called ONCE per `PtySession`.
-    /// A second call panics.
+    /// The returned writer NEVER blocks the caller: bytes are queued to the
+    /// session's dedicated writer thread (which owns the blocking fd), so the
+    /// UI/event-loop thread can't be frozen by a full kernel PTY buffer.
+    /// Ordering across all writers of one session is preserved. `flush()` is a
+    /// no-op (the writer thread flushes each chunk). May be called any number
+    /// of times.
     pub fn writer(&self) -> Box<dyn Write + Send> {
-        self.master.lock().unwrap().take_writer().expect("writer() can only be called once per PtySession")
+        Box::new(ChannelWriter { tx: self.write_tx.clone() })
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -192,5 +253,72 @@ impl PtySession {
             pixel_width: 0,
             pixel_height: 0,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_writer_preserves_order() {
+        // The bracketed-paste triple (prefix, payload, suffix) must arrive at
+        // the writer thread in exactly the order it was written.
+        let (tx, rx) = channel::<Vec<u8>>();
+        let mut w = ChannelWriter { tx };
+        w.write_all(b"\x1b[200~").unwrap();
+        w.write_all(b"hello").unwrap();
+        w.write_all(b"\x1b[201~").unwrap();
+        w.flush().unwrap();
+        let got: Vec<Vec<u8>> = rx.try_iter().collect();
+        assert_eq!(
+            got,
+            vec![b"\x1b[200~".to_vec(), b"hello".to_vec(), b"\x1b[201~".to_vec()],
+        );
+    }
+
+    #[test]
+    fn channel_writer_accepts_large_writes_without_blocking() {
+        // The unbounded channel queues arbitrarily large pastes even when
+        // nothing consumes them yet (the C14 freeze scenario): write returns
+        // immediately with the full length.
+        let (tx, rx) = channel::<Vec<u8>>();
+        let mut w = ChannelWriter { tx };
+        let big = vec![b'x'; 1 << 20]; // 1 MiB, far beyond the ~64KB kernel buffer
+        assert_eq!(w.write(&big).unwrap(), big.len());
+        assert_eq!(rx.try_recv().unwrap().len(), 1 << 20);
+    }
+
+    #[test]
+    fn channel_writer_errors_after_writer_thread_exit() {
+        // Once the consuming side is gone (writer thread exited), writes fail
+        // with BrokenPipe instead of panicking or silently vanishing.
+        let (tx, rx) = channel::<Vec<u8>>();
+        drop(rx);
+        let mut w = ChannelWriter { tx };
+        let err = w.write_all(b"x").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn channel_writer_empty_write_sends_nothing() {
+        let (tx, rx) = channel::<Vec<u8>>();
+        let mut w = ChannelWriter { tx };
+        assert_eq!(w.write(b"").unwrap(), 0);
+        assert!(rx.try_recv().is_err(), "no message for a zero-length write");
+    }
+
+    #[test]
+    fn multiple_writers_share_one_queue() {
+        // writer() may now be called more than once; all clones feed the same
+        // ordered queue (per-session ordering is what the terminal relies on).
+        let (tx, rx) = channel::<Vec<u8>>();
+        let mut a = ChannelWriter { tx: tx.clone() };
+        let mut b = ChannelWriter { tx };
+        a.write_all(b"1").unwrap();
+        b.write_all(b"2").unwrap();
+        a.write_all(b"3").unwrap();
+        let got: Vec<Vec<u8>> = rx.try_iter().collect();
+        assert_eq!(got, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
     }
 }
