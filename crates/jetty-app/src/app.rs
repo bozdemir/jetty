@@ -443,6 +443,11 @@ pub struct App {
     /// press was forwarded to the app). On release, if the cursor moved, the user
     /// was likely trying to select — surface the Shift+drag hint. `take`n on release.
     mouse_grab_press: Option<(f64, f64)>,
+    /// Fractional wheel-scroll accumulator for the main window: slow touchpad
+    /// deltas (sub-line PixelDelta/LineDelta) accumulate across events instead
+    /// of being rounded to 0 and dropped. Reset on tab switch so one tab's
+    /// remainder never bleeds into another.
+    scroll_accum: input::ScrollAccumulator,
     /// While `Some(t)` and `now < t`, the "Hold Shift to select" toast is drawn.
     shift_hint_until: Option<std::time::Instant>,
     /// Throttle: the toast won't re-arm until `now` passes this instant.
@@ -793,6 +798,7 @@ impl App {
             modifiers: winit::keyboard::ModifiersState::empty(),
             cursor: (0.0, 0.0),
             mouse_grab_press: None,
+            scroll_accum: input::ScrollAccumulator::new(),
             shift_hint_until: None,
             shift_hint_cooldown: None,
             dragging_scrollbar: false,
@@ -1336,6 +1342,8 @@ impl App {
         };
         // A pending text selection belongs to the previous tab's grid; reset it.
         self.selecting = false;
+        // Same for any fractional wheel remainder (it was that tab's scroll).
+        self.scroll_accum.reset();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1373,6 +1381,8 @@ impl App {
         self.active = n.min(self.tabs.len() - 1);
         // A pending text selection belongs to the previous tab's grid; reset it.
         self.selecting = false;
+        // Same for any fractional wheel remainder (it was that tab's scroll).
+        self.scroll_accum.reset();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1542,19 +1552,31 @@ impl App {
     }
 
     /// Convert the current cursor pixel position into 1-based terminal cell
-    /// coordinates `(col, row)` using the renderer's cell size. Returns `None`
-    /// when the renderer (and thus cell metrics) is not yet available.
+    /// coordinates `(col, row)` using the renderer's cell size, CLAMPED to the
+    /// active grid (`1..=cols`, `1..=rows`) — a click in the scrollbar gutter
+    /// or the status strip must never put out-of-range coordinates into a
+    /// mouse report (xterm clamps to the grid edge; apps hit-testing panes get
+    /// confused otherwise). Returns `None` when the renderer (and thus cell
+    /// metrics) is not yet available or no tab exists.
     fn cursor_cell(&self) -> Option<(usize, usize)> {
+        if self.tabs.is_empty() {
+            return None;
+        }
         let (cell_w, cell_h) = self.text.as_ref()?.cell_size();
         if cell_w <= 0.0 || cell_h <= 0.0 {
             return None;
         }
-        let col = (self.cursor.0 as f32 / cell_w).floor() as i64 + 1;
         // Subtract the grid's pixel origin before dividing (0 when the bar is at
         // the bottom, TABBAR_H when at the top).
-        let y = (self.cursor.1 as f32 - self.grid_top_offset()).max(0.0);
-        let row = (y / cell_h).floor() as i64 + 1;
-        Some((col.max(1) as usize, row.max(1) as usize))
+        let y = self.cursor.1 as f32 - self.grid_top_offset();
+        Some(input::cell_at_clamped(
+            self.cursor.0 as f32,
+            y,
+            cell_w,
+            cell_h,
+            self.active_tab().terminal.cols(),
+            self.active_tab().terminal.rows(),
+        ))
     }
 
     /// Convert the current cursor pixel position into 0-based viewport cell
@@ -4792,12 +4814,23 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
 
-                // Forward a release report only when the app enabled mouse mode
-                // and this release did not terminate a host-widget drag. We do
-                // not re-check widget hit-testing here: the matching press was
-                // only forwarded when it landed in the terminal area (action ==
-                // None), so a non-drag release pairs with that forwarded press.
-                if !was_dragging && !was_selecting && self.active_tab().terminal.mouse_mode() {
+                // The press marker is set ONLY when the matching press was
+                // actually forwarded to the app (terminal-area hit, mouse mode
+                // on). Take it unconditionally so it never goes stale.
+                let grab_press = self.mouse_grab_press.take();
+
+                // Forward a release report only when the app enabled mouse mode,
+                // this release did not terminate a host-widget drag, AND the
+                // matching press WAS forwarded (grab_press). Presses consumed by
+                // chrome — tab titles, +/help/gear buttons, popups, menu
+                // dismissals — early-return before forwarding, and an unmatched
+                // release would register as a phantom click in apps that act on
+                // button-up (X10 mode even encodes it as button 3).
+                if !was_dragging
+                    && !was_selecting
+                    && grab_press.is_some()
+                    && self.active_tab().terminal.mouse_mode()
+                {
                     self.send_mouse_report(input::MouseEvent::LeftRelease);
                 }
 
@@ -4805,7 +4838,7 @@ impl ApplicationHandler<AppEvent> for App {
                 // (press recorded, cursor moved > a few px), the user was likely
                 // trying to select — they just don't know Shift is needed. Surface
                 // a brief, throttled toast telling them how.
-                if let Some((px, py)) = self.mouse_grab_press.take() {
+                if let Some((px, py)) = grab_press {
                     let moved = ((self.cursor.0 - px).powi(2) + (self.cursor.1 - py).powi(2)).sqrt();
                     let now = std::time::Instant::now();
                     let off_cooldown = self.shift_hint_cooldown.map_or(true, |t| now >= t);
@@ -4826,14 +4859,20 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Positive y = wheel up = scroll into history (older output).
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => (y.round() as i32) * 3,
+                // Deltas are ACCUMULATED (fractionally) across events: slow
+                // touchpad scrolling arrives as many sub-line deltas that a
+                // per-event round() discarded entirely — the accumulator emits
+                // whole lines and carries the remainder, so gentle scrolls move
+                // both the scrollback and mouse-mode apps.
+                let delta_lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y * 3.0,
                     MouseScrollDelta::PixelDelta(p) => {
                         // Approximate cell height; use 20.0 as a reasonable default.
                         const CELL_H: f64 = 20.0;
-                        (p.y / CELL_H).round() as i32
+                        (p.y / CELL_H) as f32
                     }
                 };
+                let lines = self.scroll_accum.add(delta_lines);
                 if lines != 0 {
                     // When the app enabled mouse reporting, forward wheel events
                     // as SGR button 64 (up) / 65 (down) — but only over the

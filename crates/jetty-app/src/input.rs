@@ -769,6 +769,66 @@ pub fn key_to_bytes(key: &Key) -> Option<Vec<u8>> {
     }
 }
 
+/// Accumulates fractional scroll deltas (in LINES) across wheel events.
+///
+/// Slow two-finger touchpad scrolling arrives as many sub-line deltas
+/// (PixelDelta of a few px, or fractional LineDelta); rounding each event
+/// independently discards them all and gentle scrolling moves nothing. This
+/// accumulator carries the fraction across events: `add` returns the whole
+/// lines to scroll NOW (truncated toward zero) and keeps the remainder.
+#[derive(Debug, Default)]
+pub struct ScrollAccumulator {
+    acc: f32,
+}
+
+impl ScrollAccumulator {
+    pub fn new() -> Self {
+        Self { acc: 0.0 }
+    }
+
+    /// Feed a (possibly fractional) line delta; returns the whole lines to
+    /// emit now. The fractional remainder is retained for the next event, so a
+    /// stream of +0.3 deltas emits a line every ~4 events instead of never.
+    /// Non-finite deltas are ignored defensively.
+    pub fn add(&mut self, delta_lines: f32) -> i32 {
+        if !delta_lines.is_finite() {
+            return 0;
+        }
+        self.acc += delta_lines;
+        let whole = self.acc.trunc();
+        self.acc -= whole;
+        whole as i32
+    }
+
+    /// Drop any accumulated remainder (called on tab switch so one tab's
+    /// leftover fraction never bleeds into another tab's scroll).
+    pub fn reset(&mut self) {
+        self.acc = 0.0;
+    }
+}
+
+/// Convert a pixel position to 1-based terminal cell coordinates, CLAMPED to
+/// the grid (`1..=cols`, `1..=rows`). `y` is grid-relative (the caller
+/// subtracts the tab-bar origin). Clicks in the scrollbar gutter right of the
+/// last column or in the status strip below the grid previously produced
+/// out-of-range coordinates (cols+1, rows+1) that xterm would clamp — mouse
+/// reports must never carry coordinates outside the grid.
+pub fn cell_at_clamped(
+    x: f32,
+    y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    cols: usize,
+    rows: usize,
+) -> (usize, usize) {
+    let col = (x / cell_w).floor() as i64 + 1;
+    let row = (y / cell_h).floor() as i64 + 1;
+    (
+        col.clamp(1, cols.max(1) as i64) as usize,
+        row.clamp(1, rows.max(1) as i64) as usize,
+    )
+}
+
 /// Dead-key / compose fallback for the plain printable-send path.
 ///
 /// When a dead-key sequence composes (e.g. `'` then `e` on US-International),
@@ -1191,6 +1251,79 @@ mod tests {
             );
             assert_eq!(action, KeyAction::Send(bytes.to_vec()));
         }
+    }
+
+    // ── Scroll accumulator (C7) ─────────────────────────────────────────────
+
+    #[test]
+    fn scroll_accumulator_carries_fractions() {
+        // Four +0.3 deltas: nothing, nothing, nothing, then one line (1.2 total).
+        let mut a = ScrollAccumulator::new();
+        assert_eq!(a.add(0.3), 0);
+        assert_eq!(a.add(0.3), 0);
+        assert_eq!(a.add(0.3), 0);
+        assert_eq!(a.add(0.3), 1);
+        // The remainder (0.2) is kept: +0.8 more completes the next line.
+        assert_eq!(a.add(0.8), 1);
+    }
+
+    #[test]
+    fn scroll_accumulator_is_sign_symmetric() {
+        let mut a = ScrollAccumulator::new();
+        assert_eq!(a.add(-0.6), 0);
+        assert_eq!(a.add(-0.6), -1);
+        // Remainder is ~-0.2; a +0.2 delta cancels it (no phantom line).
+        assert_eq!(a.add(0.2), 0);
+        assert_eq!(a.add(1.5), 1);
+    }
+
+    #[test]
+    fn scroll_accumulator_emits_whole_lines_immediately() {
+        let mut a = ScrollAccumulator::new();
+        // A fast flick (3 notches × 3 lines) is emitted at once, undamped.
+        assert_eq!(a.add(9.0), 9);
+        assert_eq!(a.add(-3.0), -3);
+    }
+
+    #[test]
+    fn scroll_accumulator_reset_drops_remainder() {
+        let mut a = ScrollAccumulator::new();
+        assert_eq!(a.add(0.9), 0);
+        a.reset();
+        assert_eq!(a.add(0.2), 0, "remainder must not survive a reset");
+    }
+
+    #[test]
+    fn scroll_accumulator_ignores_non_finite() {
+        let mut a = ScrollAccumulator::new();
+        assert_eq!(a.add(f32::NAN), 0);
+        assert_eq!(a.add(f32::INFINITY), 0);
+        assert_eq!(a.add(1.0), 1, "accumulator must stay usable after NaN");
+    }
+
+    // ── Clamped cell coordinates for mouse reports (C8) ─────────────────────
+
+    #[test]
+    fn cell_at_clamped_interior() {
+        // 10px cells: (25, 35) → col 3, row 4 (1-based).
+        assert_eq!(cell_at_clamped(25.0, 35.0, 10.0, 10.0, 80, 24), (3, 4));
+    }
+
+    #[test]
+    fn cell_at_clamped_gutter_clamps_to_last_column() {
+        // A click in the scrollbar gutter right of the last column must clamp
+        // to the last column, never report cols+1.
+        assert_eq!(cell_at_clamped(805.0, 35.0, 10.0, 10.0, 80, 24), (80, 4));
+    }
+
+    #[test]
+    fn cell_at_clamped_status_strip_clamps_to_last_row() {
+        assert_eq!(cell_at_clamped(25.0, 500.0, 10.0, 10.0, 80, 24), (3, 24));
+    }
+
+    #[test]
+    fn cell_at_clamped_negative_clamps_to_one() {
+        assert_eq!(cell_at_clamped(-5.0, -5.0, 10.0, 10.0, 80, 24), (1, 1));
     }
 
     // ── Dead-key composed text override (C3) ────────────────────────────────
